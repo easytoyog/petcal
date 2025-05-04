@@ -1,0 +1,467 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:http/http.dart' as http;
+import 'dart:convert';
+import 'package:location/location.dart' as loc;
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:geocoding/geocoding.dart';
+import 'package:pet_calendar/models/database_models.dart';
+import 'package:pet_calendar/models/park_model.dart';
+import 'package:pet_calendar/services/LocationService.dart';
+
+class ProfileScreen extends StatefulWidget {
+  const ProfileScreen({Key? key}) : super(key: key);
+
+  @override
+  _ProfileScreenState createState() => _ProfileScreenState();
+}
+
+class _ProfileScreenState extends State<ProfileScreen> {
+  int _selectedIndex = 0;
+  GoogleMapController? _mapController;
+
+  final loc.Location _location = loc.Location();
+  final LocationService _locationService = LocationService(
+    dotenv.env['GOOGLE_MAPS_API_KEY'] ?? '',
+  );
+
+  // We'll store the *final* map position here once we have it
+  LatLng? _finalPosition;
+
+  String _userName = '';
+  Set<Marker> _markers = {};
+
+  bool _isLocationLoading = true; // We'll show a loader until we have a position
+
+  @override
+  void initState() {
+    super.initState();
+    _fetchUserNameFromDatabase();
+    _initLocationFlow();
+    _locationService.enableBackgroundLocation(); // Enable background location
+    _listenToParkUpdates(); // Real-time updates to park marker user counts
+  }
+
+  @override
+  void dispose() {
+    _mapController?.dispose();
+    super.dispose();
+  }
+
+  Future<void> _fetchUserNameFromDatabase() async {
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user != null) {
+        final uid = user.uid;
+        final doc = await FirebaseFirestore.instance.collection('owners').doc(uid).get();
+        if (doc.exists) {
+          setState(() {
+            _userName = doc.data()?['firstName'] ?? 'User';
+          });
+        }
+      }
+    } catch (e) {
+      print("Error fetching user name: $e");
+    }
+  }
+
+  /// Core method to figure out the final position:
+  /// 1) Try user location
+  /// 2) If that fails, try owner address
+  /// 3) If that fails, use default (North York).
+  Future<void> _initLocationFlow() async {
+    try {
+      // Check permission & get user location
+      final userLocation = await _getUserLocation();
+      if (userLocation != null) {
+        _finalPosition = LatLng(userLocation.latitude!, userLocation.longitude!);
+      } else {
+        // If user location not available, fall back to user address
+        _finalPosition = await _getLocationFromUserAddress();
+      }
+
+      // If still null, use a default coordinate
+      _finalPosition ??= const LatLng(43.7615, -79.4111);
+
+      // Now that we have a final position, fetch nearby parks
+      await _fetchNearbyParks(_finalPosition!.latitude, _finalPosition!.longitude);
+
+      // Check for park check-in
+      final park = await _locationService.findNearbyPark(
+        _finalPosition!.latitude,
+        _finalPosition!.longitude,
+      );
+      if (park != null && mounted) {
+        _showCheckInDialog(park);
+      }
+    } catch (e) {
+      print("Error in _initLocationFlow: $e");
+      // If anything goes wrong, fall back to default
+      _finalPosition ??= const LatLng(43.7615, -79.4111);
+    }
+
+    // End of flow: we have our final position
+    setState(() {
+      _isLocationLoading = false;
+    });
+  }
+
+  /// Attempts to get user location with permission checks.
+  /// Returns `null` if not available or user denies permission.
+  Future<loc.LocationData?> _getUserLocation() async {
+    bool serviceEnabled = await _location.serviceEnabled();
+    if (!serviceEnabled) {
+      serviceEnabled = await _location.requestService();
+      if (!serviceEnabled) return null;
+    }
+
+    loc.PermissionStatus permissionGranted = await _location.hasPermission();
+    if (permissionGranted == loc.PermissionStatus.denied) {
+      permissionGranted = await _location.requestPermission();
+      if (permissionGranted != loc.PermissionStatus.granted) return null;
+    }
+
+    return await _location.getLocation();
+  }
+
+  /// If the user location is not available, try owner's address from Firestore.
+  /// Returns `null` if no address is found or geocoding fails.
+  Future<LatLng?> _getLocationFromUserAddress() async {
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user != null) {
+        final uid = user.uid;
+        final doc = await FirebaseFirestore.instance.collection('owners').doc(uid).get();
+        if (doc.exists) {
+          final address = doc.data()?['address'] ?? {};
+          if (address['street'] != null &&
+              address['city'] != null &&
+              address['state'] != null &&
+              address['country'] != null) {
+            final fullAddress =
+                '${address['street']}, ${address['city']}, ${address['state']}, ${address['country']}';
+            final locations = await locationFromAddress(fullAddress);
+            if (locations.isNotEmpty) {
+              return LatLng(locations.first.latitude, locations.first.longitude);
+            }
+          }
+        }
+      }
+    } catch (e) {
+      print("Error getting location from user address: $e");
+    }
+    return null;
+  }
+
+  Future<void> _fetchNearbyParks(double lat, double lng) async {
+    final String apiKey = dotenv.env['GOOGLE_MAPS_API_KEY'] ?? '';
+    final String url =
+        'https://maps.googleapis.com/maps/api/place/nearbysearch/json?location=$lat,$lng&radius=500&type=park&key=$apiKey';
+
+    try {
+      final response = await http.get(Uri.parse(url));
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        final List results = data['results'];
+
+        for (var place in results) {
+          final parkId = place['place_id'];
+          final userCount = await _getUserCountInPark(parkId);
+
+          setState(() {
+            _markers.add(
+              Marker(
+                markerId: MarkerId(parkId),
+                position: LatLng(
+                  place['geometry']['location']['lat'],
+                  place['geometry']['location']['lng'],
+                ),
+                infoWindow: InfoWindow(
+                  title: place['name'],
+                  snippet: 'Users: $userCount',
+                ),
+                onTap: () async {
+                  await _showUsersInPark(parkId); // Marker tap → show active pets
+                },
+              ),
+            );
+          });
+        }
+      } else {
+        print("Error fetching parks: ${response.reasonPhrase}");
+      }
+    } catch (e) {
+      print("Error fetching nearby parks: $e");
+    }
+  }
+
+  Future<int> _getUserCountInPark(String parkId) async {
+    final parkRef = FirebaseFirestore.instance.collection('parks').doc(parkId);
+    final usersSnapshot = await parkRef.collection('active_users').get();
+    return usersSnapshot.size;
+  }
+
+  void _onMapCreated(GoogleMapController controller) {
+    _mapController = controller;
+    // No need to animate or jump now — we already have the final position
+  }
+
+  /// Shows a dialog with a list of pets for all active users in the given park.
+  Future<void> _showUsersInPark(String parkId) async {
+    try {
+      final parkRef = FirebaseFirestore.instance.collection('parks').doc(parkId);
+      final usersSnapshot = await parkRef.collection('active_users').get();
+
+      final List<Map<String, dynamic>> userPetList = [];
+      for (var userDoc in usersSnapshot.docs) {
+        final userId = userDoc.id;
+        final petSnapshot = await FirebaseFirestore.instance
+            .collection('pets')
+            .where('ownerId', isEqualTo: userId)
+            .get();
+        if (petSnapshot.docs.isNotEmpty) {
+          final petDoc = petSnapshot.docs.first;
+          final pet = Pet.fromFirestore(petDoc);
+          userPetList.add({
+            'userId': userId,
+            'petName': pet.name,
+            'petPhotoUrl': pet.photoUrl,
+          });
+        }
+      }
+
+      if (mounted) {
+        showDialog(
+          context: context,
+          builder: (BuildContext context) {
+            return AlertDialog(
+              title: const Text("Users in Park"),
+              content: SizedBox(
+                width: double.maxFinite,
+                child: ListView.builder(
+                  shrinkWrap: true,
+                  itemCount: userPetList.length,
+                  itemBuilder: (context, index) {
+                    final userPet = userPetList[index];
+                    return ListTile(
+                      dense: true, // more compact
+                      contentPadding:
+                          const EdgeInsets.symmetric(horizontal: 8.0, vertical: 4.0),
+                      leading: CircleAvatar(
+                        radius: 20,
+                        backgroundImage: NetworkImage(userPet['petPhotoUrl']),
+                      ),
+                      title: Text(
+                        userPet['petName'],
+                        style: const TextStyle(fontSize: 15),
+                      ),
+                    );
+                  },
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(context).pop(),
+                  child: const Text("Close"),
+                ),
+              ],
+            );
+          },
+        );
+      }
+    } catch (e) {
+      print("Error fetching users and pets: $e");
+    }
+  }
+
+  /// Listens for real-time changes in 'parks' collection
+  /// and updates the 'Users: X' snippet on each marker.
+  void _listenToParkUpdates() {
+    FirebaseFirestore.instance.collection('parks').snapshots().listen((snapshot) {
+      for (var parkDoc in snapshot.docs) {
+        final parkId = parkDoc.id;
+        try {
+          final marker = _markers.firstWhere(
+            (m) => m.markerId.value == parkId,
+          );
+          setState(() {
+            _markers.remove(marker);
+            _markers.add(
+              marker.copyWith(
+                infoWindowParam: InfoWindow(
+                  title: marker.infoWindow.title,
+                  snippet: 'Users: ${parkDoc['userCount']}',
+                ),
+              ),
+            );
+          });
+        } catch (e) {
+          // If marker doesn't exist, just ignore
+        }
+      }
+    });
+  }
+
+  /// Shows a check-in dialog if user is near a recognized park
+  void _showCheckInDialog(Park park) {
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Text("Check In"),
+          content: Text("It looks like you are at ${park.name}. Do you want to check in?"),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text("No"),
+            ),
+            TextButton(
+              onPressed: () async {
+                Navigator.of(context).pop();
+                await _locationService.ensureParkExists(park);
+                await _locationService.uploadUserToActiveUsersTable(
+                  park.id,
+                  park.latitude,
+                  park.longitude,
+                );
+                if (!mounted) return;
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text("You have checked in to ${park.name}!")),
+                );
+              },
+              child: const Text("Yes"),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  /// Removes the user from any active parks, then logs out
+  Future<void> _logout() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user != null) {
+      final parksSnapshot = await FirebaseFirestore.instance.collection('parks').get();
+      for (var parkDoc in parksSnapshot.docs) {
+        await parkDoc.reference.collection('active_users').doc(user.uid).delete();
+      }
+    }
+    await FirebaseAuth.instance.signOut();
+    if (!mounted) return;
+    Navigator.of(context).pushReplacementNamed('/login');
+  }
+
+  /// Handles bottom nav bar taps
+  void _onItemTapped(int index) {
+    setState(() {
+      _selectedIndex = index;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // If we're still loading the user location, show a simple progress indicator
+    if (_isLocationLoading) {
+      return Scaffold(
+        appBar: AppBar(
+          title: const Text("Loading...", style: TextStyle(fontSize: 20)),
+          backgroundColor: const Color(0xFF567D46),
+        ),
+        body: const Center(
+          child: CircularProgressIndicator(),
+        ),
+      );
+    }
+
+    // Once we have a final position, build the actual pages
+    final List<Widget> pages = [
+      // 1) Map Page
+      GoogleMap(
+        initialCameraPosition: CameraPosition(
+          target: _finalPosition!,
+          zoom: 18,
+        ),
+        mapType: MapType.normal,
+        myLocationEnabled: true,
+        myLocationButtonEnabled: true,
+        markers: _markers,
+        onMapCreated: _onMapCreated,
+      ),
+
+      // 2) Events Page
+      const Center(
+        child: Text("Events Page",
+            style: TextStyle(color: Colors.white, fontSize: 24)),
+      ),
+
+      // 3) Friends Page
+      const Center(
+        child: Text("Friends Page",
+            style: TextStyle(color: Colors.white, fontSize: 24)),
+      ),
+
+      // 4) Profile Page
+      Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Text(
+              "Hi, $_userName",
+              style: const TextStyle(
+                fontSize: 24,
+                fontWeight: FontWeight.bold,
+                color: Colors.white,
+              ),
+            ),
+            const SizedBox(height: 20),
+            ElevatedButton(
+              onPressed: _logout,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.tealAccent,
+                foregroundColor: Colors.black,
+                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+              child: const Text("Log Out", style: TextStyle(fontSize: 18)),
+            ),
+          ],
+        ),
+      ),
+    ];
+
+    return Scaffold(
+      appBar: AppBar(
+        title: Text("Hi, $_userName", style: const TextStyle(fontSize: 20)),
+        backgroundColor: const Color(0xFF567D46),
+      ),
+      body: Container(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            colors: [Color(0xFF567D46), Color(0xFF365A38)],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
+        ),
+        child: pages[_selectedIndex],
+      ),
+      bottomNavigationBar: BottomNavigationBar(
+        currentIndex: _selectedIndex,
+        onTap: _onItemTapped,
+        backgroundColor: const Color(0xFF567D46),
+        selectedItemColor: Colors.tealAccent,
+        unselectedItemColor: Colors.white70,
+        type: BottomNavigationBarType.fixed,
+        items: const [
+          BottomNavigationBarItem(icon: Icon(Icons.map), label: 'Explore'),
+          BottomNavigationBarItem(icon: Icon(Icons.event), label: 'Events'),
+          BottomNavigationBarItem(icon: Icon(Icons.pets), label: 'Friends'),
+          BottomNavigationBarItem(icon: Icon(Icons.person), label: 'Profile'),
+        ],
+      ),
+    );
+  }
+}

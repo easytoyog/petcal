@@ -1,0 +1,2 @@
+C:/Users/GGFruits/Desktop/Dog App/petcalendar/android/app/.cxx/RelWithDebInfo/1q5s5722/armeabi-v7a/CMakeFiles/edit_cache.dir
+C:/Users/GGFruits/Desktop/Dog App/petcalendar/android/app/.cxx/RelWithDebInfo/1q5s5722/armeabi-v7a/CMakeFiles/rebuild_cache.dir

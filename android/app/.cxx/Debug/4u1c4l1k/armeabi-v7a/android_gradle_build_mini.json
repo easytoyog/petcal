@@ -1,0 +1,20 @@
+{
+  "buildFiles": [
+    "C:\\Users\\GGFruits\\Desktop\\Dog App\\flutter\\packages\\flutter_tools\\gradle\\src\\main\\groovy\\CMakeLists.txt"
+  ],
+  "cleanCommandsComponents": [
+    [
+      "C:\\Users\\GGFruits\\AppData\\Local\\Android\\Sdk\\cmake\\3.22.1\\bin\\ninja.exe",
+      "-C",
+      "C:\\Users\\GGFruits\\Desktop\\Dog App\\petcalendar\\android\\app\\.cxx\\Debug\\4u1c4l1k\\armeabi-v7a",
+      "clean"
+    ]
+  ],
+  "buildTargetsCommandComponents": [
+    "C:\\Users\\GGFruits\\AppData\\Local\\Android\\Sdk\\cmake\\3.22.1\\bin\\ninja.exe",
+    "-C",
+    "C:\\Users\\GGFruits\\Desktop\\Dog App\\petcalendar\\android\\app\\.cxx\\Debug\\4u1c4l1k\\armeabi-v7a",
+    "{LIST_OF_TARGETS_TO_BUILD}"
+  ],
+  "libraries": {}
+}
