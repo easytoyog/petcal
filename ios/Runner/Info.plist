@@ -45,5 +45,40 @@
 	<true/>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+
+	<!-- 🔐 Permissions -->
+
+	<!-- Location (for geolocation, maps) -->
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>This app needs your location to show nearby parks and connect with other dog owners.</string>
+	
+	<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+	<string>This app needs your location to show nearby parks and connect with other dog owners.</string>
+
+
+	<!-- Camera (for taking pet photos) -->
+	<key>NSCameraUsageDescription</key>
+	<string>This app uses the camera to upload pet photos.</string>
+
+	<!-- Photo Library (for selecting images) -->
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>This app needs access to your photo library to select pet images.</string>
+
+	<!-- Microphone (if using video/audio) -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>This app may use the microphone during video features.</string>
+
+	<!-- App Tracking Transparency (optional for ads/analytics) -->
+	<key>NSUserTrackingUsageDescription</key>
+	<string>This identifier is used to deliver personalized ads and improve the app experience.</string>
+
+	<!-- Firebase (AppDelegate proxy setting, optional) -->
+	<key>FirebaseAppDelegateProxyEnabled</key>
+	<false/>
+
+	<key>GADApplicationIdentifier</key>
+	<string>ca-app-pub-3773871623541431~4689160792</string>
+
+
 </dict>
 </plist>

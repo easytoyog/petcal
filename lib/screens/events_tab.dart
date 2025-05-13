@@ -33,10 +33,21 @@ class _EventsTabState extends State<EventsTab> {
 
   Future<void> _fetchUserLocation() async {
     try {
-      final locData = await loc.Location().getLocation();
+      final location = loc.Location();
+      bool serviceEnabled = await location.serviceEnabled();
+      if (!serviceEnabled) {
+        serviceEnabled = await location.requestService();
+        if (!serviceEnabled) return;
+      }
+      loc.PermissionStatus permissionGranted = await location.hasPermission();
+      if (permissionGranted == loc.PermissionStatus.denied) {
+        permissionGranted = await location.requestPermission();
+        if (permissionGranted != loc.PermissionStatus.granted) return;
+      }
+      final locData = await location.getLocation();
       setState(() => _userLocation = locData);
     } catch (e) {
-      print("Error fetching user location in EventsTab: \$e");
+      print("Error fetching user location in EventsTab: $e");
     }
   }
 
@@ -45,11 +56,14 @@ class _EventsTabState extends State<EventsTab> {
     final dLat = _degToRad(lat2 - lat1);
     final dLng = _degToRad(lng2 - lng1);
     final a = sin(dLat / 2) * sin(dLat / 2) +
-        cos(_degToRad(lat1)) * cos(_degToRad(lat2)) *
-        sin(dLng / 2) * sin(dLng / 2);
+        cos(_degToRad(lat1)) *
+            cos(_degToRad(lat2)) *
+            sin(dLng / 2) *
+            sin(dLng / 2);
     final c = 2 * atan2(sqrt(a), sqrt(1 - a));
     return earthRadius * c;
   }
+
   double _degToRad(double deg) => deg * (pi / 180);
 
   Future<void> _fetchEvents() async {
@@ -68,12 +82,19 @@ class _EventsTabState extends State<EventsTab> {
       final now = DateTime.now();
       final events = snapshot.docs
           .map((doc) => ParkEvent.fromFirestore(doc))
-          .where((e) => e.recurrence != "One Time" || e.endDateTime.isAfter(now))
+          .where(
+              (e) => e.recurrence != "One Time" || e.endDateTime.isAfter(now))
           .toList();
 
       if (widget.parkIdFilter == null && _userLocation != null) {
         _allEvents = events
-            .where((e) => _computeDistance(_userLocation!.latitude!, _userLocation!.longitude!, e.parkLatitude, e.parkLongitude) <= 1.0)
+            .where((e) =>
+                _computeDistance(
+                    _userLocation!.latitude!,
+                    _userLocation!.longitude!,
+                    e.parkLatitude,
+                    e.parkLongitude) <=
+                1.0)
             .toList();
       } else {
         _allEvents = events;
@@ -89,8 +110,8 @@ class _EventsTabState extends State<EventsTab> {
 
   void _applySearchFilter() {
     final uid = FirebaseAuth.instance.currentUser?.uid;
-    var list = _allEvents.where((e) =>
-      e.name.toLowerCase().contains(_searchQuery.toLowerCase()));
+    var list = _allEvents.where(
+        (e) => e.name.toLowerCase().contains(_searchQuery.toLowerCase()));
     if (_filterMode == "Liked" && uid != null) {
       list = list.where((e) => e.likes.contains(uid));
     }
@@ -115,13 +136,10 @@ class _EventsTabState extends State<EventsTab> {
         .doc(event.id);
     final liked = event.likes.contains(uid);
     await ref.update({
-      'likes': liked
-          ? FieldValue.arrayRemove([uid])
-          : FieldValue.arrayUnion([uid])
+      'likes':
+          liked ? FieldValue.arrayRemove([uid]) : FieldValue.arrayUnion([uid])
     });
-    setState(() => liked
-        ? event.likes.remove(uid)
-        : event.likes.add(uid));
+    setState(() => liked ? event.likes.remove(uid) : event.likes.add(uid));
     _applySearchFilter();
   }
 
@@ -158,7 +176,9 @@ class _EventsTabState extends State<EventsTab> {
                 ),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Close'))
+          TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Close'))
         ],
       ),
     );
@@ -167,8 +187,12 @@ class _EventsTabState extends State<EventsTab> {
   @override
   Widget build(BuildContext context) {
     final uid = FirebaseAuth.instance.currentUser?.uid;
-    final likedEvents = _filteredEvents.where((e) => uid != null && e.likes.contains(uid)).toList();
-    final otherEvents = _filteredEvents.where((e) => uid == null || !e.likes.contains(uid)).toList();
+    final likedEvents = _filteredEvents
+        .where((e) => uid != null && e.likes.contains(uid))
+        .toList();
+    final otherEvents = _filteredEvents
+        .where((e) => uid == null || !e.likes.contains(uid))
+        .toList();
 
     return Scaffold(
       body: Stack(
@@ -201,8 +225,10 @@ class _EventsTabState extends State<EventsTab> {
                           _applySearchFilter();
                         }),
                         itemBuilder: (_) => const [
-                          PopupMenuItem(value: 'All', child: Text('All Events')),
-                          PopupMenuItem(value: 'Liked', child: Text('Liked Events')),
+                          PopupMenuItem(
+                              value: 'All', child: Text('All Events')),
+                          PopupMenuItem(
+                              value: 'Liked', child: Text('Liked Events')),
                         ],
                       ),
                     ],
@@ -214,19 +240,27 @@ class _EventsTabState extends State<EventsTab> {
                       : RefreshIndicator(
                           onRefresh: _fetchEvents,
                           child: ListView(
-                            padding: const EdgeInsets.only(bottom: 70, left: 8, right: 8, top: 8),
+                            padding: const EdgeInsets.only(
+                                bottom: 70, left: 8, right: 8, top: 8),
                             children: [
                               if (likedEvents.isNotEmpty) ...[
                                 const Padding(
                                   padding: EdgeInsets.symmetric(vertical: 8),
-                                  child: Text('Liked Events', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                                  child: Text('Liked Events',
+                                      style: TextStyle(
+                                          fontSize: 16,
+                                          fontWeight: FontWeight.bold)),
                                 ),
-                                ...likedEvents.map((e) => _eventCard(e, isFavorite: true)),
+                                ...likedEvents.map(
+                                    (e) => _eventCard(e, isFavorite: true)),
                                 const Divider(),
                               ],
                               const Padding(
                                 padding: EdgeInsets.symmetric(vertical: 8),
-                                child: Text('Other Nearby Events', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                                child: Text('Other Nearby Events',
+                                    style: TextStyle(
+                                        fontSize: 16,
+                                        fontWeight: FontWeight.bold)),
                               ),
                               ...otherEvents.map((e) => _eventCard(e)),
                               if (likedEvents.isEmpty && otherEvents.isEmpty)
@@ -252,7 +286,8 @@ class _EventsTabState extends State<EventsTab> {
   Widget _eventCard(ParkEvent event, {bool isFavorite = false}) {
     final start = DateFormat('h:mm a').format(event.startDateTime);
     final end = DateFormat('h:mm a').format(event.endDateTime);
-    final liked = FirebaseAuth.instance.currentUser != null && event.likes.contains(FirebaseAuth.instance.currentUser!.uid);
+    final liked = FirebaseAuth.instance.currentUser != null &&
+        event.likes.contains(FirebaseAuth.instance.currentUser!.uid);
     final cardColor = isFavorite ? Colors.green.shade50 : null;
 
     return Card(
@@ -268,11 +303,15 @@ class _EventsTabState extends State<EventsTab> {
                 Expanded(
                   child: Row(
                     children: [
-                      Text(event.name, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold)),
-                      if (isFavorite) const Padding(
-                        padding: EdgeInsets.only(left: 4),
-                        child: Icon(Icons.star, size: 16, color: Colors.amber),
-                      ),
+                      Text(event.name,
+                          style: const TextStyle(
+                              fontSize: 14, fontWeight: FontWeight.bold)),
+                      if (isFavorite)
+                        const Padding(
+                          padding: EdgeInsets.only(left: 4),
+                          child:
+                              Icon(Icons.star, size: 16, color: Colors.amber),
+                        ),
                     ],
                   ),
                 ),
@@ -285,7 +324,8 @@ class _EventsTabState extends State<EventsTab> {
             ),
             const SizedBox(height: 4),
             Text('Time: $start - $end', style: const TextStyle(fontSize: 12)),
-            Text('Recurrence: ${event.recurrence}', style: const TextStyle(fontSize: 12)),
+            Text('Recurrence: ${event.recurrence}',
+                style: const TextStyle(fontSize: 12)),
             const SizedBox(height: 8),
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -293,14 +333,17 @@ class _EventsTabState extends State<EventsTab> {
                 TextButton.icon(
                   onPressed: () => Navigator.push(
                     context,
-                    MaterialPageRoute(builder: (_) => ChatRoomScreen(parkId: event.parkId)),
+                    MaterialPageRoute(
+                        builder: (_) => ChatRoomScreen(parkId: event.parkId)),
                   ),
                   icon: const Icon(Icons.chat, size: 14),
-                  label: const Text('Park Chat', style: TextStyle(fontSize: 12)),
+                  label:
+                      const Text('Park Chat', style: TextStyle(fontSize: 12)),
                 ),
                 TextButton(
                   onPressed: () => _showLikesDialog(event),
-                  child: Text('${event.likes.length} likes', style: const TextStyle(fontSize: 12)),
+                  child: Text('${event.likes.length} likes',
+                      style: const TextStyle(fontSize: 12)),
                 ),
               ],
             ),

@@ -74,6 +74,7 @@ class _ParksTabState extends State<ParksTab> {
         }
       }
 
+      if (!mounted) return;
       setState(() {
         _favoriteParks = parks;
         _favoriteParkIds = parks.map((p) => p.id).toSet();
@@ -97,6 +98,7 @@ class _ParksTabState extends State<ParksTab> {
         _updateActiveUserCount(park.id);
       }
 
+      if (!mounted) return; // <-- Add this
       setState(() {
         _nearbyParks = parks;
         _hasFetchedNearby = true;
@@ -104,6 +106,7 @@ class _ParksTabState extends State<ParksTab> {
       });
     } catch (e) {
       print("Error fetching nearby parks: $e");
+      if (!mounted) return; // <-- Add this
       setState(() => _isSearching = false);
     }
   }
@@ -114,6 +117,7 @@ class _ParksTabState extends State<ParksTab> {
         .doc(parkId)
         .collection('active_users')
         .get();
+    if (!mounted) return; // <-- Add this
     setState(() {
       _activeUserCounts[parkId] = snap.size;
     });
@@ -170,8 +174,7 @@ class _ParksTabState extends State<ParksTab> {
                     ),
                   ),
                   IconButton(
-                    icon: Icon(
-                        liked ? Icons.favorite : Icons.favorite_border),
+                    icon: Icon(liked ? Icons.favorite : Icons.favorite_border),
                     color: liked ? Colors.green : Colors.grey,
                     onPressed: () async {
                       await _ensureParkExists(park);
@@ -179,8 +182,7 @@ class _ParksTabState extends State<ParksTab> {
                         await _fs.unlikePark(park.id);
                         setState(() {
                           _favoriteParkIds.remove(park.id);
-                          _favoriteParks
-                              .removeWhere((p) => p.id == park.id);
+                          _favoriteParks.removeWhere((p) => p.id == park.id);
                         });
                       } else {
                         await _fs.likePark(park.id);
@@ -207,11 +209,10 @@ class _ParksTabState extends State<ParksTab> {
                     onPressed: () => Navigator.push(
                       context,
                       MaterialPageRoute(
-                          builder: (_) =>
-                              ChatRoomScreen(parkId: park.id)),
+                          builder: (_) => ChatRoomScreen(parkId: park.id)),
                     ),
-                    child: const Text("Park Chat",
-                        style: TextStyle(fontSize: 12)),
+                    child:
+                        const Text("Park Chat", style: TextStyle(fontSize: 12)),
                   ),
                   const SizedBox(width: 8),
                   ElevatedButton(
@@ -228,13 +229,11 @@ class _ParksTabState extends State<ParksTab> {
                         .doc(_currentUserId)
                         .get(),
                     builder: (ctx, snap) {
-                      final checkedIn =
-                          snap.hasData && snap.data!.exists;
+                      final checkedIn = snap.hasData && snap.data!.exists;
                       return ElevatedButton(
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: checkedIn
-                              ? Colors.red
-                              : Colors.green,
+                          backgroundColor:
+                              checkedIn ? Colors.red : Colors.green,
                         ),
                         onPressed: () async {
                           final ref = FirebaseFirestore.instance
@@ -248,8 +247,7 @@ class _ParksTabState extends State<ParksTab> {
                           } else {
                             await _checkOutFromAllParks();
                             await ref.set({
-                              'checkedInAt':
-                                  FieldValue.serverTimestamp(),
+                              'checkedInAt': FieldValue.serverTimestamp(),
                             });
                           }
                           _updateActiveUserCount(park.id);
@@ -283,11 +281,10 @@ class _ParksTabState extends State<ParksTab> {
               // --- Favourite parks ---
               if (_favoriteParks.isNotEmpty) ...[
                 const Padding(
-                  padding:
-                      EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                  padding: EdgeInsets.symmetric(horizontal: 10, vertical: 8),
                   child: Text("Favourite Parks",
-                      style: TextStyle(
-                          fontSize: 16, fontWeight: FontWeight.bold)),
+                      style:
+                          TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
                 ),
                 ..._favoriteParks
                     .map((p) => _buildParkCard(p, isFavorite: true))
@@ -296,18 +293,17 @@ class _ParksTabState extends State<ParksTab> {
 
               // --- Nearby Parks header ---
               const Padding(
-                padding:
-                    EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                padding: EdgeInsets.symmetric(horizontal: 10, vertical: 8),
                 child: Text("Nearby Parks",
-                    style: TextStyle(
-                        fontSize: 16, fontWeight: FontWeight.bold)),
+                    style:
+                        TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
               ),
 
               // **Moved**: Find Nearby button below the heading
               if (!_hasFetchedNearby && !_isSearching)
                 Padding(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 10, vertical: 8),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
                   child: ElevatedButton(
                     onPressed: _fetchNearbyParks,
                     child: const Text("Find Nearby Parks"),
@@ -317,8 +313,7 @@ class _ParksTabState extends State<ParksTab> {
               if (_isSearching)
                 const Padding(
                   padding: EdgeInsets.symmetric(vertical: 20),
-                  child:
-                      Center(child: CircularProgressIndicator()),
+                  child: Center(child: CircularProgressIndicator()),
                 ),
 
               // --- Nearby parks list ---
@@ -327,7 +322,6 @@ class _ParksTabState extends State<ParksTab> {
                   .toList(),
             ],
           ),
-
           const Positioned(
             left: 0,
             right: 0,

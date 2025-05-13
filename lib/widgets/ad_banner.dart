@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
 
@@ -29,9 +30,14 @@ class _AdBannerState extends State<AdBanner> {
       return;
     }
 
+    // Use platform-specific ad unit IDs
+    final adUnitId = Platform.isAndroid
+        ? 'ca-app-pub-3940256099942544/2934735716'
+        : 'ca-app-pub-3940256099942544/2934735716'; // iOS test banner (replace with your real iOS ID for production)
+
     _bannerAd = BannerAd(
       size: size,
-      adUnitId: 'ca-app-pub-3940256099942544/6300978111', // TEST ad unit
+      adUnitId: adUnitId,
       listener: BannerAdListener(
         onAdLoaded: (ad) {
           setState(() {

@@ -21,7 +21,8 @@ class MapTab extends StatefulWidget {
   State<MapTab> createState() => _MapTabState();
 }
 
-class _MapTabState extends State<MapTab> with AutomaticKeepAliveClientMixin<MapTab> {
+class _MapTabState extends State<MapTab>
+    with AutomaticKeepAliveClientMixin<MapTab> {
   GoogleMapController? _mapController;
   final loc.Location _location = loc.Location();
   final LocationService _locationService = LocationService(
@@ -40,7 +41,7 @@ class _MapTabState extends State<MapTab> with AutomaticKeepAliveClientMixin<MapT
   // For search button loading state.
   bool _isSearching = false;
   bool _isMapReady = false;
-   
+
   @override
   bool get wantKeepAlive => true;
 
@@ -56,7 +57,6 @@ class _MapTabState extends State<MapTab> with AutomaticKeepAliveClientMixin<MapT
     _listenToParkUpdates();
     _fetchFavorites();
   }
-
 
   @override
   void dispose() {
@@ -132,7 +132,7 @@ class _MapTabState extends State<MapTab> with AutomaticKeepAliveClientMixin<MapT
     final prefs = await SharedPreferences.getInstance();
     final latitude = prefs.getDouble('last_latitude');
     final longitude = prefs.getDouble('last_longitude');
-    
+
     if (latitude != null && longitude != null) {
       print('Retrieved saved location: $latitude, $longitude');
       return LatLng(latitude, longitude);
@@ -163,26 +163,26 @@ class _MapTabState extends State<MapTab> with AutomaticKeepAliveClientMixin<MapT
     try {
       // First try to get the saved location
       final savedLocation = await _getSavedUserLocation();
-      
+
       if (savedLocation != null) {
         // Use saved location as initial map position
         setState(() {
           _finalPosition = savedLocation;
           _isMapReady = true;
         });
-        
+
         // Still try to get current location in background
         _getUserLocation().then((userLocation) async {
           if (userLocation != null) {
-            final currentLatLng = LatLng(userLocation.latitude!, userLocation.longitude!);
-            
+            final currentLatLng =
+                LatLng(userLocation.latitude!, userLocation.longitude!);
+
             // Save the new location for next time
             _saveUserLocation(currentLatLng.latitude, currentLatLng.longitude);
-            
+
             setState(() {
               _finalPosition = currentLatLng;
-            });          
-
+            });
 
             // Move camera to current location
             _mapController?.animateCamera(
@@ -193,7 +193,7 @@ class _MapTabState extends State<MapTab> with AutomaticKeepAliveClientMixin<MapT
                 ),
               ),
             );
-            
+
             // Load parks for current location
             _loadNearbyParks(currentLatLng);
           }
@@ -208,16 +208,17 @@ class _MapTabState extends State<MapTab> with AutomaticKeepAliveClientMixin<MapT
         // Run location retrieval asynchronously
         _getUserLocation().then((userLocation) async {
           if (userLocation != null) {
-            final currentLatLng = LatLng(userLocation.latitude!, userLocation.longitude!);
-            
+            final currentLatLng =
+                LatLng(userLocation.latitude!, userLocation.longitude!);
+
             // Save this location for next time
             _saveUserLocation(currentLatLng.latitude, currentLatLng.longitude);
-            
+
             // Update map position if a real location is found
             setState(() {
               _finalPosition = currentLatLng;
             });
-            
+
             // Move camera to user location
             _mapController?.animateCamera(
               CameraUpdate.newCameraPosition(
@@ -227,7 +228,7 @@ class _MapTabState extends State<MapTab> with AutomaticKeepAliveClientMixin<MapT
                 ),
               ),
             );
-            
+
             // Load parks without blocking UI
             _loadNearbyParks(currentLatLng);
           } else {
@@ -235,11 +236,12 @@ class _MapTabState extends State<MapTab> with AutomaticKeepAliveClientMixin<MapT
             final addressLocation = await _getLocationFromUserAddress();
             if (addressLocation != null) {
               // Save this location for next time
-              _saveUserLocation(addressLocation.latitude, addressLocation.longitude);
-              
+              _saveUserLocation(
+                  addressLocation.latitude, addressLocation.longitude);
+
               setState(() {
                 _finalPosition = addressLocation;
-              });          
+              });
 
               _mapController?.animateCamera(
                 CameraUpdate.newCameraPosition(
@@ -249,7 +251,7 @@ class _MapTabState extends State<MapTab> with AutomaticKeepAliveClientMixin<MapT
                   ),
                 ),
               );
-              
+
               _loadNearbyParks(addressLocation);
             } else {
               // No location could be determined
@@ -279,7 +281,7 @@ class _MapTabState extends State<MapTab> with AutomaticKeepAliveClientMixin<MapT
       setState(() {
         _isSearching = true;
       });
-      
+
       // Clear previous markers
       _markersMap.clear();
 
@@ -296,7 +298,7 @@ class _MapTabState extends State<MapTab> with AutomaticKeepAliveClientMixin<MapT
       }).toList();
 
       final markerEntries = await Future.wait(markerFutures);
-      
+
       // Update markers in setState to trigger UI refresh
       setState(() {
         for (var entry in markerEntries) {
@@ -342,7 +344,10 @@ class _MapTabState extends State<MapTab> with AutomaticKeepAliveClientMixin<MapT
     try {
       final user = FirebaseAuth.instance.currentUser;
       if (user != null) {
-        final doc = await FirebaseFirestore.instance.collection('owners').doc(user.uid).get();
+        final doc = await FirebaseFirestore.instance
+            .collection('owners')
+            .doc(user.uid)
+            .get();
         if (doc.exists) {
           final address = doc.data()?['address'] ?? {};
           if (address['street'] != null &&
@@ -353,7 +358,8 @@ class _MapTabState extends State<MapTab> with AutomaticKeepAliveClientMixin<MapT
                 '${address['street']}, ${address['city']}, ${address['state']}, ${address['country']}';
             final locations = await locationFromAddress(fullAddress);
             if (locations.isNotEmpty) {
-              return LatLng(locations.first.latitude, locations.first.longitude);
+              return LatLng(
+                  locations.first.latitude, locations.first.longitude);
             }
           }
         }
@@ -381,7 +387,8 @@ class _MapTabState extends State<MapTab> with AutomaticKeepAliveClientMixin<MapT
 
   Future<int> _getUserCountInPark(String parkId) async {
     try {
-      final parkRef = FirebaseFirestore.instance.collection('parks').doc(parkId);
+      final parkRef =
+          FirebaseFirestore.instance.collection('parks').doc(parkId);
       final usersSnapshot = await parkRef.collection('active_users').get();
       return usersSnapshot.size;
     } catch (e) {
@@ -394,7 +401,7 @@ class _MapTabState extends State<MapTab> with AutomaticKeepAliveClientMixin<MapT
     _mapController = controller;
     // Initialize the current map center.
     _currentMapCenter = _finalPosition ?? const LatLng(43.7615, -79.4111);
-    
+
     // If we already have the user's location, move the camera there
     if (_finalPosition != null) {
       _mapController?.animateCamera(
@@ -427,7 +434,8 @@ class _MapTabState extends State<MapTab> with AutomaticKeepAliveClientMixin<MapT
       final data = activeDoc.data() as Map<String, dynamic>;
       if (data.containsKey('checkedInAt')) {
         checkedInAt = (data['checkedInAt'] as Timestamp).toDate();
-        if (DateTime.now().difference(checkedInAt) > const Duration(minutes: 30)) {
+        if (DateTime.now().difference(checkedInAt) >
+            const Duration(minutes: 30)) {
           await activeDocRef.delete();
           isCheckedIn = false;
         }
@@ -439,7 +447,8 @@ class _MapTabState extends State<MapTab> with AutomaticKeepAliveClientMixin<MapT
         return AlertDialog(
           title: Text(isCheckedIn ? "Check Out" : "Check In"),
           content: isCheckedIn
-              ? Text("You checked in at ${checkedInAt != null ? DateFormat('HH:mm').format(checkedInAt) : 'an unknown time'}. Do you want to check out?")
+              ? Text(
+                  "You checked in at ${checkedInAt != null ? DateFormat('HH:mm').format(checkedInAt) : 'an unknown time'}. Do you want to check out?")
               : Text("You are at ${park.name}. Do you want to check in?"),
           actions: [
             TextButton(
@@ -452,7 +461,8 @@ class _MapTabState extends State<MapTab> with AutomaticKeepAliveClientMixin<MapT
                 if (isCheckedIn) {
                   await activeDocRef.delete();
                   if (_finalPosition != null) {
-                    await _fetchNearbyParks(_finalPosition!.latitude, _finalPosition!.longitude);
+                    await _fetchNearbyParks(
+                        _finalPosition!.latitude, _finalPosition!.longitude);
                   }
                   ScaffoldMessenger.of(context).showSnackBar(
                     SnackBar(content: Text("Checked out of ${park.name}")),
@@ -476,233 +486,240 @@ class _MapTabState extends State<MapTab> with AutomaticKeepAliveClientMixin<MapT
     );
   }
 
-  Future<void> _showUsersInPark(String parkId, double parkLatitude, double parkLongitude) async {
-  try {
-    final currentUser = FirebaseAuth.instance.currentUser;
-    if (currentUser == null) return;
+  Future<void> _showUsersInPark(
+      String parkId, double parkLatitude, double parkLongitude) async {
+    try {
+      final currentUser = FirebaseAuth.instance.currentUser;
+      if (currentUser == null) return;
 
-    // 1) Determine initial liked state once:
-    final FirestoreService fs = FirestoreService();
-    bool isLiked = await fs.isParkLiked(parkId);
+      // 1) Determine initial liked state once:
+      final FirestoreService fs = FirestoreService();
+      bool isLiked = await fs.isParkLiked(parkId);
 
-    // 2) Check‑in/out state for this park (unchanged)
-    DocumentReference activeDocRef = FirebaseFirestore.instance
-        .collection('parks')
-        .doc(parkId)
-        .collection('active_users')
-        .doc(currentUser.uid);
-    DocumentSnapshot activeDoc = await activeDocRef.get();
-    bool isCheckedIn = activeDoc.exists;
-    DateTime? checkedInAt;
-    if (isCheckedIn) {
-      final data = activeDoc.data() as Map<String, dynamic>;
-      if (data.containsKey('checkedInAt')) {
-        checkedInAt = (data['checkedInAt'] as Timestamp).toDate();
-        if (DateTime.now().difference(checkedInAt) > const Duration(minutes: 30)) {
-          await activeDocRef.delete();
-          isCheckedIn = false;
+      // 2) Check‑in/out state for this park (unchanged)
+      DocumentReference activeDocRef = FirebaseFirestore.instance
+          .collection('parks')
+          .doc(parkId)
+          .collection('active_users')
+          .doc(currentUser.uid);
+      DocumentSnapshot activeDoc = await activeDocRef.get();
+      bool isCheckedIn = activeDoc.exists;
+      DateTime? checkedInAt;
+      if (isCheckedIn) {
+        final data = activeDoc.data() as Map<String, dynamic>;
+        if (data.containsKey('checkedInAt')) {
+          checkedInAt = (data['checkedInAt'] as Timestamp).toDate();
+          if (DateTime.now().difference(checkedInAt) >
+              const Duration(minutes: 30)) {
+            await activeDocRef.delete();
+            isCheckedIn = false;
+          }
         }
       }
-    }
 
-    // 3) Build list of active users & their pets (unchanged)
-    DocumentReference parkRef = FirebaseFirestore.instance.collection('parks').doc(parkId);
-    QuerySnapshot usersSnapshot = await parkRef.collection('active_users').get();
-    List<Map<String, dynamic>> userList = [];
-    for (var userDoc in usersSnapshot.docs) {
-      // … your existing logic to fetch pet info and prune stale check‑ins …
-      // add entries into `userList`
-    }
+      // 3) Build list of active users & their pets (unchanged)
+      DocumentReference parkRef =
+          FirebaseFirestore.instance.collection('parks').doc(parkId);
+      QuerySnapshot usersSnapshot =
+          await parkRef.collection('active_users').get();
+      List<Map<String, dynamic>> userList = [];
+      for (var userDoc in usersSnapshot.docs) {
+        // … your existing logic to fetch pet info and prune stale check‑ins …
+        // add entries into `userList`
+      }
 
-    if (!mounted) return;
+      if (!mounted) return;
 
-    // 4) Show the dialog
-    showDialog(
-      context: context,
-      builder: (context) {
-        return AlertDialog(
-          title: const Text("Active Users in Park"),
-          content: SizedBox(
-            width: double.maxFinite,
-            height: 400,
-            child: Column(
-              children: [
-                Expanded(
-                  child: ListView.separated(
-                    itemCount: userList.length,
-                    separatorBuilder: (_, __) => const SizedBox(height: 6),
-                    itemBuilder: (ctx, i) {
-                      final petData = userList[i];
-                      final ownerId = petData['ownerId'] as String;
-                      final petId    = petData['petId']    as String;
-                      final petName  = petData['petName']  as String;
-                      final petPhoto = petData['petPhotoUrl'] as String;
-                      final checkIn  = petData['checkInTime'] as String;
-                      bool mine = (ownerId == currentUser.uid);
+      // 4) Show the dialog
+      showDialog(
+        context: context,
+        builder: (context) {
+          return AlertDialog(
+            title: const Text("Active Users in Park"),
+            content: SizedBox(
+              width: double.maxFinite,
+              height: 400,
+              child: Column(
+                children: [
+                  Expanded(
+                    child: ListView.separated(
+                      itemCount: userList.length,
+                      separatorBuilder: (_, __) => const SizedBox(height: 6),
+                      itemBuilder: (ctx, i) {
+                        final petData = userList[i];
+                        final ownerId = petData['ownerId'] as String;
+                        final petId = petData['petId'] as String;
+                        final petName = petData['petName'] as String;
+                        final petPhoto = petData['petPhotoUrl'] as String;
+                        final checkIn = petData['checkInTime'] as String;
+                        bool mine = (ownerId == currentUser.uid);
 
-                      return ListTile(
-                        leading: CircleAvatar(backgroundImage: NetworkImage(petPhoto)),
-                        title: Text(petName),
-                        subtitle: Text(mine
-                            ? "Your pet – Checked in at $checkIn"
-                            : "Checked in at $checkIn"),
-                        trailing: mine
-                            ? null
-                            : Icon(
-                                _favoritePetIds.contains(petId)
-                                    ? Icons.favorite
-                                    : Icons.favorite_border,
-                                color: Colors.red,
-                              ),
-                      );
-                    },
-                  ),
-                ),
-
-                // 5) Check‑in / Chat / Events buttons (unchanged)
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                  children: [
-                    ElevatedButton(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: isCheckedIn ? Colors.red : Colors.green,
-                      ),
-                      onPressed: () async {
-                        Navigator.of(context, rootNavigator: true).pop();
-                        if (isCheckedIn) {
-                          await activeDocRef.delete();
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(content: Text("Checked out of park")),
-                          );
-                        } else {
-                          await _locationService.uploadUserToActiveUsersTable(
-                            parkId, parkLatitude, parkLongitude
-                          );
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(content: Text("Checked in to park")),
-                          );
-                        }
-                      },
-                      child: Text(isCheckedIn ? "Check Out" : "Check In"),
-                    ),
-                    ElevatedButton(
-                      onPressed: () {
-                        Navigator.of(context, rootNavigator: true).pop();
-                        Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (_) => ChatRoomScreen(parkId: parkId),
-                          ),
+                        return ListTile(
+                          leading: CircleAvatar(
+                              backgroundImage: NetworkImage(petPhoto)),
+                          title: Text(petName),
+                          subtitle: Text(mine
+                              ? "Your pet – Checked in at $checkIn"
+                              : "Checked in at $checkIn"),
+                          trailing: mine
+                              ? null
+                              : Icon(
+                                  _favoritePetIds.contains(petId)
+                                      ? Icons.favorite
+                                      : Icons.favorite_border,
+                                  color: Colors.red,
+                                ),
                         );
                       },
-                      child: const Text("Park Chat"),
                     ),
-                  ],
-                ),
-                const SizedBox(height: 8),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                  children: [
-                    ElevatedButton(
-                      onPressed: () {
-                        Navigator.of(context, rootNavigator: true).pop();
-                        widget.onShowEvents(parkId);
-                      },
-                      child: const Text("Show Events"),
-                    ),
-                    ElevatedButton(
-                      onPressed: () {
-                        Navigator.of(context, rootNavigator: true).pop();
-                        _addEvent(parkId, parkLatitude, parkLongitude);
-                      },
-                      child: const Text("Add Event"),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
+                  ),
 
-          // 6) Actions: Like/Unlike + Close
-          // … inside your AlertDialog’s actions:
-          actions: [
-            StatefulBuilder(builder: (ctx, setState) {
-              return TextButton.icon(
-                onPressed: () async {
-                  try {
-                    if (isLiked) {
-                      await fs.unlikePark(parkId);
+                  // 5) Check‑in / Chat / Events buttons (unchanged)
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                    children: [
+                      ElevatedButton(
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor:
+                              isCheckedIn ? Colors.red : Colors.green,
+                        ),
+                        onPressed: () async {
+                          Navigator.of(context, rootNavigator: true).pop();
+                          if (isCheckedIn) {
+                            await activeDocRef.delete();
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text("Checked out of park")),
+                            );
+                          } else {
+                            await _locationService.uploadUserToActiveUsersTable(
+                                parkId, parkLatitude, parkLongitude);
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(content: Text("Checked in to park")),
+                            );
+                          }
+                        },
+                        child: Text(isCheckedIn ? "Check Out" : "Check In"),
+                      ),
+                      ElevatedButton(
+                        onPressed: () {
+                          Navigator.of(context, rootNavigator: true).pop();
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) => ChatRoomScreen(parkId: parkId),
+                            ),
+                          );
+                        },
+                        child: const Text("Park Chat"),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                    children: [
+                      ElevatedButton(
+                        onPressed: () {
+                          Navigator.of(context, rootNavigator: true).pop();
+                          widget.onShowEvents(parkId);
+                        },
+                        child: const Text("Show Events"),
+                      ),
+                      ElevatedButton(
+                        onPressed: () {
+                          Navigator.of(context, rootNavigator: true).pop();
+                          _addEvent(parkId, parkLatitude, parkLongitude);
+                        },
+                        child: const Text("Add Event"),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+
+            // 6) Actions: Like/Unlike + Close
+            // … inside your AlertDialog’s actions:
+            actions: [
+              StatefulBuilder(builder: (ctx, setState) {
+                return TextButton.icon(
+                  onPressed: () async {
+                    try {
+                      if (isLiked) {
+                        await fs.unlikePark(parkId);
+                        ScaffoldMessenger.of(ctx).showSnackBar(
+                          const SnackBar(
+                              content: Text("Removed park from liked parks")),
+                        );
+                      } else {
+                        await fs.likePark(parkId);
+                        ScaffoldMessenger.of(ctx).showSnackBar(
+                          const SnackBar(content: Text("Park liked!")),
+                        );
+                      }
+                      setState(() => isLiked = !isLiked);
+                    } catch (e) {
                       ScaffoldMessenger.of(ctx).showSnackBar(
-                        const SnackBar(content: Text("Removed park from liked parks")),
-                      );
-                    } else {
-                      await fs.likePark(parkId);
-                      ScaffoldMessenger.of(ctx).showSnackBar(
-                        const SnackBar(content: Text("Park liked!")),
+                        SnackBar(content: Text("Error updating like: $e")),
                       );
                     }
-                    setState(() => isLiked = !isLiked);
-                  } catch (e) {
-                    ScaffoldMessenger.of(ctx).showSnackBar(
-                      SnackBar(content: Text("Error updating like: $e")),
-                    );
-                  }
-                },
-                icon: Icon(
-                  // hollow when not liked, filled when liked
-                  isLiked ? Icons.thumb_up : Icons.thumb_up_outlined,
-                  size: 16,
-                  color: isLiked ? Colors.green : Colors.grey,
-                ),
-                label: Text(
-                  isLiked ? "Liked" : "Like Park",
-                  style: TextStyle(
-                    fontSize: 12,
+                  },
+                  icon: Icon(
+                    // hollow when not liked, filled when liked
+                    isLiked ? Icons.thumb_up : Icons.thumb_up_outlined,
+                    size: 16,
                     color: isLiked ? Colors.green : Colors.grey,
                   ),
-                ),
-              );
-            }),
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text("Close", style: TextStyle(fontSize: 12)),
-            ),
-          ],
-
-        );
-      },
-    );
-  } catch (e) {
-    print("Error showing users in park: $e");
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text("Error loading active users: $e")),
-    );
+                  label: Text(
+                    isLiked ? "Liked" : "Like Park",
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: isLiked ? Colors.green : Colors.grey,
+                    ),
+                  ),
+                );
+              }),
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(),
+                child: const Text("Close", style: TextStyle(fontSize: 12)),
+              ),
+            ],
+          );
+        },
+      );
+    } catch (e) {
+      print("Error showing users in park: $e");
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Error loading active users: $e")),
+      );
+    }
   }
-}
 
-  Future<void> _handleCheckIn(String parkId, double parkLatitude, double parkLongitude, BuildContext context) async {
+  Future<void> _handleCheckIn(String parkId, double parkLatitude,
+      double parkLongitude, BuildContext context) async {
     final currentUser = FirebaseAuth.instance.currentUser;
     if (currentUser == null) return;
-    
+
     try {
       // First, check out from all other parks
       await _checkOutFromAllParks();
-      
+
       // Then check in to this park
       await _locationService.uploadUserToActiveUsersTable(
         parkId,
         parkLatitude,
         parkLongitude,
       );
-      
+
       // Refresh the map
       if (_finalPosition != null) {
-        await _fetchNearbyParks(_finalPosition!.latitude, _finalPosition!.longitude);
+        await _fetchNearbyParks(
+            _finalPosition!.latitude, _finalPosition!.longitude);
       }
-      
+
       // Close the dialog
       Navigator.of(context, rootNavigator: true).pop();
-      
+
       // Show confirmation
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text("Checked in successfully")),
@@ -719,7 +736,7 @@ class _MapTabState extends State<MapTab> with AutomaticKeepAliveClientMixin<MapT
   Future<void> _handleCheckOut(String parkId, BuildContext context) async {
     final currentUser = FirebaseAuth.instance.currentUser;
     if (currentUser == null) return;
-    
+
     try {
       // Check out from this park
       await FirebaseFirestore.instance
@@ -728,15 +745,16 @@ class _MapTabState extends State<MapTab> with AutomaticKeepAliveClientMixin<MapT
           .collection('active_users')
           .doc(currentUser.uid)
           .delete();
-      
+
       // Refresh the map
       if (_finalPosition != null) {
-        await _fetchNearbyParks(_finalPosition!.latitude, _finalPosition!.longitude);
+        await _fetchNearbyParks(
+            _finalPosition!.latitude, _finalPosition!.longitude);
       }
-      
+
       // Close the dialog
       Navigator.of(context, rootNavigator: true).pop();
-      
+
       // Show confirmation
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text("Checked out successfully")),
@@ -749,17 +767,16 @@ class _MapTabState extends State<MapTab> with AutomaticKeepAliveClientMixin<MapT
     }
   }
 
-    // Check out from all parks the user is currently checked in to
+  // Check out from all parks the user is currently checked in to
   Future<void> _checkOutFromAllParks() async {
     try {
       final currentUser = FirebaseAuth.instance.currentUser;
       if (currentUser == null) return;
-      
+
       // Get all parks
-      QuerySnapshot parksSnapshot = await FirebaseFirestore.instance
-          .collection('parks')
-          .get();
-          
+      QuerySnapshot parksSnapshot =
+          await FirebaseFirestore.instance.collection('parks').get();
+
       // For each park, check if user is checked in and check them out if they are
       for (var parkDoc in parksSnapshot.docs) {
         String parkId = parkDoc.id;
@@ -768,7 +785,7 @@ class _MapTabState extends State<MapTab> with AutomaticKeepAliveClientMixin<MapT
             .doc(parkId)
             .collection('active_users')
             .doc(currentUser.uid);
-            
+
         DocumentSnapshot activeUserDoc = await activeUserRef.get();
         if (activeUserDoc.exists) {
           await activeUserRef.delete();
@@ -851,11 +868,9 @@ class _MapTabState extends State<MapTab> with AutomaticKeepAliveClientMixin<MapT
                                 firstDate: DateTime(2000),
                                 lastDate: DateTime(2100),
                               );
-                              if (date != null) {
-                                setState(() {
-                                  oneTimeDate = date;
-                                });
-                              }
+                              setState(() {
+                                oneTimeDate = date;
+                              });
                             },
                             child: const Text("Select Date"),
                           ),
@@ -905,11 +920,9 @@ class _MapTabState extends State<MapTab> with AutomaticKeepAliveClientMixin<MapT
                                 firstDate: DateTime(2000),
                                 lastDate: DateTime(2100),
                               );
-                              if (date != null) {
-                                setState(() {
-                                  monthlyDate = date;
-                                });
-                              }
+                              setState(() {
+                                monthlyDate = date;
+                              });
                             },
                             child: const Text("Select Date"),
                           ),
@@ -983,14 +996,17 @@ class _MapTabState extends State<MapTab> with AutomaticKeepAliveClientMixin<MapT
                         selectedRecurrence == null) {
                       ScaffoldMessenger.of(context).showSnackBar(
                         const SnackBar(
-                            content: Text("Please complete all required fields")),
+                            content:
+                                Text("Please complete all required fields")),
                       );
                       return;
                     }
-                    if (selectedRecurrence == "One Time" && oneTimeDate == null) {
+                    if (selectedRecurrence == "One Time" &&
+                        oneTimeDate == null) {
                       ScaffoldMessenger.of(context).showSnackBar(
                         const SnackBar(
-                            content: Text("Please select a date for a one-time event")),
+                            content: Text(
+                                "Please select a date for a one-time event")),
                       );
                       return;
                     }
@@ -998,14 +1014,17 @@ class _MapTabState extends State<MapTab> with AutomaticKeepAliveClientMixin<MapT
                         selectedWeekday == null) {
                       ScaffoldMessenger.of(context).showSnackBar(
                         const SnackBar(
-                            content: Text("Please select a day for a weekly event")),
+                            content:
+                                Text("Please select a day for a weekly event")),
                       );
                       return;
                     }
-                    if (selectedRecurrence == "Monthly" && monthlyDate == null) {
+                    if (selectedRecurrence == "Monthly" &&
+                        monthlyDate == null) {
                       ScaffoldMessenger.of(context).showSnackBar(
                         const SnackBar(
-                            content: Text("Please select a date for a monthly event")),
+                            content: Text(
+                                "Please select a date for a monthly event")),
                       );
                       return;
                     }
@@ -1062,7 +1081,8 @@ class _MapTabState extends State<MapTab> with AutomaticKeepAliveClientMixin<MapT
 
                     if (!eventEndDateTime.isAfter(eventStartDateTime)) {
                       ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text("End time must be after start time")),
+                        const SnackBar(
+                            content: Text("End time must be after start time")),
                       );
                       return;
                     }
@@ -1111,40 +1131,19 @@ class _MapTabState extends State<MapTab> with AutomaticKeepAliveClientMixin<MapT
     );
   }
 
-Future<Marker> _createParkMarker(Park park) async {
-  final firestore = FirebaseFirestore.instance;
+  Future<Marker> _createParkMarker(Park park) async {
+    final firestore = FirebaseFirestore.instance;
 
-  return Marker(
-    markerId: MarkerId(park.id),
-    position: LatLng(park.latitude, park.longitude),
+    return Marker(
+      markerId: MarkerId(park.id),
+      position: LatLng(park.latitude, park.longitude),
 
-    // When the user taps the pin…
-    onTap: () async {
-      final parkRef = firestore.collection('parks').doc(park.id);
-      final parkSnap = await parkRef.get();
-
-      // 1) If the park doesn’t exist yet, create it
-      if (!parkSnap.exists) {
-        await parkRef.set({
-          'name': park.name,
-          'latitude': park.latitude,
-          'longitude': park.longitude,
-          'createdAt': FieldValue.serverTimestamp(),
-        });
-      }
-
-      // 2) Now open your popup (active users / check in dialog)
-      _showUsersInPark(park.id, park.latitude, park.longitude);
-    },
-
-    infoWindow: InfoWindow(
-      title: park.name,
-      //snippet: 'Active Users: ${_activeUserCounts[park.id] ?? 0}',
-
-      // And the same logic if they tap the InfoWindow
+      // When the user taps the pin…
       onTap: () async {
         final parkRef = firestore.collection('parks').doc(park.id);
         final parkSnap = await parkRef.get();
+
+        // 1) If the park doesn’t exist yet, create it
         if (!parkSnap.exists) {
           await parkRef.set({
             'name': park.name,
@@ -1153,12 +1152,32 @@ Future<Marker> _createParkMarker(Park park) async {
             'createdAt': FieldValue.serverTimestamp(),
           });
         }
+
+        // 2) Now open your popup (active users / check in dialog)
         _showUsersInPark(park.id, park.latitude, park.longitude);
       },
-    ),
-  );
-}
 
+      infoWindow: InfoWindow(
+        title: park.name,
+        //snippet: 'Active Users: ${_activeUserCounts[park.id] ?? 0}',
+
+        // And the same logic if they tap the InfoWindow
+        onTap: () async {
+          final parkRef = firestore.collection('parks').doc(park.id);
+          final parkSnap = await parkRef.get();
+          if (!parkSnap.exists) {
+            await parkRef.set({
+              'name': park.name,
+              'latitude': park.latitude,
+              'longitude': park.longitude,
+              'createdAt': FieldValue.serverTimestamp(),
+            });
+          }
+          _showUsersInPark(park.id, park.latitude, park.longitude);
+        },
+      ),
+    );
+  }
 
   Future<void> _searchNearbyParks() async {
     setState(() {
@@ -1203,7 +1222,8 @@ Future<Marker> _createParkMarker(Park park) async {
       String ownerName = "";
       if (ownerDoc.exists) {
         final data = ownerDoc.data() as Map<String, dynamic>;
-        ownerName = "${data['firstName'] ?? ''} ${data['lastName'] ?? ''}".trim();
+        ownerName =
+            "${data['firstName'] ?? ''} ${data['lastName'] ?? ''}".trim();
       }
       if (ownerName.isEmpty) {
         ownerName = friendUserId;
@@ -1305,7 +1325,10 @@ Future<Marker> _createParkMarker(Park park) async {
   }
 
   void _listenToParkUpdates() {
-    FirebaseFirestore.instance.collection('parks').snapshots().listen((snapshot) {
+    FirebaseFirestore.instance
+        .collection('parks')
+        .snapshots()
+        .listen((snapshot) {
       for (var parkDoc in snapshot.docs) {
         final parkId = parkDoc.id;
         if (_markersMap.containsKey(parkId)) {
@@ -1325,12 +1348,12 @@ Future<Marker> _createParkMarker(Park park) async {
     });
   }
 
- @override
+  @override
   Widget build(BuildContext context) {
     super.build(context);
-    
+
     // Show a loading indicator until location is determined
-    if (!_isMapReady) {
+    if (!_isMapReady || _finalPosition == null) {
       return Container(
         decoration: const BoxDecoration(
           gradient: LinearGradient(
@@ -1369,9 +1392,6 @@ Future<Marker> _createParkMarker(Park park) async {
             markers: _markersMap.values.toSet(),
             onMapCreated: _onMapCreated,
             onCameraMove: _onCameraMove,
-            onCameraIdle: () {
-              // You can add actions when the camera stops moving if needed.
-            },
           ),
           Positioned(
             bottom: 90,
@@ -1387,7 +1407,8 @@ Future<Marker> _createParkMarker(Park park) async {
                           height: 20,
                           child: CircularProgressIndicator(
                             strokeWidth: 2,
-                            valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                            valueColor:
+                                AlwaysStoppedAnimation<Color>(Colors.white),
                           ),
                         ),
                         SizedBox(width: 10),
@@ -1405,5 +1426,4 @@ Future<Marker> _createParkMarker(Park park) async {
       ),
     );
   }
-
 }

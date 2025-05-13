@@ -16,23 +16,31 @@ import 'package:firebase_app_check/firebase_app_check.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
 
 Future<void> main() async {
-  await dotenv.load(fileName: '.env');
   WidgetsFlutterBinding.ensureInitialized();
-  await Firebase.initializeApp();
 
-  // For web persistence, you can set persistence explicitly:
-  // await FirebaseAuth.instance.setPersistence(Persistence.LOCAL);
+  try {
+    print("🟡 Loading .env");
+    await dotenv.load(fileName: '.env');
 
-  // Activate App Check.
-  // For testing purposes, use the debug provider. 
-  // In production, use AndroidProvider.playIntegrity (Android) or AppleProvider.deviceCheck (iOS).
-  await FirebaseAppCheck.instance.activate(
-    androidProvider: AndroidProvider.debug,  // For Android testing
-    appleProvider: AppleProvider.debug,      // For iOS testing
-    // If targeting web, add:
-    // webRecaptchaSiteKey: 'your-web-recaptcha-site-key',
-  );
-  await MobileAds.instance.initialize();
+    print("🟡 Initializing Firebase");
+    await Firebase.initializeApp();
+
+    print("🟢 Firebase initialized");
+
+    await FirebaseAppCheck.instance.activate(
+      androidProvider: AndroidProvider.debug,
+      appleProvider: AppleProvider.debug,
+    );
+
+    print("🟢 AppCheck initialized");
+
+    await MobileAds.instance.initialize();
+    print("🟢 Mobile Ads initialized");
+  } catch (e, stack) {
+    print("🔥 Firebase init failed: $e");
+    print(stack);
+  }
+
   runApp(const MyApp());
 }
 
@@ -41,6 +49,7 @@ class MyApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    print("✅ MyApp is building...");
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
@@ -119,7 +128,10 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
 
     final AuthorizationCredentialAppleID appleCredential =
         await SignInWithApple.getAppleIDCredential(
-      scopes: [AppleIDAuthorizationScopes.email, AppleIDAuthorizationScopes.fullName],
+      scopes: [
+        AppleIDAuthorizationScopes.email,
+        AppleIDAuthorizationScopes.fullName
+      ],
     );
 
     final OAuthCredential credential = OAuthProvider("apple.com").credential(
@@ -158,7 +170,7 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
   @override
   Widget build(BuildContext context) {
     final screenWidth = MediaQuery.of(context).size.width;
-
+    print("✅ ModernLoginScreen is building...");
     return Scaffold(
       body: Container(
         decoration: const BoxDecoration(
@@ -254,7 +266,8 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
                       Navigator.of(context).pushReplacementNamed('/profile');
                     } else {
                       ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text("Invalid email or password")),
+                        const SnackBar(
+                            content: Text("Invalid email or password")),
                       );
                     }
                   },
