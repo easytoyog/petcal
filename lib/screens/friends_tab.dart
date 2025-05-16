@@ -15,16 +15,11 @@ class FriendsTab extends StatefulWidget {
 class _FriendsTabState extends State<FriendsTab> {
   bool _isLoading = true;
   List<String> _friendIds = [];
-  // Mapping: friendId -> list of pet data.
   Map<String, List<Map<String, dynamic>>> _friendPets = {};
-  // Mapping: friendId -> active park name (if any).
   Map<String, String> _activeParkMapping = {};
-  // Mapping: friendId -> owner name.
   Map<String, String> _friendOwnerNames = {};
-  // List of favorite pet IDs (from favorites collection).
   List<String> _favoritePetIds = [];
 
-  // Search functionality.
   final TextEditingController _searchController = TextEditingController();
   List<Map<String, dynamic>> _searchResults = [];
   bool _isSearching = false;
@@ -34,9 +29,17 @@ class _FriendsTabState extends State<FriendsTab> {
   @override
   void initState() {
     super.initState();
-    _fetchFriends();
-    _fetchActiveParksMapping();
-    _fetchFavorites();
+    _fetchAllData();
+  }
+
+  Future<void> _fetchAllData() async {
+    setState(() => _isLoading = true);
+    await Future.wait([
+      _fetchFriends(),
+      _fetchActiveParksMapping(),
+      _fetchFavorites(),
+    ]);
+    setState(() => _isLoading = false);
   }
 
   Future<void> _fetchFavorites() async {
@@ -58,9 +61,6 @@ class _FriendsTabState extends State<FriendsTab> {
 
   Future<void> _fetchFriends() async {
     if (currentUserId == null) return;
-    setState(() {
-      _isLoading = true;
-    });
     try {
       QuerySnapshot snapshot = await FirebaseFirestore.instance
           .collection('friends')
@@ -71,74 +71,79 @@ class _FriendsTabState extends State<FriendsTab> {
       setState(() {
         _friendIds = friendIds;
       });
-      await _fetchFriendPets();
-      await _fetchFriendOwnerNames();
+      await Future.wait([
+        _fetchFriendPetsBatch(friendIds),
+        _fetchFriendOwnerNamesBatch(friendIds),
+      ]);
     } catch (e) {
       print("Error fetching friends: $e");
     }
-    setState(() {
-      _isLoading = false;
-    });
   }
 
-  Future<void> _fetchFriendPets() async {
+  // Batch fetch all pets for all friends using whereIn (max 10 per batch)
+  Future<void> _fetchFriendPetsBatch(List<String> friendIds) async {
     Map<String, List<Map<String, dynamic>>> friendPets = {};
-    for (String friendId in _friendIds) {
-      try {
-        QuerySnapshot petSnapshot = await FirebaseFirestore.instance
-            .collection('pets')
-            .where('ownerId', isEqualTo: friendId)
-            .get();
-        List<Map<String, dynamic>> petsData = petSnapshot.docs.map((doc) {
-          final data = doc.data() as Map<String, dynamic>;
-          data['petId'] = doc.id;
-          data['ownerId'] = friendId;
-          data['name'] = data['name'] ?? 'Unknown Pet';
-          data['photoUrl'] =
-              data['photoUrl'] ?? 'https://via.placeholder.com/100';
-          return data;
-        }).toList();
-        friendPets[friendId] = petsData;
-      } catch (e) {
-        print("Error fetching pets for friend $friendId: $e");
+    if (friendIds.isEmpty) {
+      setState(() => _friendPets = {});
+      return;
+    }
+    int chunkSize = 10;
+    for (int i = 0; i < friendIds.length; i += chunkSize) {
+      List<String> batch =
+          friendIds.sublist(i, min(i + chunkSize, friendIds.length));
+      QuerySnapshot petSnapshot = await FirebaseFirestore.instance
+          .collection('pets')
+          .where('ownerId', whereIn: batch)
+          .get();
+      for (var doc in petSnapshot.docs) {
+        final data = doc.data() as Map<String, dynamic>;
+        String ownerId = data['ownerId'];
+        data['petId'] = doc.id;
+        data['name'] = data['name'] ?? 'Unknown Pet';
+        data['photoUrl'] =
+            data['photoUrl'] ?? 'https://via.placeholder.com/100';
+        friendPets.putIfAbsent(ownerId, () => []).add(data);
       }
     }
+    if (!mounted) return;
     setState(() {
       _friendPets = friendPets;
     });
   }
 
-  Future<void> _fetchFriendOwnerNames() async {
+  // Batch fetch all owner names for friends using whereIn (max 10 per batch)
+  Future<void> _fetchFriendOwnerNamesBatch(List<String> friendIds) async {
     Map<String, String> names = {};
-    try {
-      if (_friendIds.isNotEmpty) {
-        List<String> idsToQuery = _friendIds.where((id) => id != currentUserId).toList();
-        int chunkSize = 10;
-        for (int i = 0; i < idsToQuery.length; i += chunkSize) {
-          List<String> chunk = idsToQuery.sublist(
-              i, min(i + chunkSize, idsToQuery.length));
-          QuerySnapshot snapshot = await FirebaseFirestore.instance
-              .collection('owners')
-              .where(FieldPath.documentId, whereIn: chunk)
-              .get();
-          for (var doc in snapshot.docs) {
-            final data = doc.data() as Map<String, dynamic>;
-            String firstName = data['firstName'] ?? data['first_name'] ?? '';
-            String lastName = data['lastName'] ?? data['last_name'] ?? '';
-            String name = "$firstName $lastName".trim();
-            if (name.isEmpty) name = "Unknown";
-            names[doc.id] = name;
-          }
-        }
-      }
-    } catch (e) {
-      print("Error fetching owner names: $e");
+    if (friendIds.isEmpty) {
+      setState(() => _friendOwnerNames = {});
+      return;
     }
+    List<String> idsToQuery =
+        friendIds.where((id) => id != currentUserId).toList();
+    int chunkSize = 10;
+    for (int i = 0; i < idsToQuery.length; i += chunkSize) {
+      List<String> chunk =
+          idsToQuery.sublist(i, min(i + chunkSize, idsToQuery.length));
+      QuerySnapshot snapshot = await FirebaseFirestore.instance
+          .collection('owners')
+          .where(FieldPath.documentId, whereIn: chunk)
+          .get();
+      for (var doc in snapshot.docs) {
+        final data = doc.data() as Map<String, dynamic>;
+        String firstName = data['firstName'] ?? data['first_name'] ?? '';
+        String lastName = data['lastName'] ?? data['last_name'] ?? '';
+        String name = "$firstName $lastName".trim();
+        if (name.isEmpty) name = "Unknown";
+        names[doc.id] = name;
+      }
+    }
+    if (!mounted) return;
     setState(() {
       _friendOwnerNames = names;
     });
   }
 
+  // No major optimization here, but you could cache park names if needed
   Future<void> _fetchActiveParksMapping() async {
     Map<String, String> mapping = {};
     try {
@@ -161,13 +166,12 @@ class _FriendsTabState extends State<FriendsTab> {
     } catch (e) {
       print("Error fetching active parks mapping: $e");
     }
+    if (!mounted) return;
     setState(() {
       _activeParkMapping = mapping;
     });
   }
 
-  /// Search for pets and owners.
-  /// Starts after 2 characters; performs client-side filtering (case-insensitive).
   Future<void> _searchPets(String query) async {
     if (query.length < 2) {
       setState(() {
@@ -181,7 +185,7 @@ class _FriendsTabState extends State<FriendsTab> {
     try {
       String lowerQuery = query.toLowerCase();
 
-      // Query 1: Fetch all pets.
+      // Fetch all pets matching the query (could be optimized with an index)
       QuerySnapshot petSnapshot =
           await FirebaseFirestore.instance.collection('pets').get();
       List<Map<String, dynamic>> petResults = petSnapshot.docs.map((doc) {
@@ -189,13 +193,12 @@ class _FriendsTabState extends State<FriendsTab> {
         data['petId'] = doc.id;
         return data;
       }).toList();
-      // Filter pets by pet name.
       petResults = petResults.where((pet) {
         String petName = (pet['name'] ?? '').toString().toLowerCase();
         return petName.contains(lowerQuery);
       }).toList();
 
-      // Query 2: Fetch all owners.
+      // Fetch all owners matching the query
       QuerySnapshot ownersSnapshot =
           await FirebaseFirestore.instance.collection('owners').get();
       Set<String> matchingOwnerIds = {};
@@ -208,28 +211,33 @@ class _FriendsTabState extends State<FriendsTab> {
           matchingOwnerIds.add(doc.id);
         }
       }
-      // For each matching owner, get one pet.
+      // Batch fetch pets for matching owners
       List<Map<String, dynamic>> ownerPetResults = [];
-      for (String ownerId in matchingOwnerIds) {
+      List<String> ownerIdList = matchingOwnerIds.toList();
+      int chunkSize = 10;
+      for (int i = 0; i < ownerIdList.length; i += chunkSize) {
+        List<String> chunk =
+            ownerIdList.sublist(i, min(i + chunkSize, ownerIdList.length));
         QuerySnapshot ownerPetSnapshot = await FirebaseFirestore.instance
             .collection('pets')
-            .where('ownerId', isEqualTo: ownerId)
+            .where('ownerId', whereIn: chunk)
             .limit(1)
             .get();
-        if (ownerPetSnapshot.docs.isNotEmpty) {
-          Map<String, dynamic> data =
-              ownerPetSnapshot.docs.first.data() as Map<String, dynamic>;
-          data['petId'] = ownerPetSnapshot.docs.first.id;
-          data['ownerId'] = ownerId;
-          // Fetch owner's name.
+        for (var doc in ownerPetSnapshot.docs) {
+          Map<String, dynamic> data = doc.data() as Map<String, dynamic>;
+          data['petId'] = doc.id;
+          data['ownerId'] = data['ownerId'];
           DocumentSnapshot ownerDoc = await FirebaseFirestore.instance
               .collection('owners')
-              .doc(ownerId)
+              .doc(data['ownerId'])
               .get();
           if (ownerDoc.exists) {
-            Map<String, dynamic> ownerData = ownerDoc.data() as Map<String, dynamic>;
-            String firstName = ownerData['firstName'] ?? ownerData['first_name'] ?? '';
-            String lastName = ownerData['lastName'] ?? ownerData['last_name'] ?? '';
+            Map<String, dynamic> ownerData =
+                ownerDoc.data() as Map<String, dynamic>;
+            String firstName =
+                ownerData['firstName'] ?? ownerData['first_name'] ?? '';
+            String lastName =
+                ownerData['lastName'] ?? ownerData['last_name'] ?? '';
             data['ownerName'] = "$firstName $lastName".trim();
           } else {
             data['ownerName'] = "Unknown";
@@ -237,7 +245,7 @@ class _FriendsTabState extends State<FriendsTab> {
           ownerPetResults.add(data);
         }
       }
-      // Combine results and deduplicate by petId.
+      // Merge and deduplicate results
       List<Map<String, dynamic>> combinedResults = [];
       Set<String> seen = {};
       for (var pet in petResults) {
@@ -251,7 +259,6 @@ class _FriendsTabState extends State<FriendsTab> {
           combinedResults.add(pet);
         }
       }
-      // For any pet without an ownerName, fetch owner's name.
       for (var pet in combinedResults) {
         if (pet['ownerName'] == null ||
             pet['ownerName'].toString().trim().isEmpty) {
@@ -261,9 +268,12 @@ class _FriendsTabState extends State<FriendsTab> {
               .doc(ownerId)
               .get();
           if (ownerDoc.exists) {
-            Map<String, dynamic> ownerData = ownerDoc.data() as Map<String, dynamic>;
-            String firstName = ownerData['firstName'] ?? ownerData['first_name'] ?? '';
-            String lastName = ownerData['lastName'] ?? ownerData['last_name'] ?? '';
+            Map<String, dynamic> ownerData =
+                ownerDoc.data() as Map<String, dynamic>;
+            String firstName =
+                ownerData['firstName'] ?? ownerData['first_name'] ?? '';
+            String lastName =
+                ownerData['lastName'] ?? ownerData['last_name'] ?? '';
             pet['ownerName'] = "$firstName $lastName".trim();
             if (pet['ownerName'].toString().isEmpty) {
               pet['ownerName'] = "Unknown";
@@ -284,7 +294,6 @@ class _FriendsTabState extends State<FriendsTab> {
     });
   }
 
-  /// Add a pet's owner as a friend based on a search result.
   Future<void> _addFriendFromSearch(Map<String, dynamic> petData) async {
     String friendId = petData['ownerId'];
     String ownerName = petData['ownerName'] ?? "Unknown";
@@ -313,7 +322,6 @@ class _FriendsTabState extends State<FriendsTab> {
     }
   }
 
-  /// Add friend function: saves friend and marks pet as favorite.
   Future<void> _addFriend(String friendUserId, String petId) async {
     final currentUser = FirebaseAuth.instance.currentUser;
     if (currentUser == null) return;
@@ -357,7 +365,6 @@ class _FriendsTabState extends State<FriendsTab> {
     }
   }
 
-  /// Remove friend.
   Future<void> _unfriend(String friendUserId, String petId) async {
     if (currentUserId == null) return;
     try {
@@ -395,8 +402,8 @@ class _FriendsTabState extends State<FriendsTab> {
               onPressed: () {
                 Navigator.of(ctx).pop();
                 _unfriend(friendUserId, petId);
-                ScaffoldMessenger.of(context)
-                    .showSnackBar(const SnackBar(content: Text("Friend removed.")));
+                ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text("Friend removed.")));
                 _fetchFriends();
               },
               child: const Text("Yes"),
@@ -407,154 +414,176 @@ class _FriendsTabState extends State<FriendsTab> {
     );
   }
 
-@override
-Widget build(BuildContext context) {
-  final filteredFriendIds = _friendIds.where((id) => id != currentUserId).toList();
+  @override
+  Widget build(BuildContext context) {
+    final filteredFriendIds =
+        _friendIds.where((id) => id != currentUserId).toList();
 
-  return Scaffold(
-    body: Stack(
-      children: [
-        SafeArea(
-          child: Column(
-            children: [
-              // Search field
-              Padding(
-                padding: const EdgeInsets.all(6.0),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    TextField(
-                      controller: _searchController,
-                      decoration: const InputDecoration(
-                        hintText: "Search pet to add as friend",
-                        border: OutlineInputBorder(),
-                        prefixIcon: Icon(Icons.search),
-                        contentPadding: EdgeInsets.symmetric(vertical: 6, horizontal: 6),
-                      ),
-                      onChanged: (value) {
-                        if (value.length >= 2) {
-                          _searchPets(value);
-                        } else {
-                          setState(() {
-                            _searchResults = [];
-                          });
-                        }
-                      },
-                    ),
-                    if (_isSearching)
-                      const LinearProgressIndicator()
-                    else if (_searchResults.isNotEmpty)
-                      Container(
-                        margin: const EdgeInsets.only(top: 4),
-                        padding: const EdgeInsets.all(4),
-                        decoration: BoxDecoration(
-                          color: Colors.white,
-                          border: Border.all(color: Colors.grey),
-                          borderRadius: BorderRadius.circular(4),
+    return Scaffold(
+      body: Stack(
+        children: [
+          SafeArea(
+            child: Column(
+              children: [
+                Padding(
+                  padding: const EdgeInsets.all(6.0),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      TextField(
+                        controller: _searchController,
+                        decoration: const InputDecoration(
+                          hintText: "Search pet to add as friend",
+                          border: OutlineInputBorder(),
+                          prefixIcon: Icon(Icons.search),
+                          contentPadding:
+                              EdgeInsets.symmetric(vertical: 6, horizontal: 6),
                         ),
-                        child: Column(
-                          children: _searchResults.map((petData) {
-                            bool alreadyFriend = _favoritePetIds.contains(petData['petId']);
-                            return ListTile(
-                              leading: CircleAvatar(
-                                backgroundImage: NetworkImage(
-                                  petData['photoUrl'] ?? 'https://via.placeholder.com/100',
-                                ),
-                                radius: 18,
-                              ),
-                              title: Text(petData['name'] ?? 'Unknown Pet', style: const TextStyle(fontSize: 12)),
-                              subtitle: Text("Owner: ${petData['ownerName'] ?? 'Unknown'}", style: const TextStyle(fontSize: 10)),
-                              trailing: alreadyFriend
-                                  ? const Icon(Icons.favorite, color: Colors.red, size: 18)
-                                  : IconButton(
-                                      icon: const Icon(Icons.favorite_border, color: Colors.red, size: 18),
-                                      onPressed: () {
-                                        _addFriendFromSearch(petData);
-                                        setState(() {
-                                          _searchResults = [];
-                                          _searchController.clear();
-                                        });
-                                      },
-                                    ),
-                            );
-                          }).toList(),
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-              // Friend list
-              Expanded(
-                child: _isLoading
-                    ? const Center(child: CircularProgressIndicator())
-                    : ListView.builder(
-                        padding: const EdgeInsets.only(bottom: 70), // leave space for banner
-                        itemCount: filteredFriendIds.length,
-                        itemBuilder: (context, index) {
-                          String friendId = filteredFriendIds[index];
-                          String ownerName = _friendOwnerNames[friendId] ?? "Unknown";
-                          final activePark = _activeParkMapping[friendId];
-                          final pets = _friendPets[friendId] ?? [];
-                          String petId = "";
-                          String petName = "";
-                          if (pets.isNotEmpty) {
-                            petId = pets[0]['petId'] ?? "";
-                            petName = pets[0]['name'] ?? "Unknown Pet";
+                        onChanged: (value) {
+                          if (value.length >= 2) {
+                            _searchPets(value);
+                          } else {
+                            setState(() {
+                              _searchResults = [];
+                            });
                           }
-                          return Card(
-                            margin: const EdgeInsets.symmetric(vertical: 2, horizontal: 4),
-                            child: Padding(
-                              padding: const EdgeInsets.all(6),
-                              child: Row(
-                                children: [
-                                  CircleAvatar(
-                                    backgroundImage: NetworkImage(
-                                      pets.isNotEmpty
-                                          ? pets[0]['photoUrl'] ?? 'https://via.placeholder.com/100'
-                                          : 'https://via.placeholder.com/100',
-                                    ),
-                                    radius: 30,
-                                  ),
-                                  const SizedBox(width: 8),
-                                  Expanded(
-                                    child: Column(
-                                      crossAxisAlignment: CrossAxisAlignment.start,
-                                      children: [
-                                        Text(petName, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold)),
-                                        Text("Owner: $ownerName", style: const TextStyle(fontSize: 12)),
-                                        if (activePark != null)
-                                          Text("Active at: $activePark", style: const TextStyle(fontSize: 10, color: Colors.green)),
-                                      ],
-                                    ),
-                                  ),
-                                  _favoritePetIds.contains(petId)
-                                      ? IconButton(
-                                          icon: const Icon(Icons.favorite, color: Colors.red, size: 18),
-                                          onPressed: () => _confirmUnfriend(friendId, petId),
-                                        )
-                                      : ElevatedButton(
-                                          onPressed: () => _addFriend(friendId, petId),
-                                          child: const Text("Add Friend", style: TextStyle(fontSize: 10)),
-                                        ),
-                                ],
-                              ),
-                            ),
-                          );
                         },
                       ),
-              ),
-            ],
+                      if (_isSearching)
+                        const LinearProgressIndicator()
+                      else if (_searchResults.isNotEmpty)
+                        Container(
+                          margin: const EdgeInsets.only(top: 4),
+                          padding: const EdgeInsets.all(4),
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            border: Border.all(color: Colors.grey),
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: Column(
+                            children: _searchResults.map((petData) {
+                              bool alreadyFriend =
+                                  _favoritePetIds.contains(petData['petId']);
+                              return ListTile(
+                                leading: CircleAvatar(
+                                  backgroundImage: NetworkImage(
+                                    petData['photoUrl'] ??
+                                        'https://via.placeholder.com/100',
+                                  ),
+                                  radius: 18,
+                                ),
+                                title: Text(petData['name'] ?? 'Unknown Pet',
+                                    style: const TextStyle(fontSize: 12)),
+                                subtitle: Text(
+                                    "Owner: ${petData['ownerName'] ?? 'Unknown'}",
+                                    style: const TextStyle(fontSize: 10)),
+                                trailing: alreadyFriend
+                                    ? const Icon(Icons.favorite,
+                                        color: Colors.red, size: 18)
+                                    : IconButton(
+                                        icon: const Icon(Icons.favorite_border,
+                                            color: Colors.red, size: 18),
+                                        onPressed: () {
+                                          _addFriendFromSearch(petData);
+                                          setState(() {
+                                            _searchResults = [];
+                                            _searchController.clear();
+                                          });
+                                        },
+                                      ),
+                              );
+                            }).toList(),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                Expanded(
+                  child: _isLoading
+                      ? const Center(child: CircularProgressIndicator())
+                      : ListView.builder(
+                          padding: const EdgeInsets.only(bottom: 70),
+                          itemCount: filteredFriendIds.length,
+                          itemBuilder: (context, index) {
+                            String friendId = filteredFriendIds[index];
+                            String ownerName =
+                                _friendOwnerNames[friendId] ?? "Unknown";
+                            final activePark = _activeParkMapping[friendId];
+                            final pets = _friendPets[friendId] ?? [];
+                            String petId = "";
+                            String petName = "";
+                            if (pets.isNotEmpty) {
+                              petId = pets[0]['petId'] ?? "";
+                              petName = pets[0]['name'] ?? "Unknown Pet";
+                            }
+                            return Card(
+                              margin: const EdgeInsets.symmetric(
+                                  vertical: 2, horizontal: 4),
+                              child: Padding(
+                                padding: const EdgeInsets.all(6),
+                                child: Row(
+                                  children: [
+                                    CircleAvatar(
+                                      backgroundImage: NetworkImage(
+                                        pets.isNotEmpty
+                                            ? pets[0]['photoUrl'] ??
+                                                'https://via.placeholder.com/100'
+                                            : 'https://via.placeholder.com/100',
+                                      ),
+                                      radius: 30,
+                                    ),
+                                    const SizedBox(width: 8),
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Text(petName,
+                                              style: const TextStyle(
+                                                  fontSize: 14,
+                                                  fontWeight: FontWeight.bold)),
+                                          Text("Owner: $ownerName",
+                                              style: const TextStyle(
+                                                  fontSize: 12)),
+                                          if (activePark != null)
+                                            Text("Active at: $activePark",
+                                                style: const TextStyle(
+                                                    fontSize: 10,
+                                                    color: Colors.green)),
+                                        ],
+                                      ),
+                                    ),
+                                    _favoritePetIds.contains(petId)
+                                        ? IconButton(
+                                            icon: const Icon(Icons.favorite,
+                                                color: Colors.red, size: 18),
+                                            onPressed: () => _confirmUnfriend(
+                                                friendId, petId),
+                                          )
+                                        : ElevatedButton(
+                                            onPressed: () =>
+                                                _addFriend(friendId, petId),
+                                            child: const Text("Add Friend",
+                                                style: TextStyle(fontSize: 10)),
+                                          ),
+                                  ],
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                ),
+              ],
+            ),
           ),
-        ),
-        const Positioned(
-          bottom: 0,
-          left: 0,
-          right: 0,
-          child: AdBanner(),
-        ),
-      ],
-    ),
-  );
-}
-
+          const Positioned(
+            bottom: 0,
+            left: 0,
+            right: 0,
+            child: AdBanner(),
+          ),
+        ],
+      ),
+    );
+  }
 }

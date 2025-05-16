@@ -3,7 +3,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:intl/intl.dart';
 import 'package:profanity_filter/profanity_filter.dart';
-import 'package:pet_calendar/widgets/ad_banner.dart'; // <-- import your AdBanner
+import 'package:pet_calendar/widgets/ad_banner.dart';
 
 class ChatRoomScreen extends StatefulWidget {
   final String parkId;
@@ -19,8 +19,9 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
   final String? currentUserId = FirebaseAuth.instance.currentUser?.uid;
   final ProfanityFilter filter = ProfanityFilter();
 
-  // Cache for sender's pet info.
+  // Caches for sender's pet and owner info.
   final Map<String, Map<String, dynamic>> _petInfoCache = {};
+  final Map<String, Map<String, dynamic>> _ownerInfoCache = {};
   String parkName = "Chatroom";
 
   @override
@@ -52,33 +53,68 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
     }
   }
 
-  Future<Map<String, dynamic>?> _getMainPetForUser(String userId) async {
-    if (_petInfoCache.containsKey(userId)) return _petInfoCache[userId];
-    try {
-      // primary pet
-      var snapshot = await FirebaseFirestore.instance
-          .collection('pets')
-          .where('ownerId', isEqualTo: userId)
-          .where('isPrimary', isEqualTo: true)
-          .limit(1)
-          .get();
-      if (snapshot.docs.isEmpty) {
-        // fallback
-        snapshot = await FirebaseFirestore.instance
+  // Batch fetch and cache all pet and owner info for the chat messages
+  Future<void> _preloadChatUserInfo(List<QueryDocumentSnapshot> docs) async {
+    final senderIds =
+        docs.map((d) => d['senderId'] as String? ?? "").toSet().toList();
+    // Fetch pets in batch
+    List<String> idsToFetch =
+        senderIds.where((id) => !_petInfoCache.containsKey(id)).toList();
+    if (idsToFetch.isNotEmpty) {
+      int chunkSize = 10;
+      for (int i = 0; i < idsToFetch.length; i += chunkSize) {
+        List<String> chunk = idsToFetch.sublist(
+            i,
+            i + chunkSize > idsToFetch.length
+                ? idsToFetch.length
+                : i + chunkSize);
+        QuerySnapshot petSnap = await FirebaseFirestore.instance
             .collection('pets')
-            .where('ownerId', isEqualTo: userId)
-            .limit(1)
+            .where('ownerId', whereIn: chunk)
+            .where('isPrimary', isEqualTo: true)
             .get();
+        for (var doc in petSnap.docs) {
+          final pet = doc.data() as Map<String, dynamic>;
+          _petInfoCache[pet['ownerId']] = pet;
+        }
+        // Fallback for users with no primary pet
+        List<String> missing =
+            chunk.where((id) => !_petInfoCache.containsKey(id)).toList();
+        if (missing.isNotEmpty) {
+          QuerySnapshot fallbackSnap = await FirebaseFirestore.instance
+              .collection('pets')
+              .where('ownerId', whereIn: missing)
+              .limit(1)
+              .get();
+          for (var doc in fallbackSnap.docs) {
+            final pet = doc.data() as Map<String, dynamic>;
+            _petInfoCache[pet['ownerId']] = pet;
+          }
+        }
       }
-      if (snapshot.docs.isNotEmpty) {
-        final pet = snapshot.docs.first.data() as Map<String, dynamic>;
-        _petInfoCache[userId] = pet;
-        return pet;
-      }
-    } catch (e) {
-      print("Error fetching pet for user $userId: $e");
     }
-    return null;
+    // Fetch owners in batch
+    List<String> ownerIdsToFetch =
+        senderIds.where((id) => !_ownerInfoCache.containsKey(id)).toList();
+    if (ownerIdsToFetch.isNotEmpty) {
+      int chunkSize = 10;
+      for (int i = 0; i < ownerIdsToFetch.length; i += chunkSize) {
+        List<String> chunk = ownerIdsToFetch.sublist(
+            i,
+            i + chunkSize > ownerIdsToFetch.length
+                ? ownerIdsToFetch.length
+                : i + chunkSize);
+        QuerySnapshot ownerSnap = await FirebaseFirestore.instance
+            .collection('owners')
+            .where(FieldPath.documentId, whereIn: chunk)
+            .get();
+        for (var doc in ownerSnap.docs) {
+          final owner = doc.data() as Map<String, dynamic>;
+          _ownerInfoCache[doc.id] = owner;
+        }
+      }
+    }
+    if (mounted) setState(() {});
   }
 
   Future<void> _toggleMessageLike(DocumentSnapshot doc) async {
@@ -89,9 +125,13 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
     final likes = List<String>.from(data['likes'] ?? []);
     try {
       if (likes.contains(uid)) {
-        await ref.update({'likes': FieldValue.arrayRemove([uid])});
+        await ref.update({
+          'likes': FieldValue.arrayRemove([uid])
+        });
       } else {
-        await ref.update({'likes': FieldValue.arrayUnion([uid])});
+        await ref.update({
+          'likes': FieldValue.arrayUnion([uid])
+        });
       }
     } catch (e) {
       print("Error toggling message like: $e");
@@ -103,7 +143,8 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
     if (text.isEmpty) return;
     if (filter.hasProfanity(text)) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Your message contains inappropriate language.")),
+        const SnackBar(
+            content: Text("Your message contains inappropriate language.")),
       );
       return;
     }
@@ -140,109 +181,96 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
         : "";
     final isMe = senderId == currentUserId;
 
-    return FutureBuilder<Map<String, dynamic>?>(
-      future: _getMainPetForUser(senderId),
-      builder: (ctx, petSnap) {
-        final pet = petSnap.data;
-        final petName = pet?['name'] ?? "Unknown Pet";
-        final petPhoto = pet?['photoUrl'] ?? "";
-        return FutureBuilder<DocumentSnapshot>(
-          future: FirebaseFirestore.instance
-              .collection('owners')
-              .doc(senderId)
-              .get(),
-          builder: (ctx, ownerSnap) {
-            final ownerData = ownerSnap.data?.data() as Map<String, dynamic>? ?? {};
-            final ownerName = "${ownerData['firstName'] ?? ''} ${ownerData['lastName'] ?? ''}"
-                    .trim()
-                    .isEmpty
-                ? "Unknown"
-                : "${ownerData['firstName']} ${ownerData['lastName']}";
-            final displayName = "$petName ($ownerName)";
-            final likes = List<String>.from(data['likes'] ?? []);
-            return Padding(
-              padding: const EdgeInsets.symmetric(vertical: 4.0),
-              child: Align(
-                alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
+    // Use cached pet and owner info
+    final pet = _petInfoCache[senderId];
+    final owner = _ownerInfoCache[senderId];
+    final petName = pet?['name'] ?? "Unknown Pet";
+    final petPhoto = pet?['photoUrl'] ?? "";
+    final ownerName = owner != null
+        ? "${owner['firstName'] ?? ''} ${owner['lastName'] ?? ''}"
+                .trim()
+                .isEmpty
+            ? "Unknown"
+            : "${owner['firstName']} ${owner['lastName']}"
+        : "Unknown";
+    final displayName = "$petName ($ownerName)";
+    final likes = List<String>.from(data['likes'] ?? []);
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4.0),
+      child: Align(
+        alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (!isMe)
+              CircleAvatar(
+                radius: 20,
+                backgroundImage:
+                    petPhoto.isNotEmpty ? NetworkImage(petPhoto) : null,
+                child: petPhoto.isEmpty ? const Icon(Icons.pets) : null,
+              ),
+            const SizedBox(width: 6),
+            Flexible(
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                decoration: BoxDecoration(
+                  color: isMe ? Colors.blue[100] : Colors.grey[300],
+                  borderRadius: BorderRadius.circular(8),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.1),
+                      blurRadius: 2,
+                      offset: const Offset(1, 1),
+                    )
+                  ],
+                ),
+                child: Column(
+                  crossAxisAlignment:
+                      isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
                   children: [
-                    if (!isMe)
-                      CircleAvatar(
-                        radius: 20,
-                        backgroundImage:
-                            petPhoto.isNotEmpty ? NetworkImage(petPhoto) : null,
-                        child:
-                            petPhoto.isEmpty ? const Icon(Icons.pets) : null,
-                      ),
-                    const SizedBox(width: 6),
-                    Flexible(
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 6, vertical: 4),
-                        decoration: BoxDecoration(
-                          color: isMe ? Colors.blue[100] : Colors.grey[300],
-                          borderRadius: BorderRadius.circular(8),
-                          boxShadow: [
-                            BoxShadow(
-                              color: Colors.black.withOpacity(0.1),
-                              blurRadius: 2,
-                              offset: const Offset(1, 1),
-                            )
-                          ],
-                        ),
-                        child: Column(
-                          crossAxisAlignment: isMe
-                              ? CrossAxisAlignment.end
-                              : CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              displayName,
-                              style: const TextStyle(
-                                  fontSize: 12, fontWeight: FontWeight.bold),
-                            ),
-                            const SizedBox(height: 2),
-                            Text(text, style: const TextStyle(fontSize: 13)),
-                            const SizedBox(height: 2),
-                            Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Text(
-                                  timeString,
-                                  style: const TextStyle(
-                                      fontSize: 10, color: Colors.grey),
-                                ),
-                                const SizedBox(width: 4),
-                                IconButton(
-                                  icon: const Icon(Icons.thumb_up,
-                                      size: 16, color: Colors.green),
-                                  onPressed: () => _toggleMessageLike(doc),
-                                ),
-                                Text("${likes.length}",
-                                    style: const TextStyle(fontSize: 10)),
-                              ],
-                            ),
-                          ],
-                        ),
-                      ),
+                    Text(
+                      displayName,
+                      style: const TextStyle(
+                          fontSize: 12, fontWeight: FontWeight.bold),
                     ),
-                    const SizedBox(width: 6),
-                    if (isMe)
-                      CircleAvatar(
-                        radius: 20,
-                        backgroundImage:
-                            petPhoto.isNotEmpty ? NetworkImage(petPhoto) : null,
-                        child:
-                            petPhoto.isEmpty ? const Icon(Icons.pets) : null,
-                      ),
+                    const SizedBox(height: 2),
+                    Text(text, style: const TextStyle(fontSize: 13)),
+                    const SizedBox(height: 2),
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          timeString,
+                          style:
+                              const TextStyle(fontSize: 10, color: Colors.grey),
+                        ),
+                        const SizedBox(width: 4),
+                        IconButton(
+                          icon: const Icon(Icons.thumb_up,
+                              size: 16, color: Colors.green),
+                          onPressed: () => _toggleMessageLike(doc),
+                        ),
+                        Text("${likes.length}",
+                            style: const TextStyle(fontSize: 10)),
+                      ],
+                    ),
                   ],
                 ),
               ),
-            );
-          },
-        );
-      },
+            ),
+            const SizedBox(width: 6),
+            if (isMe)
+              CircleAvatar(
+                radius: 20,
+                backgroundImage:
+                    petPhoto.isNotEmpty ? NetworkImage(petPhoto) : null,
+                child: petPhoto.isEmpty ? const Icon(Icons.pets) : null,
+              ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -267,6 +295,8 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
                   return const Center(child: CircularProgressIndicator());
                 }
                 final docs = snap.data!.docs;
+                // Preload all pet and owner info for these messages
+                _preloadChatUserInfo(docs);
                 return ListView.separated(
                   padding: const EdgeInsets.all(8),
                   itemCount: docs.length,
@@ -283,10 +313,11 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
             decoration: BoxDecoration(
               color: Colors.white,
-              border: Border.all(color: Colors.grey.shade400),    // <-- visible grey border
-              borderRadius: BorderRadius.circular(8),              // <-- rounded corners
-              boxShadow: [                                         // optional subtle shadow
-                BoxShadow(color: Colors.black12, blurRadius: 2, offset: Offset(0, 1)),
+              border: Border.all(color: Colors.grey.shade400),
+              borderRadius: BorderRadius.circular(8),
+              boxShadow: [
+                BoxShadow(
+                    color: Colors.black12, blurRadius: 2, offset: Offset(0, 1)),
               ],
             ),
             child: Row(
@@ -296,7 +327,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
                     controller: _messageController,
                     decoration: const InputDecoration(
                       hintText: "Type a message...",
-                      border: InputBorder.none,  // we already have an outer border
+                      border: InputBorder.none,
                     ),
                   ),
                 ),

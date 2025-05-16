@@ -9,7 +9,8 @@ class ServiceAd {
   final double latitude;
   final double longitude;
   final Timestamp createdAt;
-  final List<String> images; // Add this field for storing image URLs
+  final List<String> images;
+  final String? postalCode; // <-- Added field
 
   double? distanceFromUser; // Optional: used at runtime for sorting
 
@@ -22,7 +23,8 @@ class ServiceAd {
     required this.latitude,
     required this.longitude,
     required this.createdAt,
-    required this.images, // Add this parameter
+    required this.images,
+    this.postalCode, // <-- Added parameter
     this.distanceFromUser,
   });
 
@@ -30,14 +32,20 @@ class ServiceAd {
     final data = doc.data() as Map<String, dynamic>;
     return ServiceAd(
       id: doc.id,
-      userId: data['userId'],
-      type: data['type'],
-      title: data['title'],
-      description: data['description'],
-      latitude: data['latitude'],
-      longitude: data['longitude'],
-      createdAt: data['createdAt'],
-      images: List<String>.from(data['images'] ?? []), // Parse images from Firestore
+      userId: data['userId'] ?? '',
+      type: data['type'] ?? '',
+      title: data['title'] ?? '',
+      description: data['description'] ?? '',
+      latitude: (data['latitude'] is int)
+          ? (data['latitude'] as int).toDouble()
+          : (data['latitude'] ?? 0.0),
+      longitude: (data['longitude'] is int)
+          ? (data['longitude'] as int).toDouble()
+          : (data['longitude'] ?? 0.0),
+      createdAt:
+          data['createdAt'] is Timestamp ? data['createdAt'] : Timestamp.now(),
+      images: List<String>.from(data['images'] ?? []),
+      postalCode: data['postalCode'],
     );
   }
 
@@ -50,7 +58,8 @@ class ServiceAd {
       'latitude': latitude,
       'longitude': longitude,
       'createdAt': createdAt,
-      'images': images, // Include images in map
+      'images': images,
+      'postalCode': postalCode, // <-- Include in map
     };
   }
 }

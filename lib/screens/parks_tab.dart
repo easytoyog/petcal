@@ -1,5 +1,3 @@
-// parks_tab.dart
-
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -98,7 +96,7 @@ class _ParksTabState extends State<ParksTab> {
         _updateActiveUserCount(park.id);
       }
 
-      if (!mounted) return; // <-- Add this
+      if (!mounted) return;
       setState(() {
         _nearbyParks = parks;
         _hasFetchedNearby = true;
@@ -106,7 +104,7 @@ class _ParksTabState extends State<ParksTab> {
       });
     } catch (e) {
       print("Error fetching nearby parks: $e");
-      if (!mounted) return; // <-- Add this
+      if (!mounted) return;
       setState(() => _isSearching = false);
     }
   }
@@ -117,7 +115,7 @@ class _ParksTabState extends State<ParksTab> {
         .doc(parkId)
         .collection('active_users')
         .get();
-    if (!mounted) return; // <-- Add this
+    if (!mounted) return;
     setState(() {
       _activeUserCounts[parkId] = snap.size;
     });
@@ -142,7 +140,7 @@ class _ParksTabState extends State<ParksTab> {
   }
 
   Future<void> _showActiveUsersDialog(String parkId) async {
-    // … same as before …
+    // ...your existing dialog code...
   }
 
   Widget _buildParkCard(Park park, {required bool isFavorite}) {
@@ -299,7 +297,7 @@ class _ParksTabState extends State<ParksTab> {
                         TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
               ),
 
-              // **Moved**: Find Nearby button below the heading
+              // Find Nearby button below the heading
               if (!_hasFetchedNearby && !_isSearching)
                 Padding(
                   padding:
