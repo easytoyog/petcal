@@ -1,11 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-
-import 'package:pet_calendar/services/firestore_service.dart';
-import 'package:pet_calendar/models/owner_model.dart';
-import 'package:pet_calendar/models/pet_model.dart';
-import 'package:pet_calendar/utils/image_upload_util.dart'; // for pet photo uploads
+import 'package:inthepark/services/firestore_service.dart';
+import 'package:inthepark/models/owner_model.dart';
+import 'package:inthepark/models/pet_model.dart';
+import 'package:inthepark/utils/image_upload_util.dart'; // for pet photo uploads
 
 class ProfileTab extends StatefulWidget {
   const ProfileTab({Key? key}) : super(key: key);
@@ -31,6 +30,14 @@ class _ProfileTabState extends State<ProfileTab> {
     setState(() => _isLoading = true);
     try {
       final owner = await _firestoreService.getOwner();
+      if (owner == null) {
+        if (mounted) {
+          // Log the user out if no owner data is found
+          await FirebaseAuth.instance.signOut();
+          Navigator.of(context).pushReplacementNamed('/login');
+        }
+        return;
+      }
       final pets = await _firestoreService.getPetsForOwner(owner.uid);
       setState(() {
         _owner = owner;
@@ -81,17 +88,20 @@ class _ProfileTabState extends State<ProfileTab> {
             return SingleChildScrollView(
               controller: controller,
               child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 24.0),
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 16.0, vertical: 24.0),
                 child: Column(
                   children: [
                     const Text(
                       "Edit Profile",
-                      style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                      style:
+                          TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
                     ),
                     const SizedBox(height: 16),
                     TextField(
                       controller: firstNameCtrl,
-                      decoration: const InputDecoration(labelText: "First Name"),
+                      decoration:
+                          const InputDecoration(labelText: "First Name"),
                     ),
                     TextField(
                       controller: lastNameCtrl,
@@ -215,7 +225,8 @@ class _ProfileTabState extends State<ProfileTab> {
                   children: [
                     const Text(
                       "Add Pet",
-                      style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                      style:
+                          TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
                     ),
                     const SizedBox(height: 16),
                     TextField(
@@ -224,7 +235,8 @@ class _ProfileTabState extends State<ProfileTab> {
                     ),
                     TextField(
                       controller: breedController,
-                      decoration: const InputDecoration(labelText: "Pet Breed (optional)"),
+                      decoration: const InputDecoration(
+                          labelText: "Pet Breed (optional)"),
                     ),
                     const SizedBox(height: 12),
                     CircleAvatar(
@@ -241,7 +253,8 @@ class _ProfileTabState extends State<ProfileTab> {
                       ),
                       onPressed: () async {
                         final uploadedUrl =
-                            await ImageUploadUtil.pickAndUploadPetPhoto(newPetId);
+                            await ImageUploadUtil.pickAndUploadPetPhoto(
+                                newPetId);
                         if (uploadedUrl != null) {
                           setState(() {
                             photoUrl = uploadedUrl;
@@ -331,16 +344,19 @@ class _ProfileTabState extends State<ProfileTab> {
                       children: [
                         const Text(
                           "Edit Pet",
-                          style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                          style: TextStyle(
+                              fontSize: 20, fontWeight: FontWeight.bold),
                         ),
                         const SizedBox(height: 16),
                         TextField(
                           controller: nameController,
-                          decoration: const InputDecoration(labelText: "Pet Name"),
+                          decoration:
+                              const InputDecoration(labelText: "Pet Name"),
                         ),
                         TextField(
                           controller: breedController,
-                          decoration: const InputDecoration(labelText: "Pet Breed (optional)"),
+                          decoration: const InputDecoration(
+                              labelText: "Pet Breed (optional)"),
                         ),
                         const SizedBox(height: 12),
                         CircleAvatar(
@@ -357,7 +373,9 @@ class _ProfileTabState extends State<ProfileTab> {
                           ),
                           onPressed: () async {
                             // Pick and upload the new pet photo
-                            final uploadedUrl = await ImageUploadUtil.pickAndUploadPetPhoto(pet.id);
+                            final uploadedUrl =
+                                await ImageUploadUtil.pickAndUploadPetPhoto(
+                                    pet.id);
                             if (uploadedUrl != null) {
                               // Use the modal's setState to update the local photoUrl variable
                               setModalState(() {
@@ -395,7 +413,6 @@ class _ProfileTabState extends State<ProfileTab> {
       },
     );
   }
-
 
   Future<void> _editPet({
     required Pet oldPet,
@@ -445,7 +462,6 @@ class _ProfileTabState extends State<ProfileTab> {
 
   @override
   Widget build(BuildContext context) {
-    // We'll use a Stack so the gradient covers the entire screen
     return Scaffold(
       appBar: AppBar(
         leading: IconButton(
@@ -453,7 +469,7 @@ class _ProfileTabState extends State<ProfileTab> {
           onPressed: () => Navigator.of(context).pop(),
         ),
         title: const Text("Back"),
-      backgroundColor: const Color(0xFF567D46),
+        backgroundColor: const Color(0xFF567D46),
       ),
       body: Stack(
         children: [
@@ -471,11 +487,8 @@ class _ProfileTabState extends State<ProfileTab> {
           _isLoading
               ? const Center(child: CircularProgressIndicator())
               : _owner == null
-                  ? const Center(
-                      child: Text(
-                      "No owner data found.",
-                      style: TextStyle(color: Colors.white),
-                    ))
+                  // Show a loader while redirecting, not a message
+                  ? const Center(child: CircularProgressIndicator())
                   : SafeArea(
                       child: SingleChildScrollView(
                         padding: const EdgeInsets.all(16.0),
@@ -515,14 +528,12 @@ class _ProfileTabState extends State<ProfileTab> {
                                           Text("Phone: ${_owner!.phone}"),
                                           Text("Email: ${_owner!.email}"),
                                           const SizedBox(height: 4),
-                                          // Show location type in text form
                                           Text(
                                             "Location: ${_getLocationTypeString(_owner!.locationType)}",
                                           ),
                                         ],
                                       ),
                                     ),
-                                    // The edit button
                                     IconButton(
                                       onPressed: _showEditOwnerSheet,
                                       icon: const Icon(Icons.edit,
@@ -579,7 +590,8 @@ class _ProfileTabState extends State<ProfileTab> {
                                         radius: 24,
                                       ),
                                       title: Text(pet.name),
-                                      subtitle: Text(pet.breed ?? "No breed info"),
+                                      subtitle:
+                                          Text(pet.breed ?? "No breed info"),
                                       trailing: Row(
                                         mainAxisSize: MainAxisSize.min,
                                         children: [
@@ -592,8 +604,7 @@ class _ProfileTabState extends State<ProfileTab> {
                                           IconButton(
                                             icon: const Icon(Icons.delete,
                                                 color: Colors.red),
-                                            onPressed: () =>
-                                                _removePet(pet.id),
+                                            onPressed: () => _removePet(pet.id),
                                           ),
                                         ],
                                       ),
@@ -608,10 +619,12 @@ class _ProfileTabState extends State<ProfileTab> {
                               style: ElevatedButton.styleFrom(
                                 backgroundColor: Colors.white,
                                 foregroundColor: Colors.black,
-                                padding: const EdgeInsets.symmetric(horizontal: 30, vertical: 12),
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 30, vertical: 12),
                                 shape: RoundedRectangleBorder(
                                   borderRadius: BorderRadius.circular(8),
-                                  side: const BorderSide(color: Colors.black54), // subtle border
+                                  side: const BorderSide(
+                                      color: Colors.black54), // subtle border
                                 ),
                                 elevation: 2, // adds a bit of depth
                               ),
@@ -623,7 +636,6 @@ class _ProfileTabState extends State<ProfileTab> {
                                 ),
                               ),
                             ),
-
                           ],
                         ),
                       ),

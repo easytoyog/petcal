@@ -9,6 +9,7 @@ class Owner {
   final List<String> pets; // List of pet IDs
   final Address address;
   final int locationType; // 1: Automatic, 2: App Open, 3: Manual
+  final String? fcmToken; // <-- Add this line
 
   Owner({
     required this.uid,
@@ -19,6 +20,7 @@ class Owner {
     required this.pets,
     required this.address,
     required this.locationType,
+    this.fcmToken, // <-
   });
 
   /// Create an Owner from a Firestore [DocumentSnapshot].
@@ -33,6 +35,7 @@ class Owner {
       pets: List<String>.from(data['pets'] ?? []),
       address: Address.fromMap(data['address'] ?? {}),
       locationType: data['locationType'] ?? 1, // Default to 1
+      fcmToken: data['fcmToken'], // <-- Add this line
     );
   }
 
@@ -46,6 +49,7 @@ class Owner {
       'pets': pets,
       'address': address.toMap(),
       'locationType': locationType,
+      'fcmToken': fcmToken, // <-- Add this line
     };
   }
 }

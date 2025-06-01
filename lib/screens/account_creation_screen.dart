@@ -2,13 +2,13 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:google_sign_in/google_sign_in.dart';
-import 'package:sign_in_with_apple/sign_in_with_apple.dart';
-import 'package:font_awesome_flutter/font_awesome_flutter.dart';
+// import 'package:google_sign_in/google_sign_in.dart';
+// import 'package:sign_in_with_apple/sign_in_with_apple.dart';
+// import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_html/flutter_html.dart';
-import 'package:pet_calendar/legal/terms_conditions.dart';
-import 'package:pet_calendar/legal/privacy_policy.dart';
+import 'package:inthepark/legal/terms_conditions.dart';
+import 'package:inthepark/legal/privacy_policy.dart';
 
 class AccountCreationScreen extends StatefulWidget {
   const AccountCreationScreen({Key? key}) : super(key: key);
@@ -20,138 +20,93 @@ class AccountCreationScreen extends StatefulWidget {
 class _AccountCreationScreenState extends State<AccountCreationScreen> {
   final TextEditingController emailController = TextEditingController();
   final TextEditingController passwordController = TextEditingController();
-  final TextEditingController confirmPasswordController = TextEditingController();
+  final TextEditingController confirmPasswordController =
+      TextEditingController();
 
   Future<void> createAccountWithEmailPassword(BuildContext context) async {
-  if (passwordController.text != confirmPasswordController.text) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text("Passwords do not match")),
-    );
-    return;
-  }
-
-  try {
-    // Create the user in Firebase Authentication
-    final UserCredential userCredential = await FirebaseAuth.instance
-        .createUserWithEmailAndPassword(
-      email: emailController.text.trim(),
-      password: passwordController.text.trim(),
-    );
-
-    final String uid = userCredential.user!.uid;
-
-    print("User created with UID: $uid");
-
-    // Attempt to create the Firestore document
-    try {
-      await FirebaseFirestore.instance.collection('owners').doc(uid).set({
-        'email': emailController.text.trim(),
-        'firstName': '', // Placeholder
-        'lastName': '',  // Placeholder
-        'address': {},   // Placeholder
-        'phone': '',     // Placeholder
-        'createdAt': FieldValue.serverTimestamp(),
-      });
-      print("Firestore record created successfully for UID: $uid");
-    } catch (firestoreError) {
-      print("Error writing Firestore document: $firestoreError");
+    if (passwordController.text != confirmPasswordController.text) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Firestore error: $firestoreError")),
+        const SnackBar(content: Text("Passwords do not match")),
       );
+      return;
     }
 
-    // Navigate to the next screen
-    Navigator.pushNamed(context, '/ownerDetails');
-  } on FirebaseAuthException catch (authError) {
-    print("Authentication error: $authError");
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text("Auth error: ${authError.message}")),
-    );
-  } catch (generalError) {
-    print("General error: $generalError");
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text("Error: $generalError")),
-    );
-  }
-}
-
-Future<String> loadDocument(String path) async {
-  return await rootBundle.loadString(path);
-}
-
-
-  Future<void> createAccountWithGoogle(BuildContext context) async {
     try {
-      final GoogleSignIn googleSignIn = GoogleSignIn();
-      final GoogleSignInAccount? googleUser = await googleSignIn.signIn();
-      if (googleUser != null) {
-        final GoogleSignInAuthentication googleAuth =
-            await googleUser.authentication;
-        final credential = GoogleAuthProvider.credential(
-          accessToken: googleAuth.accessToken,
-          idToken: googleAuth.idToken,
+      // Create the user in Firebase Authentication
+      final UserCredential userCredential =
+          await FirebaseAuth.instance.createUserWithEmailAndPassword(
+        email: emailController.text.trim(),
+        password: passwordController.text.trim(),
+      );
+
+      final String uid = userCredential.user!.uid;
+
+      print("User created with UID: $uid");
+
+      // Attempt to create the Firestore document
+      try {
+        await FirebaseFirestore.instance.collection('owners').doc(uid).set({
+          'email': emailController.text.trim(),
+          'firstName': '', // Placeholder
+          'lastName': '', // Placeholder
+          'address': {}, // Placeholder
+          'phone': '', // Placeholder
+          'createdAt': FieldValue.serverTimestamp(),
+        });
+        print("Firestore record created successfully for UID: $uid");
+      } catch (firestoreError) {
+        print("Error writing Firestore document: $firestoreError");
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("Firestore error: $firestoreError")),
         );
-        final userCredential =
-            await FirebaseAuth.instance.signInWithCredential(credential);
-        if (userCredential.user != null) {
-          Navigator.pushNamed(context, '/ownerDetails'); // Navigate to the next step
-        }
       }
-    } catch (e) {
+
+      // Navigate to the next screen
+      Navigator.pushNamed(context, '/ownerDetails');
+    } on FirebaseAuthException catch (authError) {
+      print("Authentication error: $authError");
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Error: $e")),
+        SnackBar(content: Text("Auth error: ${authError.message}")),
+      );
+    } catch (generalError) {
+      print("General error: $generalError");
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Error: $generalError")),
       );
     }
   }
 
-  Future<void> createAccountWithApple(BuildContext context) async {
-    try {
-      final appleCredential = await SignInWithApple.getAppleIDCredential(
-        scopes: [
-          AppleIDAuthorizationScopes.email,
-          AppleIDAuthorizationScopes.fullName,
-        ],
-      );
-      final credential = OAuthProvider("apple.com").credential(
-        idToken: appleCredential.identityToken,
-        accessToken: appleCredential.authorizationCode,
-      );
-      final userCredential =
-          await FirebaseAuth.instance.signInWithCredential(credential);
-      if (userCredential.user != null) {
-        Navigator.pushNamed(context, '/ownerDetails'); // Navigate to the next step
-      }
-    } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Error: $e")),
-      );
-    }
+  Future<String> loadDocument(String path) async {
+    return await rootBundle.loadString(path);
   }
 
-  void showDocumentHtml(BuildContext context, String title, String htmlContent) {
-      showDialog(
-        context: context,
-        builder: (BuildContext context) {
-          return AlertDialog(
-            title: Text(title),
-            content: SizedBox(
-              width: double.maxFinite,
-              child: SingleChildScrollView(
-                child: Html(data: htmlContent),
-              ),
+  // Google and Apple sign up methods are commented out
+  // Future<void> createAccountWithGoogle(BuildContext context) async { ... }
+  // Future<void> createAccountWithApple(BuildContext context) async { ... }
+
+  void showDocumentHtml(
+      BuildContext context, String title, String htmlContent) {
+    showDialog(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: Text(title),
+          content: SizedBox(
+            width: double.maxFinite,
+            child: SingleChildScrollView(
+              child: Html(data: htmlContent),
             ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(context).pop(),
-                child: const Text("Close"),
-              ),
-            ],
-          );
-        },
-      );
-    }
-
-
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text("Close"),
+            ),
+          ],
+        );
+      },
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -174,7 +129,8 @@ Future<String> loadDocument(String path) async {
             mainAxisAlignment: MainAxisAlignment.center,
             crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              const Icon(Icons.pets, size: 100, color: Colors.tealAccent), // Centered Icon
+              const Icon(Icons.pets,
+                  size: 100, color: Colors.tealAccent), // Centered Icon
               const SizedBox(height: 10),
               const Text(
                 "Let's create your account!",
@@ -247,45 +203,49 @@ Future<String> loadDocument(String path) async {
                     ),
                   ),
                   onPressed: () => createAccountWithEmailPassword(context),
-                  child: const Text("Create Account", style: TextStyle(fontSize: 18)),
+                  child: const Text("Create Account",
+                      style: TextStyle(fontSize: 18)),
                 ),
               ),
               const SizedBox(height: 20),
-              Text(
-                "Or sign up with",
-                style: const TextStyle(color: Colors.white70),
-              ),
+              //Text(
+              //  "Or sign up with",
+              //  style: const TextStyle(color: Colors.white70),
+              //),
               const SizedBox(height: 10),
               Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  ElevatedButton.icon(
-                    onPressed: () => createAccountWithGoogle(context),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.white,
-                      foregroundColor: Colors.black,
-                      padding: const EdgeInsets.symmetric(vertical: 10.0, horizontal: 20.0),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                    ),
-                    icon: const FaIcon(FontAwesomeIcons.google, color: Colors.red, size: 20),
-                    label: const Text("Google"),
-                  ),
-                  const SizedBox(width: 10),
-                  ElevatedButton.icon(
-                    onPressed: () => createAccountWithApple(context),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.black,
-                      foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(vertical: 10.0, horizontal: 20.0),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                    ),
-                    icon: const Icon(Icons.apple, color: Colors.white),
-                    label: const Text("Apple"),
-                  ),
+                  // ElevatedButton.icon(
+                  //   onPressed: () => createAccountWithGoogle(context),
+                  //   style: ElevatedButton.styleFrom(
+                  //     backgroundColor: Colors.white,
+                  //     foregroundColor: Colors.black,
+                  //     padding: const EdgeInsets.symmetric(
+                  //         vertical: 10.0, horizontal: 20.0),
+                  //     shape: RoundedRectangleBorder(
+                  //       borderRadius: BorderRadius.circular(8),
+                  //     ),
+                  //   ),
+                  //   icon: const FaIcon(FontAwesomeIcons.google,
+                  //       color: Colors.red, size: 20),
+                  //   label: const Text("Google"),
+                  // ),
+                  // const SizedBox(width: 10),
+                  // ElevatedButton.icon(
+                  //   onPressed: () => createAccountWithApple(context),
+                  //   style: ElevatedButton.styleFrom(
+                  //     backgroundColor: Colors.black,
+                  //     foregroundColor: Colors.white,
+                  //     padding: const EdgeInsets.symmetric(
+                  //         vertical: 10.0, horizontal: 20.0),
+                  //     shape: RoundedRectangleBorder(
+                  //       borderRadius: BorderRadius.circular(8),
+                  //     ),
+                  //   ),
+                  //   icon: const Icon(Icons.apple, color: Colors.white),
+                  //   label: const Text("Apple"),
+                  // ),
                 ],
               ),
               const SizedBox(height: 20),
@@ -294,7 +254,8 @@ Future<String> loadDocument(String path) async {
                 text: TextSpan(
                   style: const TextStyle(color: Colors.white70, fontSize: 14),
                   children: [
-                    const TextSpan(text: "By creating an account, you agree to our "),
+                    const TextSpan(
+                        text: "By creating an account, you agree to our "),
                     TextSpan(
                       text: "Terms",
                       style: const TextStyle(

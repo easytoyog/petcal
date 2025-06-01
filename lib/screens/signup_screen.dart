@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:pet_calendar/models/owner_model.dart';
-import 'package:pet_calendar/services/firestore_service.dart';
+import 'package:inthepark/models/owner_model.dart';
+import 'package:inthepark/services/firestore_service.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 
 class SignupScreen extends StatelessWidget {
@@ -92,26 +92,26 @@ class SignupScreen extends StatelessWidget {
                 onPressed: () async {
                   try {
                     final owner = Owner(
-                      uid: firestoreService.getCurrentUserId()!,
-                      firstName: firstNameController.text.trim(),
-                      lastName: lastNameController.text.trim(),
-                      phone: phoneController.text.trim(),
-                      email: FirebaseAuth.instance.currentUser!.email!,
-                      pets: [],
-                      address: Address(
-                        street: streetController.text.trim(),
-                        city: cityController.text.trim(),
-                        state: stateController.text.trim(),
-                        country: countryController.text.trim(),
-                        postalCode: postalCodeController.text.trim(),
-                      ),
-                      locationType: 1
-                    );
+                        uid: firestoreService.getCurrentUserId()!,
+                        firstName: firstNameController.text.trim(),
+                        lastName: lastNameController.text.trim(),
+                        phone: phoneController.text.trim(),
+                        email: FirebaseAuth.instance.currentUser!.email!,
+                        pets: [],
+                        address: Address(
+                          street: streetController.text.trim(),
+                          city: cityController.text.trim(),
+                          state: stateController.text.trim(),
+                          country: countryController.text.trim(),
+                          postalCode: postalCodeController.text.trim(),
+                        ),
+                        locationType: 1);
 
                     await firestoreService.createOwner(owner);
 
                     ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text("Owner created successfully!")),
+                      const SnackBar(
+                          content: Text("Owner created successfully!")),
                     );
 
                     Navigator.pushReplacementNamed(context, '/home');

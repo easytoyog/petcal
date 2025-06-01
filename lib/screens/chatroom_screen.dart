@@ -3,7 +3,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:intl/intl.dart';
 import 'package:profanity_filter/profanity_filter.dart';
-import 'package:pet_calendar/widgets/ad_banner.dart';
+import 'package:inthepark/widgets/ad_banner.dart';
 
 class ChatRoomScreen extends StatefulWidget {
   final String parkId;

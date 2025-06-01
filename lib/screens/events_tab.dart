@@ -2,12 +2,12 @@
 import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:pet_calendar/models/park_event.dart';
+import 'package:inthepark/models/park_event.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:location/location.dart' as loc;
 import 'package:intl/intl.dart';
-import 'package:pet_calendar/screens/chatroom_screen.dart';
-import 'package:pet_calendar/widgets/ad_banner.dart';
+import 'package:inthepark/screens/chatroom_screen.dart';
+import 'package:inthepark/widgets/ad_banner.dart';
 
 class EventsTab extends StatefulWidget {
   final String? parkIdFilter;

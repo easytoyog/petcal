@@ -8,7 +8,7 @@ import '../models/park_model.dart';
 class LocationService {
   final loc.Location _location = loc.Location();
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
-  final String _googlePlacesApiKey; // Your Google Places API key  
+  final String _googlePlacesApiKey; // Your Google Places API key
 
   LocationService(this._googlePlacesApiKey);
 
@@ -25,18 +25,21 @@ class LocationService {
       if (permissionGranted != loc.PermissionStatus.granted) return;
     }
 
-    _location.changeSettings(interval: 5000, accuracy: loc.LocationAccuracy.high);
+    _location.changeSettings(
+        interval: 5000, accuracy: loc.LocationAccuracy.high);
     _location.enableBackgroundMode(enable: true);
   }
 
   /// Finds parks within a 500m radius of the user's location.
   /// Returns a list of Park objects.
   Future<List<Park>> findNearbyParks(double userLat, double userLng) async {
-    const String baseUrl = "https://maps.googleapis.com/maps/api/place/nearbysearch/json";
+    const String baseUrl =
+        "https://maps.googleapis.com/maps/api/place/nearbysearch/json";
     const String type = "park";
     const int radius = 500; // Search radius in meters for finding nearby parks
 
-    final String url = "$baseUrl?location=$userLat,$userLng&radius=$radius&type=$type&key=$_googlePlacesApiKey";
+    final String url =
+        "$baseUrl?location=$userLat,$userLng&radius=$radius&type=$type&key=$_googlePlacesApiKey";
     List<Park> parks = [];
 
     try {
@@ -53,7 +56,8 @@ class LocationService {
               longitude: place['geometry']['location']['lng'],
             );
             // Check if a park with the same name (ignoring case) is already added.
-            if (parks.any((p) => p.name.toLowerCase() == park.name.toLowerCase())) {
+            if (parks
+                .any((p) => p.name.toLowerCase() == park.name.toLowerCase())) {
               continue;
             }
             parks.add(park);
@@ -69,11 +73,14 @@ class LocationService {
   /// Determines if the user is currently at a park (within 100m).
   /// Returns the Park object if user is at a park, null otherwise.
   Future<Park?> isUserAtPark(double userLat, double userLng) async {
-    const String baseUrl = "https://maps.googleapis.com/maps/api/place/nearbysearch/json";
+    const String baseUrl =
+        "https://maps.googleapis.com/maps/api/place/nearbysearch/json";
     const String type = "park";
-    const int radius = 100; // Smaller radius in meters to determine if user is at a park
+    const int radius =
+        100; // Smaller radius in meters to determine if user is at a park
 
-    final String url = "$baseUrl?location=$userLat,$userLng&radius=$radius&type=$type&key=$_googlePlacesApiKey";
+    final String url =
+        "$baseUrl?location=$userLat,$userLng&radius=$radius&type=$type&key=$_googlePlacesApiKey";
 
     try {
       final response = await http.get(Uri.parse(url));
@@ -108,9 +115,31 @@ class LocationService {
 
   /// Uploads the current user's check-in data to the active_users collection of the specified park.
   /// Ensures that the park document exists before updating the userCount.
-  Future<void> uploadUserToActiveUsersTable(String parkId, double lat, double lng) async {
+  Future<void> uploadUserToActiveUsersTable(
+      String parkId, double lat, double lng) async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
+
+    // Check out from all other parks first
+    final parksSnapshot = await _firestore.collection('parks').get();
+    for (var parkDoc in parksSnapshot.docs) {
+      final otherParkId = parkDoc.id;
+      if (otherParkId != parkId) {
+        final userRef = _firestore
+            .collection('parks')
+            .doc(otherParkId)
+            .collection('active_users')
+            .doc(user.uid);
+        final userDoc = await userRef.get();
+        if (userDoc.exists) {
+          await userRef.delete();
+          // Decrement userCount if needed
+          await _firestore.collection('parks').doc(otherParkId).update({
+            'userCount': FieldValue.increment(-1),
+          });
+        }
+      }
+    }
 
     final parkRef = _firestore.collection('parks').doc(parkId);
     final parkDoc = await parkRef.get();

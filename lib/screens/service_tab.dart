@@ -6,8 +6,8 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:location/location.dart' as loc;
-import 'package:pet_calendar/models/service_ad_model.dart';
-import 'package:pet_calendar/models/owner_model.dart';
+import 'package:inthepark/models/service_ad_model.dart';
+import 'package:inthepark/models/owner_model.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:geocoding/geocoding.dart';
 
@@ -220,8 +220,9 @@ class _ServiceTabState extends State<ServiceTab> {
                                         fit: BoxFit.cover,
                                         loadingBuilder:
                                             (context, child, loadingProgress) {
-                                          if (loadingProgress == null)
+                                          if (loadingProgress == null) {
                                             return child;
+                                          }
                                           return Container(
                                             width: 80,
                                             height: 80,
@@ -394,7 +395,7 @@ class _ServiceTabState extends State<ServiceTab> {
                           backgroundColor: Colors.green,
                         ),
                       );
-                    } catch (e, stack) {
+                    } catch (e) {
                       Navigator.of(context).pop();
                       ScaffoldMessenger.of(context).showSnackBar(
                         SnackBar(
@@ -555,8 +556,9 @@ class _ServiceTabState extends State<ServiceTab> {
                                               fit: BoxFit.cover,
                                               loadingBuilder: (context, child,
                                                   loadingProgress) {
-                                                if (loadingProgress == null)
+                                                if (loadingProgress == null) {
                                                   return child;
+                                                }
                                                 return Center(
                                                   child:
                                                       CircularProgressIndicator(

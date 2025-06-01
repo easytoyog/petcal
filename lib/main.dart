@@ -1,19 +1,21 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:google_sign_in/google_sign_in.dart';
-import 'package:sign_in_with_apple/sign_in_with_apple.dart';
-import 'package:pet_calendar/screens/profile_screen.dart';
-import 'package:pet_calendar/screens/signup_screen.dart';
-import 'package:pet_calendar/screens/account_creation_screen.dart';
-import 'package:pet_calendar/screens/owner_detail_screen.dart';
-import 'package:pet_calendar/screens/pet_detail_screen.dart';
-import 'package:pet_calendar/screens/location_service_choice.dart';
-import 'package:pet_calendar/screens/allsetup.dart';
+// import 'package:google_sign_in/google_sign_in.dart';
+// import 'package:sign_in_with_apple/sign_in_with_apple.dart';
+import 'package:inthepark/screens/profile_screen.dart';
+import 'package:inthepark/screens/signup_screen.dart';
+import 'package:inthepark/screens/account_creation_screen.dart';
+import 'package:inthepark/screens/owner_detail_screen.dart';
+import 'package:inthepark/screens/pet_detail_screen.dart';
+import 'package:inthepark/screens/location_service_choice.dart';
+import 'package:inthepark/screens/allsetup.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:firebase_app_check/firebase_app_check.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -26,6 +28,10 @@ Future<void> main() async {
     await Firebase.initializeApp();
 
     print("🟢 Firebase initialized");
+
+    FirebaseMessaging messaging = FirebaseMessaging.instance;
+    await messaging.requestPermission();
+    print("🟢 Firebase messaging initialized");
 
     await FirebaseAppCheck.instance.activate(
       androidProvider: AndroidProvider.debug,
@@ -103,47 +109,93 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
   final TextEditingController emailController = TextEditingController();
   final TextEditingController passwordController = TextEditingController();
 
-  Future<User?> signInWithGoogle() async {
-    FirebaseAuth auth = FirebaseAuth.instance;
-    final GoogleSignIn googleSignIn = GoogleSignIn();
+  Future<void> saveUserFcmToken(User user) async {
+    final messaging = FirebaseMessaging.instance;
+    final settings = await messaging.requestPermission();
+    if (settings.authorizationStatus == AuthorizationStatus.authorized) {
+      // Listen for token refresh (works for initial token too)
+      messaging.onTokenRefresh.listen((token) async {
+        await FirebaseFirestore.instance.collection('owners').doc(user.uid).set(
+          {'fcmToken': token},
+          SetOptions(merge: true),
+        );
+      });
 
-    final GoogleSignInAccount? googleUser = await googleSignIn.signIn();
-    if (googleUser != null) {
-      final GoogleSignInAuthentication googleAuth =
-          await googleUser.authentication;
-      final OAuthCredential credential = GoogleAuthProvider.credential(
-        accessToken: googleAuth.accessToken,
-        idToken: googleAuth.idToken,
-      );
-
-      final UserCredential userCredential =
-          await auth.signInWithCredential(credential);
-      return userCredential.user;
+      // Optionally, try to get the token immediately (may still be null)
+      final token = await messaging.getToken();
+      if (token != null) {
+        await FirebaseFirestore.instance.collection('owners').doc(user.uid).set(
+          {'fcmToken': token},
+          SetOptions(merge: true),
+        );
+      }
+    } else {
+      print('User declined or has not accepted notification permission');
     }
-    return null;
   }
 
-  Future<User?> signInWithApple() async {
-    FirebaseAuth auth = FirebaseAuth.instance;
+  // Google Sign-In (commented out)
+  // Future<User?> signInWithGoogle() async {
+  //   FirebaseAuth auth = FirebaseAuth.instance;
+  //   final GoogleSignIn googleSignIn = GoogleSignIn();
+  //   try {
+  //     final GoogleSignInAccount? googleUser = await googleSignIn.signIn();
+  //     if (googleUser != null) {
+  //       final GoogleSignInAuthentication googleAuth =
+  //           await googleUser.authentication;
+  //       final OAuthCredential credential = GoogleAuthProvider.credential(
+  //         accessToken: googleAuth.accessToken,
+  //         idToken: googleAuth.idToken,
+  //       );
+  //       final UserCredential userCredential =
+  //           await auth.signInWithCredential(credential);
+  //       final user = userCredential.user;
+  //       if (user != null) {
+  //         await saveUserFcmToken(user);
+  //         Navigator.of(context).pushReplacementNamed('/profile');
+  //       }
+  //       return user;
+  //     }
+  //   } catch (e) {
+  //     ScaffoldMessenger.of(context).showSnackBar(
+  //       SnackBar(content: Text("Google sign-in error: $e")),
+  //     );
+  //   }
+  //   return null;
+  // }
 
-    final AuthorizationCredentialAppleID appleCredential =
-        await SignInWithApple.getAppleIDCredential(
-      scopes: [
-        AppleIDAuthorizationScopes.email,
-        AppleIDAuthorizationScopes.fullName
-      ],
-    );
+  // Apple Sign-In (commented out)
+  // Future<User?> signInWithApple() async {
+  //   FirebaseAuth auth = FirebaseAuth.instance;
+  //   try {
+  //     final AuthorizationCredentialAppleID appleCredential =
+  //         await SignInWithApple.getAppleIDCredential(
+  //       scopes: [
+  //         AppleIDAuthorizationScopes.email,
+  //         AppleIDAuthorizationScopes.fullName
+  //       ],
+  //     );
+  //     final OAuthCredential credential = OAuthProvider("apple.com").credential(
+  //       idToken: appleCredential.identityToken,
+  //       accessToken: appleCredential.authorizationCode,
+  //     );
+  //     final UserCredential userCredential =
+  //         await auth.signInWithCredential(credential);
+  //     final user = userCredential.user;
+  //     if (user != null) {
+  //       await saveUserFcmToken(user);
+  //       Navigator.of(context).pushReplacementNamed('/profile');
+  //     }
+  //     return user;
+  //   } catch (e) {
+  //     ScaffoldMessenger.of(context).showSnackBar(
+  //       SnackBar(content: Text("Apple sign-in error: $e")),
+  //     );
+  //     return null;
+  //   }
+  // }
 
-    final OAuthCredential credential = OAuthProvider("apple.com").credential(
-      idToken: appleCredential.identityToken,
-      accessToken: appleCredential.authorizationCode,
-    );
-
-    final UserCredential userCredential =
-        await auth.signInWithCredential(credential);
-    return userCredential.user;
-  }
-
+  // Email/Password login
   Future<User?> loginUsingEmailPassword({
     required String email,
     required String password,
@@ -157,10 +209,22 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
         password: password,
       );
       user = userCredential.user;
+      if (user != null) {
+        await saveUserFcmToken(user);
+        Navigator.of(context).pushReplacementNamed('/profile');
+      }
     } on FirebaseAuthException catch (e) {
       if (e.code == "user-not-found") {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text("No user found with this email.")),
+        );
+      } else if (e.code == "wrong-password") {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("Incorrect password.")),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("Login error: ${e.message}")),
         );
       }
     }
@@ -275,49 +339,49 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
                 ),
               ),
               const SizedBox(height: 15),
-              Text(
-                "Or sign in with",
-                style: GoogleFonts.nunito(color: Colors.white54, fontSize: 14),
-              ),
+              //   Text(
+              //     "Or sign in with",
+              //     style: GoogleFonts.nunito(color: Colors.white54, fontSize: 14),
+              //   ),
               const SizedBox(height: 15),
               Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  ElevatedButton.icon(
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.white,
-                      foregroundColor: Colors.black,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                    ),
-                    icon: const Icon(Icons.login),
-                    label: const Text("Google"),
-                    onPressed: () async {
-                      User? user = await signInWithGoogle();
-                      if (user != null) {
-                        Navigator.of(context).pushReplacementNamed('/profile');
-                      }
-                    },
-                  ),
-                  const SizedBox(width: 10),
-                  ElevatedButton.icon(
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.black,
-                      foregroundColor: Colors.white,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                    ),
-                    icon: const Icon(Icons.apple),
-                    label: const Text("Apple"),
-                    onPressed: () async {
-                      User? user = await signInWithApple();
-                      if (user != null) {
-                        Navigator.of(context).pushReplacementNamed('/profile');
-                      }
-                    },
-                  ),
+                  // ElevatedButton.icon(
+                  //   style: ElevatedButton.styleFrom(
+                  //     backgroundColor: Colors.white,
+                  //     foregroundColor: Colors.black,
+                  //     shape: RoundedRectangleBorder(
+                  //       borderRadius: BorderRadius.circular(8),
+                  //     ),
+                  //   ),
+                  //   icon: const Icon(Icons.login),
+                  //   label: const Text("Google"),
+                  //   onPressed: () async {
+                  //     User? user = await signInWithGoogle();
+                  //     if (user != null) {
+                  //       Navigator.of(context).pushReplacementNamed('/profile');
+                  //     }
+                  //   },
+                  // ),
+                  // const SizedBox(width: 10),
+                  // ElevatedButton.icon(
+                  //   style: ElevatedButton.styleFrom(
+                  //     backgroundColor: Colors.black,
+                  //     foregroundColor: Colors.white,
+                  //     shape: RoundedRectangleBorder(
+                  //       borderRadius: BorderRadius.circular(8),
+                  //     ),
+                  //   ),
+                  //   icon: const Icon(Icons.apple),
+                  //   label: const Text("Apple"),
+                  //   onPressed: () async {
+                  //     User? user = await signInWithApple();
+                  //     if (user != null) {
+                  //       Navigator.of(context).pushReplacementNamed('/profile');
+                  //     }
+                  //   },
+                  // ),
                 ],
               ),
               const SizedBox(height: 20),

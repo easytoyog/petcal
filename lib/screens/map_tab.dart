@@ -7,11 +7,13 @@ import 'package:location/location.dart' as loc;
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:geocoding/geocoding.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:pet_calendar/models/park_model.dart';
-import 'package:pet_calendar/services/location_service.dart';
+import 'package:inthepark/models/park_model.dart';
+import 'package:inthepark/services/location_service.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:pet_calendar/screens/chatroom_screen.dart';
-import 'package:pet_calendar/services/firestore_service.dart';
+import 'package:inthepark/screens/chatroom_screen.dart';
+import 'package:inthepark/services/firestore_service.dart';
+import 'package:inthepark/utils/utils.dart'; // Import your utility
+import 'package:inthepark/widgets/active_pets_dialog.dart';
 
 class MapTab extends StatefulWidget {
   final void Function(String parkId) onShowEvents;
@@ -48,14 +50,18 @@ class _MapTabState extends State<MapTab>
   @override
   void initState() {
     super.initState();
-    // Start loading location and nearby parks.
-    setState(() {
-      _isSearching = true; // Set to true on initial load
-    });
-    _initLocationFlow();
-    _locationService.enableBackgroundLocation();
-    _listenToParkUpdates();
+    _isSearching = true;
     _fetchFavorites();
+    _locationService.enableBackgroundLocation();
+    _loadSavedLocationAndSetMap();
+  }
+
+  Future<void> _loadSavedLocationAndSetMap() async {
+    final savedLocation = await _getSavedUserLocation();
+    setState(() {
+      _finalPosition = savedLocation ?? const LatLng(43.7615, -79.4111);
+      _isMapReady = true;
+    });
   }
 
   @override
@@ -124,7 +130,6 @@ class _MapTabState extends State<MapTab>
     final prefs = await SharedPreferences.getInstance();
     await prefs.setDouble('last_latitude', latitude);
     await prefs.setDouble('last_longitude', longitude);
-    print('Saved user location: $latitude, $longitude');
   }
 
   // Get user location from shared preferences
@@ -214,7 +219,6 @@ class _MapTabState extends State<MapTab>
             // Save this location for next time
             _saveUserLocation(currentLatLng.latitude, currentLatLng.longitude);
 
-            // Update map position if a real location is found
             setState(() {
               _finalPosition = currentLatLng;
             });
@@ -232,33 +236,10 @@ class _MapTabState extends State<MapTab>
             // Load parks without blocking UI
             _loadNearbyParks(currentLatLng);
           } else {
-            // Fallback to address-based location
-            final addressLocation = await _getLocationFromUserAddress();
-            if (addressLocation != null) {
-              // Save this location for next time
-              _saveUserLocation(
-                  addressLocation.latitude, addressLocation.longitude);
-
-              setState(() {
-                _finalPosition = addressLocation;
-              });
-
-              _mapController?.animateCamera(
-                CameraUpdate.newCameraPosition(
-                  CameraPosition(
-                    target: addressLocation,
-                    zoom: 18,
-                  ),
-                ),
-              );
-
-              _loadNearbyParks(addressLocation);
-            } else {
-              // No location could be determined
-              setState(() {
-                _isSearching = false; // Reset loading state
-              });
-            }
+            // No location could be determined, just use default
+            setState(() {
+              _isSearching = false; // Reset loading state
+            });
           }
         }).catchError((e) {
           print("Error in location retrieval: $e");
@@ -413,10 +394,14 @@ class _MapTabState extends State<MapTab>
         ),
       );
     }
+    _initLocationFlow();
+    _listenToParkUpdates();
   }
 
   void _onCameraMove(CameraPosition position) {
     _currentMapCenter = position.target;
+    // Save the new camera position as the user's last location
+    _saveUserLocation(_currentMapCenter.latitude, _currentMapCenter.longitude);
   }
 
   void _showCheckInDialog(Park park) async {
@@ -473,6 +458,10 @@ class _MapTabState extends State<MapTab>
                     park.latitude,
                     park.longitude,
                   );
+                  if (_finalPosition != null) {
+                    await _fetchNearbyParks(
+                        _finalPosition!.latitude, _finalPosition!.longitude);
+                  }
                   ScaffoldMessenger.of(context).showSnackBar(
                     SnackBar(content: Text("Checked in to ${park.name}!")),
                   );
@@ -522,10 +511,47 @@ class _MapTabState extends State<MapTab>
           FirebaseFirestore.instance.collection('parks').doc(parkId);
       QuerySnapshot usersSnapshot =
           await parkRef.collection('active_users').get();
+      print('usersSnapshot.docs.length: ${usersSnapshot.docs.length}');
+      for (var userDoc in usersSnapshot.docs) {
+        print('userDoc.id: ${userDoc.id}');
+        print('userDoc.data(): ${userDoc.data()}');
+      }
       List<Map<String, dynamic>> userList = [];
       for (var userDoc in usersSnapshot.docs) {
-        // … your existing logic to fetch pet info and prune stale check‑ins …
-        // add entries into `userList`
+        final userId = userDoc.id;
+        final checkInTime =
+            (userDoc.data() as Map<String, dynamic>)['checkedInAt'];
+
+        // Fetch owner info
+        final ownerDoc = await FirebaseFirestore.instance
+            .collection('owners')
+            .doc(userId)
+            .get();
+        final ownerData = ownerDoc.data() as Map<String, dynamic>? ?? {};
+        final ownerName =
+            "${ownerData['firstName'] ?? ''} ${ownerData['lastName'] ?? ''}"
+                .trim();
+
+        // Fetch owner's pets
+        final petsSnapshot = await FirebaseFirestore.instance
+            .collection('pets')
+            .where('ownerId', isEqualTo: userId)
+            .get();
+
+        for (var petDoc in petsSnapshot.docs) {
+          final petData = petDoc.data();
+          userList.add({
+            'petId': petDoc.id,
+            'ownerId': userId,
+            'petName': petData['name']?.toString() ?? 'Unknown Pet',
+            'petPhotoUrl': petData['photoUrl']?.toString() ?? '',
+            'ownerName': ownerName.isNotEmpty ? ownerName : 'Unknown Owner',
+            'checkInTime': checkInTime != null
+                ? DateFormat('HH:mm')
+                    .format((checkInTime as Timestamp).toDate())
+                : '',
+          });
+        }
       }
 
       if (!mounted) return;
@@ -535,10 +561,12 @@ class _MapTabState extends State<MapTab>
         context: context,
         builder: (context) {
           return AlertDialog(
-            title: const Text("Active Users in Park"),
+            insetPadding: const EdgeInsets.symmetric(
+                horizontal: 10, vertical: 24), // Reduce horizontal padding
+            title: const Text("Pets in Park"),
             content: SizedBox(
-              width: double.maxFinite,
-              height: 400,
+              width: 420, // Make the dialog wider
+              height: 500, // Optionally make it taller
               child: Column(
                 children: [
                   Expanded(
@@ -547,11 +575,12 @@ class _MapTabState extends State<MapTab>
                       separatorBuilder: (_, __) => const SizedBox(height: 6),
                       itemBuilder: (ctx, i) {
                         final petData = userList[i];
-                        final ownerId = petData['ownerId'] as String;
-                        final petId = petData['petId'] as String;
-                        final petName = petData['petName'] as String;
-                        final petPhoto = petData['petPhotoUrl'] as String;
-                        final checkIn = petData['checkInTime'] as String;
+                        final ownerId = petData['ownerId'] as String? ?? '';
+                        final petId = petData['petId'] as String? ?? '';
+                        final petName = petData['petName'] as String? ?? '';
+                        final petPhoto =
+                            petData['petPhotoUrl'] as String? ?? '';
+                        final checkIn = petData['checkInTime'] as String? ?? '';
                         bool mine = (ownerId == currentUser.uid);
 
                         return ListTile(
@@ -563,11 +592,88 @@ class _MapTabState extends State<MapTab>
                               : "Checked in at $checkIn"),
                           trailing: mine
                               ? null
-                              : Icon(
-                                  _favoritePetIds.contains(petId)
-                                      ? Icons.favorite
-                                      : Icons.favorite_border,
-                                  color: Colors.red,
+                              : IconButton(
+                                  icon: Icon(
+                                    _favoritePetIds.contains(petId)
+                                        ? Icons.favorite
+                                        : Icons.favorite_border,
+                                    color: Colors.red,
+                                  ),
+                                  onPressed: () async {
+                                    final currentUser =
+                                        FirebaseAuth.instance.currentUser;
+                                    if (currentUser == null) return;
+
+                                    if (_favoritePetIds.contains(petId)) {
+                                      // Unfriend and unfavorite
+                                      await FirebaseFirestore.instance
+                                          .collection('friends')
+                                          .doc(currentUser.uid)
+                                          .collection('userFriends')
+                                          .doc(ownerId)
+                                          .delete();
+                                      await FirebaseFirestore.instance
+                                          .collection('favorites')
+                                          .doc(currentUser.uid)
+                                          .collection('pets')
+                                          .doc(petId)
+                                          .delete();
+                                      setState(() {
+                                        _favoritePetIds.remove(petId);
+                                      });
+                                      ScaffoldMessenger.of(context)
+                                          .showSnackBar(
+                                        const SnackBar(
+                                            content: Text("Friend removed.")),
+                                      );
+                                    } else {
+                                      // Add friend and favorite
+                                      // Fetch owner name for friend entry
+                                      DocumentSnapshot ownerDoc =
+                                          await FirebaseFirestore.instance
+                                              .collection('owners')
+                                              .doc(ownerId)
+                                              .get();
+                                      String ownerName = "";
+                                      if (ownerDoc.exists) {
+                                        final data = ownerDoc.data()
+                                            as Map<String, dynamic>;
+                                        ownerName =
+                                            "${data['firstName'] ?? ''} ${data['lastName'] ?? ''}"
+                                                .trim();
+                                      }
+                                      if (ownerName.isEmpty) {
+                                        ownerName = ownerId;
+                                      }
+                                      await FirebaseFirestore.instance
+                                          .collection('friends')
+                                          .doc(currentUser.uid)
+                                          .collection('userFriends')
+                                          .doc(ownerId)
+                                          .set({
+                                        'friendId': ownerId,
+                                        'ownerName': ownerName,
+                                        'addedAt': FieldValue.serverTimestamp(),
+                                      });
+                                      await FirebaseFirestore.instance
+                                          .collection('favorites')
+                                          .doc(currentUser.uid)
+                                          .collection('pets')
+                                          .doc(petId)
+                                          .set({
+                                        'petId': petId,
+                                        'addedAt': FieldValue.serverTimestamp(),
+                                      });
+                                      setState(() {
+                                        _favoritePetIds.add(petId);
+                                      });
+                                      ScaffoldMessenger.of(context)
+                                          .showSnackBar(
+                                        const SnackBar(
+                                            content: Text("Friend added!")),
+                                      );
+                                    }
+                                  },
                                 ),
                         );
                       },
@@ -1133,6 +1239,8 @@ class _MapTabState extends State<MapTab>
 
   Future<Marker> _createParkMarker(Park park) async {
     final firestore = FirebaseFirestore.instance;
+    final parkId = generateParkID(
+        park.latitude, park.longitude, park.name); // Use your function
 
     return Marker(
       markerId: MarkerId(park.id),
@@ -1352,7 +1460,6 @@ class _MapTabState extends State<MapTab>
   Widget build(BuildContext context) {
     super.build(context);
 
-    // Show a loading indicator until location is determined
     if (!_isMapReady || _finalPosition == null) {
       return Container(
         decoration: const BoxDecoration(

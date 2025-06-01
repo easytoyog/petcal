@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:pet_calendar/utils/image_upload_util.dart';
+import 'package:inthepark/utils/image_upload_util.dart';
 
 class AddPetScreen extends StatefulWidget {
   const AddPetScreen({Key? key}) : super(key: key);
@@ -56,7 +56,8 @@ class _AddPetScreenState extends State<AddPetScreen> {
     // Alternatively, you can use a timestamp or a UUID package.
     final petIdForStorage = DateTime.now().millisecondsSinceEpoch.toString();
 
-    final downloadUrl = await ImageUploadUtil.pickAndUploadPetPhoto(petIdForStorage);
+    final downloadUrl =
+        await ImageUploadUtil.pickAndUploadPetPhoto(petIdForStorage);
     if (downloadUrl != null) {
       setState(() {
         // Store the final remote URL in the pet map
@@ -163,15 +164,20 @@ class _AddPetScreenState extends State<AddPetScreen> {
                                       onChanged: (value) {
                                         pets[index]['name'] = value;
                                       },
-                                      style: const TextStyle(color: Colors.white),
+                                      style:
+                                          const TextStyle(color: Colors.white),
                                       decoration: InputDecoration(
                                         filled: true,
-                                        fillColor: Colors.white.withOpacity(0.1),
+                                        fillColor:
+                                            Colors.white.withOpacity(0.1),
                                         hintText: "Pet Name",
-                                        hintStyle: const TextStyle(color: Colors.white70),
-                                        prefixIcon: const Icon(Icons.pets, color: Colors.white),
+                                        hintStyle: const TextStyle(
+                                            color: Colors.white70),
+                                        prefixIcon: const Icon(Icons.pets,
+                                            color: Colors.white),
                                         border: OutlineInputBorder(
-                                          borderRadius: BorderRadius.circular(12),
+                                          borderRadius:
+                                              BorderRadius.circular(12),
                                           borderSide: BorderSide.none,
                                         ),
                                       ),
@@ -183,13 +189,17 @@ class _AddPetScreenState extends State<AddPetScreen> {
                                     onTap: () => pickAndUploadImage(index),
                                     child: CircleAvatar(
                                       radius: 40,
-                                      backgroundColor: Colors.white.withOpacity(0.1),
-                                      backgroundImage: (pets[index]['photoUrl'] != null)
-                                          ? NetworkImage(pets[index]['photoUrl'])
-                                              as ImageProvider
-                                          : null,
+                                      backgroundColor:
+                                          Colors.white.withOpacity(0.1),
+                                      backgroundImage:
+                                          (pets[index]['photoUrl'] != null)
+                                              ? NetworkImage(
+                                                      pets[index]['photoUrl'])
+                                                  as ImageProvider
+                                              : null,
                                       child: (pets[index]['photoUrl'] == null)
-                                          ? const Icon(Icons.add_a_photo, color: Colors.white)
+                                          ? const Icon(Icons.add_a_photo,
+                                              color: Colors.white)
                                           : null,
                                     ),
                                   ),
@@ -198,7 +208,8 @@ class _AddPetScreenState extends State<AddPetScreen> {
                               const SizedBox(height: 10),
                               // Main Pet radio + delete
                               Row(
-                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                mainAxisAlignment:
+                                    MainAxisAlignment.spaceBetween,
                                 children: [
                                   Row(
                                     children: [
@@ -210,8 +221,8 @@ class _AddPetScreenState extends State<AddPetScreen> {
                                             mainPetIndex = value;
                                           });
                                         },
-                                        fillColor:
-                                            WidgetStateProperty.all(Colors.tealAccent),
+                                        fillColor: WidgetStateProperty.all(
+                                            Colors.tealAccent),
                                       ),
                                       const Text(
                                         "Set as Main Pet",
@@ -220,7 +231,8 @@ class _AddPetScreenState extends State<AddPetScreen> {
                                     ],
                                   ),
                                   IconButton(
-                                    icon: const Icon(Icons.delete, color: Colors.red),
+                                    icon: const Icon(Icons.delete,
+                                        color: Colors.red),
                                     onPressed: () => removePetCard(index),
                                   ),
                                 ],
@@ -262,7 +274,8 @@ class _AddPetScreenState extends State<AddPetScreen> {
                     ),
                   ),
                   onPressed: savePets,
-                  child: const Text("Save Pets", style: TextStyle(fontSize: 18)),
+                  child:
+                      const Text("Save Pets", style: TextStyle(fontSize: 18)),
                 ),
               ),
             ),

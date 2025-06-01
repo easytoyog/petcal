@@ -47,7 +47,7 @@ class AllSetUpScreen extends StatelessWidget {
               ),
               const SizedBox(height: 20),
               const Text(
-                "Now let's head into Pet Calendar and explore its features.",
+                "Now let's head into In The Park and explore its features.",
                 textAlign: TextAlign.center,
                 style: TextStyle(
                   color: Colors.white70,
@@ -70,7 +70,7 @@ class AllSetUpScreen extends StatelessWidget {
                     Navigator.pushNamed(context, '/profile');
                   },
                   child: const Text(
-                    "Go to Pet Calendar",
+                    "Let's go In The Park",
                     style: TextStyle(fontSize: 18),
                   ),
                 ),

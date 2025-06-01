@@ -1,13 +1,13 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:pet_calendar/models/owner_model.dart';
-import 'package:pet_calendar/models/pet_model.dart';
-import 'package:pet_calendar/models/park_event.dart';
+import 'package:inthepark/models/owner_model.dart';
+import 'package:inthepark/models/pet_model.dart';
+import 'package:inthepark/models/park_event.dart';
 
 class FirestoreService {
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
   final FirebaseAuth _auth = FirebaseAuth.instance;
-  
+
   /// Get current user's UID
   String? getCurrentUserId() {
     return _auth.currentUser?.uid;
@@ -33,18 +33,15 @@ class FirestoreService {
   }
 
   /// Fetch owner details for the current user
-  Future<Owner> getOwner() async {
+  Future<Owner?> getOwner() async {
     final uid = getCurrentUserId();
-    if (uid == null) {
-      throw Exception("User not authenticated.");
+    if (uid == null) return null;
+    final doc = await _firestore.collection('owners').doc(uid).get();
+    if (!doc.exists) {
+      // Don't throw, just return null
+      return null;
     }
-
-    final docSnapshot = await _firestore.collection('owners').doc(uid).get();
-    if (!docSnapshot.exists) {
-      throw Exception("Owner data not found.");
-    }
-
-    return Owner.fromFirestore(docSnapshot);
+    return Owner.fromFirestore(doc);
   }
 
   /// Fetch all pets for the specified owner ID
@@ -54,9 +51,7 @@ class FirestoreService {
         .where('ownerId', isEqualTo: ownerId)
         .get();
 
-    return querySnapshot.docs
-        .map((doc) => Pet.fromFirestore(doc))
-        .toList();
+    return querySnapshot.docs.map((doc) => Pet.fromFirestore(doc)).toList();
   }
 
   Future<void> updateOwner(Owner updatedOwner) async {
@@ -65,9 +60,7 @@ class FirestoreService {
       throw Exception("User not authenticated.");
     }
     // We'll use .update(...) so we don't accidentally overwrite fields we might add later
-    await _firestore.collection('owners')
-        .doc(uid)
-        .update(updatedOwner.toMap());
+    await _firestore.collection('owners').doc(uid).update(updatedOwner.toMap());
   }
 
   Future<void> updatePet(Pet pet) async {
@@ -116,7 +109,7 @@ class FirestoreService {
         .update(event.toMap());
   }
 
-    /// Check if the current user has liked the park
+  /// Check if the current user has liked the park
   Future<bool> isParkLiked(String parkId) async {
     final uid = getCurrentUserId();
     if (uid == null) return false;
@@ -133,28 +126,28 @@ class FirestoreService {
 
   /// Like a park (add to likedParks collection)
   Future<void> likePark(String parkId) async {
-      final uid = getCurrentUserId();
-      if (uid == null) throw Exception("User not authenticated.");
+    final uid = getCurrentUserId();
+    if (uid == null) throw Exception("User not authenticated.");
 
-      // 1) Fetch the park document to read its name
-      final parkSnap = await _firestore.collection('parks').doc(parkId).get();
-      if (!parkSnap.exists) {
-        throw Exception("Park not found: $parkId");
-      }
-      final parkName = parkSnap.data()!['name'] as String? ?? '';
+    // 1) Fetch the park document to read its name
+    final parkSnap = await _firestore.collection('parks').doc(parkId).get();
+    if (!parkSnap.exists) {
+      throw Exception("Park not found: $parkId");
+    }
+    final parkName = parkSnap.data()!['name'] as String? ?? '';
 
-      // 2) Store both likedAt and parkName
-      await _firestore
-          .collection('owners')
-          .doc(uid)
-          .collection('likedParks')
-          .doc(parkId)
-          .set({
-        'likedAt': FieldValue.serverTimestamp(),
-        'parkName': parkName,
-      });
+    // 2) Store both likedAt and parkName
+    await _firestore
+        .collection('owners')
+        .doc(uid)
+        .collection('likedParks')
+        .doc(parkId)
+        .set({
+      'likedAt': FieldValue.serverTimestamp(),
+      'parkName': parkName,
+    });
   }
-  
+
   /// Unlike a park (remove from likedParks collection)
   Future<void> unlikePark(String parkId) async {
     final uid = getCurrentUserId();
@@ -168,18 +161,16 @@ class FirestoreService {
         .delete();
   }
 
-Future<List<String>> getLikedParkIds() async {
-  final uid = getCurrentUserId();
-  if (uid == null) throw Exception("User not authenticated.");
+  Future<List<String>> getLikedParkIds() async {
+    final uid = getCurrentUserId();
+    if (uid == null) throw Exception("User not authenticated.");
 
-  final snapshot = await _firestore
-      .collection('owners')
-      .doc(uid)
-      .collection('likedParks')
-      .get();
+    final snapshot = await _firestore
+        .collection('owners')
+        .doc(uid)
+        .collection('likedParks')
+        .get();
 
-  return snapshot.docs.map((doc) => doc.id).toList();
-}
-
-
+    return snapshot.docs.map((doc) => doc.id).toList();
+  }
 }

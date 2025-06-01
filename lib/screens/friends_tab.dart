@@ -3,7 +3,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:pet_calendar/widgets/ad_banner.dart';
+import 'package:inthepark/widgets/ad_banner.dart';
 
 class FriendsTab extends StatefulWidget {
   const FriendsTab({Key? key}) : super(key: key);

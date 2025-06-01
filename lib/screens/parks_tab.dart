@@ -2,12 +2,13 @@ import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:location/location.dart' as loc;
-import 'package:pet_calendar/models/park_model.dart';
-import 'package:pet_calendar/screens/chatroom_screen.dart';
-import 'package:pet_calendar/services/location_service.dart';
-import 'package:pet_calendar/services/firestore_service.dart';
+import 'package:inthepark/models/park_model.dart';
+import 'package:inthepark/screens/chatroom_screen.dart';
+import 'package:inthepark/services/location_service.dart';
+import 'package:inthepark/services/firestore_service.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
-import 'package:pet_calendar/widgets/ad_banner.dart';
+import 'package:inthepark/widgets/ad_banner.dart';
+import 'package:inthepark/widgets/active_pets_dialog.dart';
 
 class ParksTab extends StatefulWidget {
   final void Function(String parkId) onShowEvents;
@@ -140,7 +141,36 @@ class _ParksTabState extends State<ParksTab> {
   }
 
   Future<void> _showActiveUsersDialog(String parkId) async {
-    // ...your existing dialog code...
+    final activeUsersSnapshot = await FirebaseFirestore.instance
+        .collection('parks')
+        .doc(parkId)
+        .collection('active_users')
+        .get();
+
+    List<Map<String, dynamic>> activePets = [];
+
+    for (var userDoc in activeUsersSnapshot.docs) {
+      final userId = userDoc.id;
+      // Fetch pets for this user from the top-level pets collection
+      final petsSnapshot = await FirebaseFirestore.instance
+          .collection('pets')
+          .where('ownerId', isEqualTo: userId)
+          .get();
+
+      for (var petDoc in petsSnapshot.docs) {
+        final petData = petDoc.data();
+        activePets.add({
+          'petName': petData['name'] ?? 'Unknown Pet',
+          'petPhotoUrl': petData['photoUrl'] ?? '',
+          'ownerId': userId,
+        });
+      }
+    }
+
+    showDialog(
+      context: context,
+      builder: (context) => ActivePetsDialog(pets: activePets),
+    );
   }
 
   Widget _buildParkCard(Park park, {required bool isFavorite}) {

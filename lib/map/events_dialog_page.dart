@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:pet_calendar/models/park_event.dart';
+import 'package:inthepark/models/park_event.dart';
 
 class EventsDialogPage extends StatefulWidget {
   final String parkId;
@@ -36,9 +36,8 @@ class _EventsDialogPageState extends State<EventsDialogPage> {
           .doc(widget.parkId)
           .collection('events')
           .get();
-      final events = snapshot.docs
-          .map((doc) => ParkEvent.fromFirestore(doc))
-          .toList();
+      final events =
+          snapshot.docs.map((doc) => ParkEvent.fromFirestore(doc)).toList();
       setState(() {
         _events = events;
       });
@@ -53,7 +52,8 @@ class _EventsDialogPageState extends State<EventsDialogPage> {
   /// Opens the Add Event dialog. (You can either push a new route or show a dialog.)
   void _openAddEventDialog() {
     // For this example, we'll push a new route.
-    Navigator.of(context).push(
+    Navigator.of(context)
+        .push(
       MaterialPageRoute(
         builder: (context) => AddEventPage(
           parkId: widget.parkId,
@@ -62,7 +62,8 @@ class _EventsDialogPageState extends State<EventsDialogPage> {
         ),
         fullscreenDialog: true,
       ),
-    ).then((_) {
+    )
+        .then((_) {
       // Refresh events when returning.
       _fetchEvents();
     });
@@ -143,7 +144,9 @@ class _AddEventPageState extends State<AddEventPage> {
   }
 
   void _saveEvent() async {
-    if (eventNameController.text.trim().isEmpty || startDateTime == null || endDateTime == null) {
+    if (eventNameController.text.trim().isEmpty ||
+        startDateTime == null ||
+        endDateTime == null) {
       setState(() {
         errorMessage = "Please fill out all required fields.";
       });

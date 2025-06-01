@@ -1,12 +1,10 @@
 import 'package:flutter/material.dart';
-import 'package:pet_calendar/screens/map_tab.dart';
-import 'package:pet_calendar/screens/parks_tab.dart';
-import 'package:pet_calendar/screens/events_tab.dart';
-import 'package:pet_calendar/screens/friends_tab.dart';
-import 'package:pet_calendar/screens/profile_tab.dart';
-import 'package:pet_calendar/screens/service_tab.dart';
-import 'package:pet_calendar/widgets/ad_banner.dart';
-
+import 'package:inthepark/screens/map_tab.dart';
+import 'package:inthepark/screens/parks_tab.dart';
+import 'package:inthepark/screens/events_tab.dart';
+import 'package:inthepark/screens/friends_tab.dart';
+import 'package:inthepark/screens/profile_tab.dart';
+import 'package:inthepark/screens/service_tab.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({Key? key}) : super(key: key);
@@ -85,7 +83,8 @@ class _HomeScreenState extends State<HomeScreen> {
           BottomNavigationBarItem(icon: Icon(Icons.map), label: 'Explore'),
           BottomNavigationBarItem(icon: Icon(Icons.event), label: 'Events'),
           BottomNavigationBarItem(icon: Icon(Icons.pets), label: 'Friends'),
-          BottomNavigationBarItem(icon: Icon(Icons.storefront), label: 'Services'),
+          BottomNavigationBarItem(
+              icon: Icon(Icons.storefront), label: 'Services'),
         ],
       ),
     );
