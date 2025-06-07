@@ -218,6 +218,15 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
       );
       user = userCredential.user;
       if (user != null) {
+        await user.reload(); // Refresh user info
+        if (!user.emailVerified) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+                content: Text("Please verify your email before logging in.")),
+          );
+          await FirebaseAuth.instance.signOut();
+          return null;
+        }
         await saveUserFcmToken(user);
         Navigator.of(context).pushReplacementNamed('/profile');
       }
@@ -325,11 +334,35 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
                 const SizedBox(height: 10),
                 Align(
                   alignment: Alignment.centerRight,
-                  child: Text(
-                    "Forgot password?",
-                    style: GoogleFonts.nunito(
-                      color: Colors.lightBlueAccent,
-                      fontSize: 14,
+                  child: GestureDetector(
+                    onTap: () async {
+                      final email = emailController.text.trim();
+                      if (email.isEmpty) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                              content: Text("Please enter your email first.")),
+                        );
+                        return;
+                      }
+                      try {
+                        await FirebaseAuth.instance
+                            .sendPasswordResetEmail(email: email);
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                              content: Text("Password reset email sent!")),
+                        );
+                      } catch (e) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text("Error: ${e.toString()}")),
+                        );
+                      }
+                    },
+                    child: Text(
+                      "Forgot password?",
+                      style: GoogleFonts.nunito(
+                        color: Colors.lightBlueAccent,
+                        fontSize: 14,
+                      ),
                     ),
                   ),
                 ),

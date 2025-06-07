@@ -3,5 +3,5 @@ String generateParkID(double latitude, double longitude, String placeID) {
   final trimmedPlaceID = placeID.replaceAll(' ', '');
   final trimmedLat = latitude.toStringAsFixed(6).replaceAll(' ', '');
   final trimmedLng = longitude.toStringAsFixed(6).replaceAll(' ', '');
-  return '${trimmedPlaceID}_${trimmedLat}_${trimmedLng}';
+  return '${trimmedPlaceID}_${trimmedLat}_$trimmedLng';
 }

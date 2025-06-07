@@ -24,6 +24,9 @@ class _EventsTabState extends State<EventsTab> {
   String _searchQuery = "";
   String _filterMode = "All";
   loc.LocationData? _userLocation;
+  final ScrollController _scrollController = ScrollController();
+  final GlobalKey otherEventsKey = GlobalKey();
+  bool _showOtherEventsClicked = false;
 
   @override
   void initState() {
@@ -207,14 +210,30 @@ class _EventsTabState extends State<EventsTab> {
       final snapshot = await FirebaseFirestore.instance
           .collection('parks')
           .where('name', isGreaterThanOrEqualTo: query)
-          .where('name', isLessThanOrEqualTo: query + '\uf8ff')
-          .limit(10)
+          .where('name', isLessThanOrEqualTo: '$query\uf8ff')
+          .limit(20)
           .get();
+
+      final userLat = _userLocation?.latitude;
+      final userLng = _userLocation?.longitude;
+
       parkResults = snapshot.docs.map((d) {
         final data = d.data();
         data['id'] = d.id;
         return data;
       }).toList();
+
+      // Sort by distance if user location is available
+      if (userLat != null && userLng != null) {
+        parkResults.sort((a, b) {
+          double distA = sqrt(pow((a['latitude'] - userLat), 2) +
+              pow((a['longitude'] - userLng), 2));
+          double distB = sqrt(pow((b['latitude'] - userLat), 2) +
+              pow((b['longitude'] - userLng), 2));
+          return distA.compareTo(distB);
+        });
+      }
+
       isSearchingParks = false;
     }
 
@@ -223,7 +242,7 @@ class _EventsTabState extends State<EventsTab> {
       barrierDismissible: false,
       builder: (context) {
         return Scaffold(
-          /*   appBar: AppBar(
+          appBar: AppBar(
             title: const Text("Add Event"),
             backgroundColor: const Color(0xFF567D46),
             automaticallyImplyLeading: false,
@@ -233,7 +252,7 @@ class _EventsTabState extends State<EventsTab> {
                 onPressed: () => Navigator.of(context).pop(),
               ),
             ],
-          ),*/
+          ),
           body: StatefulBuilder(
             builder: (context, setState) {
               return Padding(
@@ -726,6 +745,7 @@ class _EventsTabState extends State<EventsTab> {
                       : RefreshIndicator(
                           onRefresh: _fetchEvents,
                           child: ListView(
+                            controller: _scrollController,
                             padding: const EdgeInsets.only(
                                 bottom: 120, left: 8, right: 8, top: 8),
                             children: [
@@ -741,16 +761,63 @@ class _EventsTabState extends State<EventsTab> {
                                     (e) => _eventCard(e, isFavorite: true)),
                                 const Divider(),
                               ],
-                              const Padding(
-                                padding: EdgeInsets.symmetric(vertical: 8),
-                                child: Text('Other Nearby Events',
+                              Padding(
+                                key: otherEventsKey,
+                                padding:
+                                    const EdgeInsets.symmetric(vertical: 8),
+                                child: const Text('Other Nearby Events',
                                     style: TextStyle(
                                         fontSize: 16,
                                         fontWeight: FontWeight.bold)),
                               ),
                               ...otherEvents.map((e) => _eventCard(e)),
                               if (likedEvents.isEmpty && otherEvents.isEmpty)
-                                const Center(child: Text('No events found.'))
+                                Center(
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                        vertical: 32),
+                                    child: Text(
+                                      _userLocation != null
+                                          ? "There are no events within 1 km from you, Add a new event in the maps tab"
+                                          : "No events found.",
+                                      textAlign: TextAlign.center,
+                                      style: const TextStyle(fontSize: 16),
+                                    ),
+                                  ),
+                                ),
+                              if (likedEvents.isNotEmpty) ...[
+                                Center(
+                                  child: TextButton(
+                                    child:
+                                        const Text("Show Other Nearby Events"),
+                                    onPressed: () {
+                                      setState(() {
+                                        _showOtherEventsClicked = true;
+                                      });
+                                      final context =
+                                          otherEventsKey.currentContext;
+                                      if (context != null) {
+                                        Scrollable.ensureVisible(context,
+                                            duration: const Duration(
+                                                milliseconds: 400));
+                                      }
+                                    },
+                                  ),
+                                ),
+                              ],
+                              if (_showOtherEventsClicked &&
+                                  otherEvents.isEmpty)
+                                Center(
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                        vertical: 32),
+                                    child: Text(
+                                      "There are no other events within 1 km from you, to add a new event, go to map tab and add one",
+                                      textAlign: TextAlign.center,
+                                      style: const TextStyle(fontSize: 16),
+                                    ),
+                                  ),
+                                ),
                             ],
                           ),
                         ),
@@ -759,7 +826,7 @@ class _EventsTabState extends State<EventsTab> {
             ),
           ),
           // Add Event Button above the ad
-          /*  Positioned(
+          /* Positioned(
             bottom: 72, // Height of AdBanner + some spacing
             left: 16,
             right: 16,
@@ -792,70 +859,107 @@ class _EventsTabState extends State<EventsTab> {
   Widget _eventCard(ParkEvent event, {bool isFavorite = false}) {
     final start = DateFormat('h:mm a').format(event.startDateTime);
     final end = DateFormat('h:mm a').format(event.endDateTime);
-    final liked = FirebaseAuth.instance.currentUser != null &&
-        event.likes.contains(FirebaseAuth.instance.currentUser!.uid);
+    final currentUser = FirebaseAuth.instance.currentUser;
+    final liked = currentUser != null && event.likes.contains(currentUser.uid);
     final cardColor = isFavorite ? Colors.green.shade50 : null;
+    final isCreator = currentUser != null && event.createdBy == currentUser.uid;
 
     return Card(
-      color: cardColor,
-      margin: const EdgeInsets.symmetric(vertical: 4),
-      child: Padding(
-        padding: const EdgeInsets.all(8),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Expanded(
-                  child: Row(
-                    children: [
-                      Text(event.name,
-                          style: const TextStyle(
-                              fontSize: 14, fontWeight: FontWeight.bold)),
-                      if (isFavorite)
-                        const Padding(
-                          padding: EdgeInsets.only(left: 4),
-                          child:
-                              Icon(Icons.star, size: 16, color: Colors.amber),
-                        ),
-                    ],
+        color: cardColor,
+        margin: const EdgeInsets.symmetric(vertical: 4),
+        child: Padding(
+          padding: const EdgeInsets.all(8),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Row(
+                      children: [
+                        Text(event.name,
+                            style: const TextStyle(
+                                fontSize: 14, fontWeight: FontWeight.bold)),
+                        if (isFavorite)
+                          const Padding(
+                            padding: EdgeInsets.only(left: 4),
+                            child:
+                                Icon(Icons.star, size: 16, color: Colors.amber),
+                          ),
+                      ],
+                    ),
                   ),
-                ),
-                IconButton(
-                  icon: Icon(liked ? Icons.favorite : Icons.favorite_border),
-                  color: liked ? Colors.green : Colors.grey,
-                  onPressed: () => _toggleLike(event),
-                ),
-              ],
-            ),
-            const SizedBox(height: 4),
-            Text('Time: $start - $end', style: const TextStyle(fontSize: 12)),
-            Text('Recurrence: ${event.recurrence}',
-                style: const TextStyle(fontSize: 12)),
-            const SizedBox(height: 8),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                TextButton.icon(
-                  onPressed: () => Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                        builder: (_) => ChatRoomScreen(parkId: event.parkId)),
+                  IconButton(
+                    icon: Icon(liked ? Icons.favorite : Icons.favorite_border),
+                    color: liked ? Colors.green : Colors.grey,
+                    onPressed: () => _toggleLike(event),
                   ),
-                  icon: const Icon(Icons.chat, size: 14),
-                  label:
-                      const Text('Park Chat', style: TextStyle(fontSize: 12)),
-                ),
-                TextButton(
-                  onPressed: () => _showLikesDialog(event),
-                  child: Text('${event.likes.length} likes',
-                      style: const TextStyle(fontSize: 12)),
-                ),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
+                  if (isCreator)
+                    IconButton(
+                      icon: const Icon(Icons.delete, color: Colors.red),
+                      tooltip: "Delete Event",
+                      onPressed: () async {
+                        final confirm = await showDialog<bool>(
+                          context: context,
+                          builder: (ctx) => AlertDialog(
+                            title: const Text("Delete Event"),
+                            content: const Text(
+                                "Are you sure you want to delete this event?"),
+                            actions: [
+                              TextButton(
+                                onPressed: () => Navigator.pop(ctx, false),
+                                child: const Text("Cancel"),
+                              ),
+                              TextButton(
+                                onPressed: () => Navigator.pop(ctx, true),
+                                child: const Text("Delete"),
+                              ),
+                            ],
+                          ),
+                        );
+                        if (confirm == true) {
+                          await FirebaseFirestore.instance
+                              .collection('parks')
+                              .doc(event.parkId)
+                              .collection('events')
+                              .doc(event.id)
+                              .delete();
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text("Event deleted")),
+                          );
+                          _fetchEvents();
+                        }
+                      },
+                    ),
+                ],
+              ),
+              const SizedBox(height: 4),
+              Text('Time: $start - $end', style: const TextStyle(fontSize: 12)),
+              Text('Recurrence: ${event.recurrence}',
+                  style: const TextStyle(fontSize: 12)),
+              const SizedBox(height: 8),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  TextButton.icon(
+                    onPressed: () => Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                          builder: (_) => ChatRoomScreen(parkId: event.parkId)),
+                    ),
+                    icon: const Icon(Icons.chat, size: 14),
+                    label:
+                        const Text('Park Chat', style: TextStyle(fontSize: 12)),
+                  ),
+                  TextButton(
+                    onPressed: () => _showLikesDialog(event),
+                    child: Text('${event.likes.length} likes',
+                        style: const TextStyle(fontSize: 12)),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ));
   }
 }

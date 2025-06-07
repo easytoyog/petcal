@@ -21,10 +21,11 @@ class ServiceTab extends StatefulWidget {
 class _ServiceTabState extends State<ServiceTab> {
   final _types = [
     'All',
-    'Dog Walker',
+    'Walker',
     'Groomer',
     'Daycare',
     'Lost Dog',
+    'Trainer',
     'Other'
   ];
   String _selectedType = 'All';

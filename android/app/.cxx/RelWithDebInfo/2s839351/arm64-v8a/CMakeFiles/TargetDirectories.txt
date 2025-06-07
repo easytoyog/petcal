@@ -1,0 +1,2 @@
+/Users/bill/Documents/GitHub/petcal/android/app/.cxx/RelWithDebInfo/2s839351/arm64-v8a/CMakeFiles/edit_cache.dir
+/Users/bill/Documents/GitHub/petcal/android/app/.cxx/RelWithDebInfo/2s839351/arm64-v8a/CMakeFiles/rebuild_cache.dir

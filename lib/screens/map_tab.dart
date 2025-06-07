@@ -32,6 +32,7 @@ class _MapTabState extends State<MapTab>
   );
   // Use default center if location is not yet loaded.
   LatLng? _finalPosition;
+  final Set<String> _existingParkIds = {};
   // We no longer block the whole screen while loading location.
   bool _isLocationLoading = true;
   LatLng _currentMapCenter = const LatLng(43.7615, -79.4111);
@@ -43,6 +44,8 @@ class _MapTabState extends State<MapTab>
   // For search button loading state.
   bool _isSearching = false;
   bool _isMapReady = false;
+
+  Timer? _locationSaveDebounce;
 
   @override
   bool get wantKeepAlive => true;
@@ -57,7 +60,7 @@ class _MapTabState extends State<MapTab>
   }
 
   Future<void> _loadSavedLocationAndSetMap() async {
-    final savedLocation = await _getSavedUserLocation();
+    final savedLocation = await _locationService.getSavedUserLocation();
     setState(() {
       _finalPosition = savedLocation ?? const LatLng(43.7615, -79.4111);
       _isMapReady = true;
@@ -125,26 +128,6 @@ class _MapTabState extends State<MapTab>
     );
   }
 
-  // Save user location to shared preferences
-  Future<void> _saveUserLocation(double latitude, double longitude) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setDouble('last_latitude', latitude);
-    await prefs.setDouble('last_longitude', longitude);
-  }
-
-  // Get user location from shared preferences
-  Future<LatLng?> _getSavedUserLocation() async {
-    final prefs = await SharedPreferences.getInstance();
-    final latitude = prefs.getDouble('last_latitude');
-    final longitude = prefs.getDouble('last_longitude');
-
-    if (latitude != null && longitude != null) {
-      print('Retrieved saved location: $latitude, $longitude');
-      return LatLng(latitude, longitude);
-    }
-    return null;
-  }
-
   Future<void> _fetchFavorites() async {
     if (currentUserId == null) return;
     try {
@@ -166,92 +149,34 @@ class _MapTabState extends State<MapTab>
   /// then updates the markers and (if applicable) triggers the check-in dialog.
   Future<void> _initLocationFlow() async {
     try {
-      // First try to get the saved location
-      final savedLocation = await _getSavedUserLocation();
-
-      if (savedLocation != null) {
-        // Use saved location as initial map position
+      final userLocation = await _locationService.getUserLocationOrCached();
+      if (userLocation != null) {
         setState(() {
-          _finalPosition = savedLocation;
+          _finalPosition = userLocation;
           _isMapReady = true;
         });
 
-        // Still try to get current location in background
-        _getUserLocation().then((userLocation) async {
-          if (userLocation != null) {
-            final currentLatLng =
-                LatLng(userLocation.latitude!, userLocation.longitude!);
+        _mapController?.animateCamera(
+          CameraUpdate.newCameraPosition(
+            CameraPosition(
+              target: userLocation,
+              zoom: 18,
+            ),
+          ),
+        );
 
-            // Save the new location for next time
-            _saveUserLocation(currentLatLng.latitude, currentLatLng.longitude);
-
-            setState(() {
-              _finalPosition = currentLatLng;
-            });
-
-            // Move camera to current location
-            _mapController?.animateCamera(
-              CameraUpdate.newCameraPosition(
-                CameraPosition(
-                  target: currentLatLng,
-                  zoom: 18,
-                ),
-              ),
-            );
-
-            // Load parks for current location
-            _loadNearbyParks(currentLatLng);
-          }
-        });
+        _loadNearbyParks(userLocation);
       } else {
-        // No saved location, use default until we get real location
         setState(() {
-          _finalPosition = const LatLng(43.7615, -79.4111); // Toronto default
+          _finalPosition = const LatLng(43.7615, -79.4111);
           _isMapReady = true;
-        });
-
-        // Run location retrieval asynchronously
-        _getUserLocation().then((userLocation) async {
-          if (userLocation != null) {
-            final currentLatLng =
-                LatLng(userLocation.latitude!, userLocation.longitude!);
-
-            // Save this location for next time
-            _saveUserLocation(currentLatLng.latitude, currentLatLng.longitude);
-
-            setState(() {
-              _finalPosition = currentLatLng;
-            });
-
-            // Move camera to user location
-            _mapController?.animateCamera(
-              CameraUpdate.newCameraPosition(
-                CameraPosition(
-                  target: currentLatLng,
-                  zoom: 18,
-                ),
-              ),
-            );
-
-            // Load parks without blocking UI
-            _loadNearbyParks(currentLatLng);
-          } else {
-            // No location could be determined, just use default
-            setState(() {
-              _isSearching = false; // Reset loading state
-            });
-          }
-        }).catchError((e) {
-          print("Error in location retrieval: $e");
-          setState(() {
-            _isSearching = false; // Reset loading state on error
-          });
+          _isSearching = false;
         });
       }
     } catch (e) {
       print("Error in _initLocationFlow: $e");
       setState(() {
-        _isSearching = false; // Reset loading state on error
+        _isSearching = false;
       });
     }
   }
@@ -296,7 +221,22 @@ class _MapTabState extends State<MapTab>
       print('Found currentPark: $currentPark');
       if (currentPark != null && mounted) {
         await _locationService.ensureParkExists(currentPark);
-        _showCheckInDialog(currentPark);
+
+        // Check if the user is already checked in to this park
+        final currentUser = FirebaseAuth.instance.currentUser;
+        if (currentUser != null) {
+          final parkId = generateParkID(
+              currentPark.latitude, currentPark.longitude, currentPark.name);
+          final activeDocRef = FirebaseFirestore.instance
+              .collection('parks')
+              .doc(parkId)
+              .collection('active_users')
+              .doc(currentUser.uid);
+          final activeDoc = await activeDocRef.get();
+          if (!activeDoc.exists) {
+            _showCheckInDialog(currentPark);
+          }
+        }
       }
     } catch (e) {
       print("Error loading nearby parks: $e");
@@ -305,65 +245,6 @@ class _MapTabState extends State<MapTab>
           _isSearching = false; // Reset searching state on error
         });
       }
-    }
-  }
-
-  Future<loc.LocationData?> _getUserLocation() async {
-    bool serviceEnabled = await _location.serviceEnabled();
-    if (!serviceEnabled) {
-      serviceEnabled = await _location.requestService();
-      if (!serviceEnabled) return null;
-    }
-    loc.PermissionStatus permissionGranted = await _location.hasPermission();
-    if (permissionGranted == loc.PermissionStatus.denied) {
-      permissionGranted = await _location.requestPermission();
-      if (permissionGranted != loc.PermissionStatus.granted) return null;
-    }
-    return _location.getLocation();
-  }
-
-  Future<LatLng?> _getLocationFromUserAddress() async {
-    try {
-      final user = FirebaseAuth.instance.currentUser;
-      if (user != null) {
-        final doc = await FirebaseFirestore.instance
-            .collection('owners')
-            .doc(user.uid)
-            .get();
-        if (doc.exists) {
-          final address = doc.data()?['address'] ?? {};
-          if (address['street'] != null &&
-              address['city'] != null &&
-              address['state'] != null &&
-              address['country'] != null) {
-            final fullAddress =
-                '${address['street']}, ${address['city']}, ${address['state']}, ${address['country']}';
-            final locations = await locationFromAddress(fullAddress);
-            if (locations.isNotEmpty) {
-              return LatLng(
-                  locations.first.latitude, locations.first.longitude);
-            }
-          }
-        }
-      }
-    } catch (e) {
-      print("Error in _getLocationFromUserAddress: $e");
-    }
-    return null;
-  }
-
-  Future<void> _fetchNearbyParks(double lat, double lng) async {
-    try {
-      // Fetch parks within a 500m radius.
-      List<Park> parks = await _locationService.findNearbyParks(lat, lng);
-      _markersMap.clear();
-      for (var park in parks) {
-        final marker = await _createParkMarker(park);
-        _markersMap[park.id] = marker;
-      }
-      setState(() {});
-    } catch (e) {
-      print("Error fetching nearby parks: $e");
     }
   }
 
@@ -401,8 +282,11 @@ class _MapTabState extends State<MapTab>
 
   void _onCameraMove(CameraPosition position) {
     _currentMapCenter = position.target;
-    // Save the new camera position as the user's last location
-    _saveUserLocation(_currentMapCenter.latitude, _currentMapCenter.longitude);
+    _locationSaveDebounce?.cancel();
+    _locationSaveDebounce = Timer(const Duration(seconds: 2), () {
+      _locationService.saveUserLocation(
+          _currentMapCenter.latitude, _currentMapCenter.longitude);
+    });
   }
 
   void _showCheckInDialog(Park park) async {
@@ -418,50 +302,50 @@ class _MapTabState extends State<MapTab>
         .doc(currentUser.uid);
     DocumentSnapshot activeDoc = await activeDocRef.get();
     bool isCheckedIn = activeDoc.exists;
-    DateTime? checkedInAt;
     if (isCheckedIn) {
-      final data = activeDoc.data() as Map<String, dynamic>;
-      if (data.containsKey('checkedInAt')) {
-        checkedInAt = (data['checkedInAt'] as Timestamp).toDate();
-      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("You are already checked in to this park.")),
+      );
+      return;
     }
 
     showDialog(
       context: context,
+      barrierDismissible: false,
       builder: (context) {
-        return AlertDialog(
-          title: Text(isCheckedIn ? "Check Out" : "Check In"),
-          content: isCheckedIn
-              ? Text(
-                  "You checked in at ${checkedInAt != null ? DateFormat('HH:mm').format(checkedInAt) : 'an unknown time'}. Do you want to check out?")
-              : Text("You are at ${park.name}. Do you want to check in?"),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text("No"),
-            ),
-            TextButton(
-              onPressed: () async {
-                Navigator.of(context).pop();
-                if (isCheckedIn) {
-                  // Manual check out
-                  await FirebaseFirestore.instance
-                      .collection('parks')
-                      .doc(parkId)
-                      .collection('active_users')
-                      .doc(currentUser.uid)
-                      .delete();
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text("Checked out successfully")),
-                  );
-                } else {
-                  await _handleCheckIn(
-                      park, park.latitude, park.longitude, context);
-                }
-              },
-              child: Text(isCheckedIn ? "Yes, Check Out" : "Yes, Check In"),
-            ),
-          ],
+        bool isProcessing = false;
+        return StatefulBuilder(
+          builder: (context, setStateDialog) {
+            return AlertDialog(
+              title: const Text("Check In"),
+              content:
+                  Text("You are at ${park.name}. Do you want to check in?"),
+              actions: [
+                TextButton(
+                  onPressed:
+                      isProcessing ? null : () => Navigator.of(context).pop(),
+                  child: const Text("No"),
+                ),
+                ElevatedButton(
+                  onPressed: isProcessing
+                      ? null
+                      : () async {
+                          setStateDialog(() => isProcessing = true);
+                          await _handleCheckIn(
+                              park, park.latitude, park.longitude, context);
+                          if (mounted) Navigator.of(context).pop();
+                        },
+                  child: isProcessing
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Text("Yes, Check In"),
+                ),
+              ],
+            );
+          },
         );
       },
     );
@@ -508,41 +392,52 @@ class _MapTabState extends State<MapTab>
         print('userDoc.id: ${userDoc.id}');
         print('userDoc.data(): ${userDoc.data()}');
       }
+      final userIds = usersSnapshot.docs.map((doc) => doc.id).toList();
+
       List<Map<String, dynamic>> userList = [];
-      for (var userDoc in usersSnapshot.docs) {
-        final userId = userDoc.id;
-        final checkInTime =
-            (userDoc.data() as Map<String, dynamic>)['checkedInAt'];
 
-        // Fetch owner info
-        final ownerDoc = await FirebaseFirestore.instance
-            .collection('owners')
-            .doc(userId)
-            .get();
-        final ownerData = ownerDoc.data() as Map<String, dynamic>? ?? {};
-        final ownerName =
-            "${ownerData['firstName'] ?? ''} ${ownerData['lastName'] ?? ''}"
-                .trim();
+      // Batch fetch all pets for these users
+      if (userIds.isNotEmpty) {
+        for (var i = 0; i < userIds.length; i += 10) {
+          final batchIds = userIds.sublist(
+              i, i + 10 > userIds.length ? userIds.length : i + 10);
+          final petsSnapshot = await FirebaseFirestore.instance
+              .collection('pets')
+              .where('ownerId', whereIn: batchIds)
+              .get();
 
-        // Fetch owner's pets
-        final petsSnapshot = await FirebaseFirestore.instance
-            .collection('pets')
-            .where('ownerId', isEqualTo: userId)
-            .get();
+          // Map ownerId to their pets
+          Map<String, List<Map<String, dynamic>>> petsByOwner = {};
+          for (var petDoc in petsSnapshot.docs) {
+            final petData = petDoc.data();
+            final ownerId = petData['ownerId'];
+            petsByOwner.putIfAbsent(ownerId, () => []).add({
+              ...petData,
+              'petId': petDoc.id,
+            });
+          }
+          ;
 
-        for (var petDoc in petsSnapshot.docs) {
-          final petData = petDoc.data();
-          userList.add({
-            'petId': petDoc.id,
-            'ownerId': userId,
-            'petName': petData['name']?.toString() ?? 'Unknown Pet',
-            'petPhotoUrl': petData['photoUrl']?.toString() ?? '',
-            'ownerName': ownerName.isNotEmpty ? ownerName : 'Unknown Owner',
-            'checkInTime': checkInTime != null
-                ? DateFormat.jm().format(
-                    (checkInTime as Timestamp).toDate()) // e.g., 2:30 PM
-                : '',
-          });
+          for (var userDoc in usersSnapshot.docs) {
+            final userId = userDoc.id;
+            final checkInTime =
+                (userDoc.data() as Map<String, dynamic>)['checkedInAt'];
+            final ownerPets = petsByOwner[userId] ?? [];
+            for (var pet in ownerPets) {
+              userList.add({
+                'petId': pet['petId'],
+                'ownerId': userId,
+                'petName': pet['name'] ?? 'Unknown Pet',
+                'petPhotoUrl': pet['photoUrl'] ?? '',
+                'ownerName':
+                    '', // You can batch fetch owner names too if needed
+                'checkInTime': checkInTime != null
+                    ? DateFormat.jm()
+                        .format((checkInTime as Timestamp).toDate())
+                    : '',
+              });
+            }
+          }
         }
       }
 
@@ -555,7 +450,7 @@ class _MapTabState extends State<MapTab>
           return AlertDialog(
             insetPadding: const EdgeInsets.symmetric(
                 horizontal: 10, vertical: 24), // Reduce horizontal padding
-            title: const Text("Pets in Park"),
+            title: Text("$parkName - Pets in Park"),
             content: SizedBox(
               width: 420, // Make the dialog wider
               height: 500, // Optionally make it taller
@@ -700,30 +595,70 @@ class _MapTabState extends State<MapTab>
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                     children: [
-                      ElevatedButton(
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor:
-                              isCheckedIn ? Colors.red : Colors.green,
-                        ),
-                        onPressed: () async {
-                          Navigator.of(context, rootNavigator: true).pop();
-                          if (isCheckedIn) {
-                            await activeDocRef.delete();
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(content: Text("Checked out of park")),
-                            );
-                          } else {
-                            await _locationService.uploadUserToActiveUsersTable(
-                              parkLatitude,
-                              parkLongitude,
-                              parkName,
-                            );
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(content: Text("Checked in to park")),
-                            );
-                          }
+                      StatefulBuilder(
+                        builder: (context, setStateDialog) {
+                          // Initialize isProcessing with false using a ValueNotifier for proper state management
+                          final isProcessing = ValueNotifier<bool>(false);
+                          return ValueListenableBuilder<bool>(
+                            valueListenable: isProcessing,
+                            builder: (context, processing, _) {
+                              return ElevatedButton(
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor:
+                                      isCheckedIn ? Colors.red : Colors.green,
+                                ),
+                                onPressed: processing
+                                    ? null
+                                    : () async {
+                                        isProcessing.value = true;
+                                        if (isCheckedIn) {
+                                          await activeDocRef.delete();
+                                          await FirebaseFirestore.instance
+                                              .collection('parks')
+                                              .doc(parkId)
+                                              .update({
+                                            'userCount':
+                                                FieldValue.increment(-1)
+                                          });
+                                          ScaffoldMessenger.of(context)
+                                              .showSnackBar(
+                                            SnackBar(
+                                                content: Text(
+                                                    "Checked out of park")),
+                                          );
+                                        } else {
+                                          await _locationService
+                                              .uploadUserToActiveUsersTable(
+                                            parkLatitude,
+                                            parkLongitude,
+                                            parkName,
+                                          );
+                                          ScaffoldMessenger.of(context)
+                                              .showSnackBar(
+                                            SnackBar(
+                                                content:
+                                                    Text("Checked in to park")),
+                                          );
+                                        }
+                                        isProcessing.value = false;
+                                        if (mounted)
+                                          Navigator.of(context,
+                                                  rootNavigator: true)
+                                              .pop();
+                                      },
+                                child: processing
+                                    ? const SizedBox(
+                                        width: 18,
+                                        height: 18,
+                                        child: CircularProgressIndicator(
+                                            strokeWidth: 2),
+                                      )
+                                    : Text(
+                                        isCheckedIn ? "Check Out" : "Check In"),
+                              );
+                            },
+                          );
                         },
-                        child: Text(isCheckedIn ? "Check Out" : "Check In"),
                       ),
                       ElevatedButton(
                         onPressed: () {
@@ -827,7 +762,7 @@ class _MapTabState extends State<MapTab>
 
     try {
       // First, check out from all other parks
-      await _checkOutFromAllParks();
+      _checkOutFromAllParks();
 
       // Then check in to this park
       await _locationService.uploadUserToActiveUsersTable(
@@ -838,8 +773,7 @@ class _MapTabState extends State<MapTab>
 
       // Refresh the map
       if (_finalPosition != null) {
-        await _fetchNearbyParks(
-            _finalPosition!.latitude, _finalPosition!.longitude);
+        await _loadNearbyParks(_finalPosition!);
       }
 
       // Show confirmation
@@ -868,10 +802,14 @@ class _MapTabState extends State<MapTab>
           .doc(currentUser.uid)
           .delete();
 
+      await FirebaseFirestore.instance
+          .collection('parks')
+          .doc(parkId)
+          .update({'userCount': FieldValue.increment(-1)});
+
       // Refresh the map
       if (_finalPosition != null) {
-        await _fetchNearbyParks(
-            _finalPosition!.latitude, _finalPosition!.longitude);
+        await _loadNearbyParks(_finalPosition!);
       }
 
       // Close the dialog
@@ -891,29 +829,26 @@ class _MapTabState extends State<MapTab>
 
   // Check out from all parks the user is currently checked in to
   Future<void> _checkOutFromAllParks() async {
+    final currentUser = FirebaseAuth.instance.currentUser;
+    if (currentUser == null) return;
+
     try {
-      final currentUser = FirebaseAuth.instance.currentUser;
-      if (currentUser == null) return;
+      // Query only parks where the user is checked in
+      final activeUserSnaps = await FirebaseFirestore.instance
+          .collectionGroup('active_users')
+          .where(FieldPath.documentId, isEqualTo: currentUser.uid)
+          .get();
 
-      // Get all parks
-      QuerySnapshot parksSnapshot =
-          await FirebaseFirestore.instance.collection('parks').get();
-
-      // For each park, check if user is checked in and check them out if they are
-      for (var parkDoc in parksSnapshot.docs) {
-        String parkId = parkDoc.id;
-        DocumentReference activeUserRef = FirebaseFirestore.instance
-            .collection('parks')
-            .doc(parkId)
-            .collection('active_users')
-            .doc(currentUser.uid);
-
-        DocumentSnapshot activeUserDoc = await activeUserRef.get();
-        if (activeUserDoc.exists) {
-          await activeUserRef.delete();
-          print("Checked out user from park: $parkId");
+      List<Future> futures = [];
+      for (var doc in activeUserSnaps.docs) {
+        final parkDocRef = doc.reference.parent.parent;
+        if (parkDocRef != null) {
+          futures.add(doc.reference.delete());
+          futures
+              .add(parkDocRef.update({'userCount': FieldValue.increment(-1)}));
         }
       }
+      await Future.wait(futures);
     } catch (e) {
       print("Error checking out from all parks: $e");
     }
@@ -1295,52 +1230,34 @@ class _MapTabState extends State<MapTab>
 
   Future<Marker> _createParkMarker(Park park) async {
     final firestore = FirebaseFirestore.instance;
-    // Always generate the same unique parkId for this park
     final parkId = generateParkID(park.latitude, park.longitude, park.name);
 
-    final parkRef = firestore.collection('parks').doc(parkId);
-    final parkSnap = await parkRef.get();
-
-    // Only create the park if it doesn't already exist
-    if (!parkSnap.exists) {
-      await parkRef.set({
-        'id': parkId,
-        'name': park.name,
-        'latitude': park.latitude,
-        'longitude': park.longitude,
-        'createdAt': FieldValue.serverTimestamp(),
-      });
+    // Only check Firestore if we haven't seen this parkId before
+    if (!_existingParkIds.contains(parkId)) {
+      final parkRef = firestore.collection('parks').doc(parkId);
+      final parkSnap = await parkRef.get();
+      if (!parkSnap.exists) {
+        await parkRef.set({
+          'id': parkId,
+          'name': park.name,
+          'latitude': park.latitude,
+          'longitude': park.longitude,
+          'createdAt': FieldValue.serverTimestamp(),
+        });
+      }
+      _existingParkIds.add(parkId);
     }
 
     return Marker(
       markerId: MarkerId(parkId),
       position: LatLng(park.latitude, park.longitude),
       onTap: () async {
-        // Ensure park exists before showing users
-        final parkSnap = await parkRef.get();
-        if (!parkSnap.exists) {
-          await parkRef.set({
-            'name': park.name,
-            'latitude': park.latitude,
-            'longitude': park.longitude,
-            'createdAt': FieldValue.serverTimestamp(),
-          });
-        }
+        // No need to check Firestore again, just use the cache
         _showUsersInPark(parkId, park.name, park.latitude, park.longitude);
       },
       infoWindow: InfoWindow(
         title: park.name,
         onTap: () async {
-          // Ensure park exists before showing users
-          final parkSnap = await parkRef.get();
-          if (!parkSnap.exists) {
-            await parkRef.set({
-              'name': park.name,
-              'latitude': park.latitude,
-              'longitude': park.longitude,
-              'createdAt': FieldValue.serverTimestamp(),
-            });
-          }
           _showUsersInPark(parkId, park.name, park.latitude, park.longitude);
         },
       ),

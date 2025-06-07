@@ -25,7 +25,7 @@ class _ParksTabState extends State<ParksTab> {
       LocationService(dotenv.env['GOOGLE_MAPS_API_KEY'] ?? '');
   final String? _currentUserId = FirebaseAuth.instance.currentUser?.uid;
   final FirestoreService _fs = FirestoreService();
-
+  String? _loadingParkId;
   List<Park> _favoriteParks = [];
   Set<String> _favoriteParkIds = {};
   List<Park> _nearbyParks = [];
@@ -62,17 +62,20 @@ class _ParksTabState extends State<ParksTab> {
           .collection('likedParks')
           .get();
 
+      final parkIds = likedSnapshot.docs.map((doc) => doc.id).toList();
       List<Park> parks = [];
-      for (var doc in likedSnapshot.docs) {
-        final parkDoc = await FirebaseFirestore.instance
+      for (var i = 0; i < parkIds.length; i += 10) {
+        final batchIds = parkIds.sublist(
+            i, i + 10 > parkIds.length ? parkIds.length : i + 10);
+        final batchSnap = await FirebaseFirestore.instance
             .collection('parks')
-            .doc(doc.id)
+            .where(FieldPath.documentId, whereIn: batchIds)
             .get();
-        if (parkDoc.exists) {
-          final park = Park.fromFirestore(parkDoc);
-          parks.add(park);
-          _updateActiveUserCount(park.id);
-        }
+        parks.addAll(batchSnap.docs.map((doc) => Park.fromFirestore(doc)));
+      }
+
+      for (var park in parks) {
+        _updateActiveUserCount(park.id);
       }
 
       if (!mounted) return;
@@ -128,6 +131,7 @@ class _ParksTabState extends State<ParksTab> {
     if (_currentUserId == null) return;
     final parksSnap =
         await FirebaseFirestore.instance.collection('parks').get();
+    List<Future> futures = [];
     for (var parkDoc in parksSnap.docs) {
       final ref = FirebaseFirestore.instance
           .collection('parks')
@@ -136,10 +140,14 @@ class _ParksTabState extends State<ParksTab> {
           .doc(_currentUserId);
       final ds = await ref.get();
       if (ds.exists) {
-        await ref.delete();
-        _updateActiveUserCount(parkDoc.id);
+        futures.add(ref.delete());
+        futures.add(FirebaseFirestore.instance
+            .collection('parks')
+            .doc(parkDoc.id)
+            .update({'userCount': FieldValue.increment(-1)}));
       }
     }
+    await Future.wait(futures);
   }
 
   Future<void> _showActiveUsersDialog(String parkId) async {
@@ -354,51 +362,73 @@ class _ParksTabState extends State<ParksTab> {
                         .get(),
                     builder: (ctx, snap) {
                       final checkedIn = snap.hasData && snap.data!.exists;
+                      final isLoading = _loadingParkId == park.id;
+                      final isAnyLoading = _loadingParkId != null;
+
                       return ElevatedButton(
                         style: ElevatedButton.styleFrom(
                           backgroundColor:
                               checkedIn ? Colors.red : Colors.green,
                         ),
-                        onPressed: () async {
-                          final parkId = generateParkID(
-                              park.latitude, park.longitude, park.name);
-                          final ref = FirebaseFirestore.instance
-                              .collection('parks')
-                              .doc(parkId)
-                              .collection('active_users')
-                              .doc(_currentUserId);
+                        onPressed: isAnyLoading && !isLoading
+                            ? null
+                            : () async {
+                                setState(() {
+                                  _loadingParkId = park.id;
+                                });
+                                final parkId = generateParkID(
+                                    park.latitude, park.longitude, park.name);
+                                final ref = FirebaseFirestore.instance
+                                    .collection('parks')
+                                    .doc(parkId)
+                                    .collection('active_users')
+                                    .doc(_currentUserId);
 
-                          if (checkedIn) {
-                            await ref.delete();
-                            await FirebaseFirestore.instance
-                                .collection('parks')
-                                .doc(parkId)
-                                .update(
-                                    {'userCount': FieldValue.increment(-1)});
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                  content: Text("Checked out of park")),
-                            );
-                          } else {
-                            await _checkOutFromAllParks();
-                            await _locationService.uploadUserToActiveUsersTable(
-                              park.latitude,
-                              park.longitude,
-                              park.name,
-                            );
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                  content: Text("Checked in to park")),
-                            );
-                          }
-                          _updateActiveUserCount(parkId);
-                          setState(() {});
-                        },
-                        child: Text(
-                          checkedIn ? "Check Out" : "Check In",
-                          style: const TextStyle(
-                              fontSize: 12, color: Colors.white),
-                        ),
+                                if (checkedIn) {
+                                  await ref.delete();
+                                  await FirebaseFirestore.instance
+                                      .collection('parks')
+                                      .doc(parkId)
+                                      .update({
+                                    'userCount': FieldValue.increment(-1)
+                                  });
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(
+                                        content: Text("Checked out of park")),
+                                  );
+                                } else {
+                                  await _checkOutFromAllParks();
+                                  await _locationService
+                                      .uploadUserToActiveUsersTable(
+                                    park.latitude,
+                                    park.longitude,
+                                    park.name,
+                                  );
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(
+                                        content: Text("Checked in to park")),
+                                  );
+                                }
+                                await _updateActiveUserCount(parkId);
+                                setState(() {
+                                  _loadingParkId = null;
+                                });
+                              },
+                        child: isLoading
+                            ? const SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  valueColor: AlwaysStoppedAnimation<Color>(
+                                      Colors.white),
+                                ),
+                              )
+                            : Text(
+                                checkedIn ? "Check Out" : "Check In",
+                                style: const TextStyle(
+                                    fontSize: 12, color: Colors.white),
+                              ),
                       );
                     },
                   ),

@@ -39,9 +39,13 @@ class _AccountCreationScreenState extends State<AccountCreationScreen> {
         password: passwordController.text.trim(),
       );
 
-      final String uid = userCredential.user!.uid;
+      final user = userCredential.user;
+      final String uid = user!.uid;
 
       print("User created with UID: $uid");
+
+      // Send email verification
+      await user.sendEmailVerification();
 
       // Attempt to create the Firestore document
       try {
@@ -61,8 +65,17 @@ class _AccountCreationScreenState extends State<AccountCreationScreen> {
         );
       }
 
-      // Navigate to the next screen
-      Navigator.pushNamed(context, '/ownerDetails');
+      // Show a message to the user
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            "Account created! Please check your email to verify your account before logging in.",
+          ),
+        ),
+      );
+
+      // Optionally, navigate to a "verify email" screen or back to login
+      Navigator.pushReplacementNamed(context, '/login');
     } on FirebaseAuthException catch (authError) {
       print("Authentication error: $authError");
       ScaffoldMessenger.of(context).showSnackBar(

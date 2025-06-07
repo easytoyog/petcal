@@ -7,6 +7,8 @@ import 'package:location/location.dart' as loc;
 import 'package:http/http.dart' as http;
 import 'dart:convert';
 import '../models/park_model.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 class LocationService {
   final loc.Location _location = loc.Location();
@@ -233,5 +235,42 @@ class LocationService {
 
   Future<loc.LocationData> getCurrentLocation() async {
     return await _location.getLocation();
+  }
+
+  /// Save user location and timestamp to cache
+  Future<void> saveUserLocation(double latitude, double longitude) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setDouble('last_latitude', latitude);
+    await prefs.setDouble('last_longitude', longitude);
+    await prefs.setInt(
+        'last_location_timestamp', DateTime.now().millisecondsSinceEpoch);
+  }
+
+  /// Get cached user location if not too old
+  Future<LatLng?> getSavedUserLocation({int maxAgeSeconds = 300}) async {
+    final prefs = await SharedPreferences.getInstance();
+    final latitude = prefs.getDouble('last_latitude');
+    final longitude = prefs.getDouble('last_longitude');
+    final timestamp = prefs.getInt('last_location_timestamp');
+    if (latitude != null && longitude != null && timestamp != null) {
+      final age = DateTime.now().millisecondsSinceEpoch - timestamp;
+      if (age < maxAgeSeconds * 1000) {
+        return LatLng(latitude, longitude);
+      }
+    }
+    return null;
+  }
+
+  /// Get user location, using cache if recent, otherwise request new
+  Future<LatLng?> getUserLocationOrCached({int maxAgeSeconds = 300}) async {
+    LatLng? cached = await getSavedUserLocation(maxAgeSeconds: maxAgeSeconds);
+    if (cached != null) return cached;
+
+    final locData = await getCurrentLocation();
+    if (locData != null) {
+      await saveUserLocation(locData.latitude!, locData.longitude!);
+      return LatLng(locData.latitude!, locData.longitude!);
+    }
+    return null;
   }
 }
