@@ -121,13 +121,21 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
         );
       });
 
-      // Optionally, try to get the token immediately (may still be null)
-      final token = await messaging.getToken();
-      if (token != null) {
-        await FirebaseFirestore.instance.collection('owners').doc(user.uid).set(
-          {'fcmToken': token},
-          SetOptions(merge: true),
-        );
+      // Try to get the token immediately, but ignore errors
+      try {
+        final token = await messaging.getToken();
+        if (token != null) {
+          await FirebaseFirestore.instance
+              .collection('owners')
+              .doc(user.uid)
+              .set(
+            {'fcmToken': token},
+            SetOptions(merge: true),
+          );
+        }
+      } catch (e) {
+        print('FCM token error: $e');
+        // Optionally show a SnackBar or ignore
       }
     } else {
       print('User declined or has not accepted notification permission');
@@ -236,6 +244,7 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
     final screenWidth = MediaQuery.of(context).size.width;
     print("✅ ModernLoginScreen is building...");
     return Scaffold(
+      // resizeToAvoidBottomInset: true, // (default is true)
       body: Container(
         decoration: const BoxDecoration(
           gradient: LinearGradient(
@@ -244,160 +253,136 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
             end: Alignment.bottomRight,
           ),
         ),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 24.0),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              Image.asset(
-                "assets/images/home_icon.png",
-                width: screenWidth / 3,
-              ),
-              const SizedBox(height: 20),
-              Text(
-                "Pet Calendar",
-                style: GoogleFonts.nunito(
-                  fontSize: 32,
-                  fontWeight: FontWeight.bold,
-                  color: Colors.white,
+        child: Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.symmetric(horizontal: 24.0),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                Image.asset(
+                  "assets/images/home_icon.png",
+                  width: screenWidth / 3,
                 ),
-              ),
-              const SizedBox(height: 40),
-              TextField(
-                controller: emailController,
-                style: const TextStyle(color: Colors.white),
-                decoration: InputDecoration(
-                  filled: true,
-                  fillColor: Colors.white.withOpacity(0.1),
-                  hintText: "Email",
-                  hintStyle: const TextStyle(color: Colors.white70),
-                  prefixIcon: const Icon(Icons.mail, color: Colors.white),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: BorderSide.none,
-                  ),
-                ),
-              ),
-              const SizedBox(height: 20),
-              TextField(
-                controller: passwordController,
-                obscureText: true,
-                style: const TextStyle(color: Colors.white),
-                decoration: InputDecoration(
-                  filled: true,
-                  fillColor: Colors.white.withOpacity(0.1),
-                  hintText: "Password",
-                  hintStyle: const TextStyle(color: Colors.white70),
-                  prefixIcon: const Icon(Icons.lock, color: Colors.white),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: BorderSide.none,
-                  ),
-                ),
-              ),
-              const SizedBox(height: 10),
-              Align(
-                alignment: Alignment.centerRight,
-                child: Text(
-                  "Forgot password?",
+                const SizedBox(height: 20),
+                Text(
+                  "Pet Calendar",
                   style: GoogleFonts.nunito(
-                    color: Colors.lightBlueAccent,
-                    fontSize: 14,
+                    fontSize: 32,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white,
                   ),
                 ),
-              ),
-              const SizedBox(height: 30),
-              SizedBox(
-                width: MediaQuery.of(context).size.width / 2,
-                child: ElevatedButton(
-                  style: ElevatedButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(vertical: 16.0),
-                    backgroundColor: Colors.tealAccent,
-                    foregroundColor: Colors.black,
-                    shape: RoundedRectangleBorder(
+                const SizedBox(height: 40),
+                TextField(
+                  controller: emailController,
+                  cursorColor: Colors.tealAccent, // <-- Add this line
+                  style: const TextStyle(color: Colors.white),
+                  decoration: InputDecoration(
+                    filled: true,
+                    fillColor: Colors.white.withOpacity(0.15),
+                    hintText: "Email",
+                    hintStyle: const TextStyle(color: Colors.white70),
+                    prefixIcon: const Icon(Icons.mail, color: Colors.white),
+                    border: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide.none,
                     ),
-                    elevation: 5,
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: const BorderSide(
+                        color: Colors.tealAccent,
+                        width: 2,
+                      ),
+                    ),
                   ),
-                  onPressed: () async {
-                    User? user = await loginUsingEmailPassword(
-                      email: emailController.text,
-                      password: passwordController.text,
-                      context: context,
-                    );
-                    if (user != null) {
-                      Navigator.of(context).pushReplacementNamed('/profile');
-                    } else {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                            content: Text("Invalid email or password")),
+                ),
+                const SizedBox(height: 20),
+                TextField(
+                  controller: passwordController,
+                  obscureText: true,
+                  cursorColor: Colors.tealAccent, // <-- Add this line
+                  style: const TextStyle(color: Colors.white),
+                  decoration: InputDecoration(
+                    filled: true,
+                    fillColor: Colors.white.withOpacity(0.15),
+                    hintText: "Password",
+                    hintStyle: const TextStyle(color: Colors.white70),
+                    prefixIcon: const Icon(Icons.lock, color: Colors.white),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide.none,
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: const BorderSide(
+                        color: Colors.tealAccent,
+                        width: 2,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: Text(
+                    "Forgot password?",
+                    style: GoogleFonts.nunito(
+                      color: Colors.lightBlueAccent,
+                      fontSize: 14,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 30),
+                SizedBox(
+                  width: MediaQuery.of(context).size.width / 2,
+                  child: ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(vertical: 16.0),
+                      backgroundColor: Colors.tealAccent,
+                      foregroundColor: Colors.black,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      elevation: 5,
+                    ),
+                    onPressed: () async {
+                      await loginUsingEmailPassword(
+                        email: emailController.text,
+                        password: passwordController.text,
+                        context: context,
                       );
-                    }
-                  },
-                  child: const Text("Log in", style: TextStyle(fontSize: 18)),
-                ),
-              ),
-              const SizedBox(height: 15),
-              //   Text(
-              //     "Or sign in with",
-              //     style: GoogleFonts.nunito(color: Colors.white54, fontSize: 14),
-              //   ),
-              const SizedBox(height: 15),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  // ElevatedButton.icon(
-                  //   style: ElevatedButton.styleFrom(
-                  //     backgroundColor: Colors.white,
-                  //     foregroundColor: Colors.black,
-                  //     shape: RoundedRectangleBorder(
-                  //       borderRadius: BorderRadius.circular(8),
-                  //     ),
-                  //   ),
-                  //   icon: const Icon(Icons.login),
-                  //   label: const Text("Google"),
-                  //   onPressed: () async {
-                  //     User? user = await signInWithGoogle();
-                  //     if (user != null) {
-                  //       Navigator.of(context).pushReplacementNamed('/profile');
-                  //     }
-                  //   },
-                  // ),
-                  // const SizedBox(width: 10),
-                  // ElevatedButton.icon(
-                  //   style: ElevatedButton.styleFrom(
-                  //     backgroundColor: Colors.black,
-                  //     foregroundColor: Colors.white,
-                  //     shape: RoundedRectangleBorder(
-                  //       borderRadius: BorderRadius.circular(8),
-                  //     ),
-                  //   ),
-                  //   icon: const Icon(Icons.apple),
-                  //   label: const Text("Apple"),
-                  //   onPressed: () async {
-                  //     User? user = await signInWithApple();
-                  //     if (user != null) {
-                  //       Navigator.of(context).pushReplacementNamed('/profile');
-                  //     }
-                  //   },
-                  // ),
-                ],
-              ),
-              const SizedBox(height: 20),
-              GestureDetector(
-                onTap: () {
-                  Navigator.pushNamed(context, '/accountCreation');
-                },
-                child: Text(
-                  "Create New Account",
-                  style: GoogleFonts.nunito(
-                    fontSize: 16,
-                    color: Colors.tealAccent,
+                    },
+                    child: const Text("Log in", style: TextStyle(fontSize: 18)),
                   ),
                 ),
-              ),
-            ],
+                const SizedBox(height: 15),
+                //   Text(
+                //     "Or sign in with",
+                //     style: GoogleFonts.nunito(color: Colors.white54, fontSize: 14),
+                //   ),
+                const SizedBox(height: 15),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    // Social login buttons (commented out)
+                  ],
+                ),
+                const SizedBox(height: 20),
+                GestureDetector(
+                  onTap: () {
+                    Navigator.pushNamed(context, '/accountCreation');
+                  },
+                  child: Text(
+                    "Create New Account",
+                    style: GoogleFonts.nunito(
+                      fontSize: 16,
+                      color: Colors.tealAccent,
+                    ),
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),

@@ -1,5 +1,8 @@
+import 'dart:math';
+
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:inthepark/utils/utils.dart';
 import 'package:location/location.dart' as loc;
 import 'package:http/http.dart' as http;
 import 'dart:convert';
@@ -50,7 +53,11 @@ class LocationService {
           for (var place in data['results']) {
             // Create a Park instance from the API data.
             Park park = Park(
-              id: place['place_id'],
+              id: generateParkID(
+                place['geometry']['location']['lat'],
+                place['geometry']['location']['lng'],
+                place['name'],
+              ),
               name: place['name'],
               latitude: place['geometry']['location']['lat'],
               longitude: place['geometry']['location']['lng'],
@@ -70,14 +77,11 @@ class LocationService {
     return parks;
   }
 
-  /// Determines if the user is currently at a park (within 100m).
-  /// Returns the Park object if user is at a park, null otherwise.
   Future<Park?> isUserAtPark(double userLat, double userLng) async {
     const String baseUrl =
         "https://maps.googleapis.com/maps/api/place/nearbysearch/json";
     const String type = "park";
-    const int radius =
-        100; // Smaller radius in meters to determine if user is at a park
+    const int radius = 150; // or your preferred radius
 
     final String url =
         "$baseUrl?location=$userLat,$userLng&radius=$radius&type=$type&key=$_googlePlacesApiKey";
@@ -87,13 +91,30 @@ class LocationService {
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
         if (data['status'] == 'OK' && data['results'].isNotEmpty) {
-          final place = data['results'][0]; // Get the nearest park
-          return Park(
-            id: place['place_id'],
-            name: place['name'],
-            latitude: place['geometry']['location']['lat'],
-            longitude: place['geometry']['location']['lng'],
-          );
+          double minDistance = double.infinity;
+          Map<String, dynamic>? closestPlace;
+          for (var place in data['results']) {
+            final parkLat = place['geometry']['location']['lat'];
+            final parkLng = place['geometry']['location']['lng'];
+            final distance =
+                _calculateDistance(userLat, userLng, parkLat, parkLng);
+            if (distance < minDistance) {
+              minDistance = distance;
+              closestPlace = place;
+            }
+          }
+          if (closestPlace != null) {
+            return Park(
+              id: generateParkID(
+                closestPlace['geometry']['location']['lat'],
+                closestPlace['geometry']['location']['lng'],
+                closestPlace['name'],
+              ),
+              name: closestPlace['name'],
+              latitude: closestPlace['geometry']['location']['lat'],
+              longitude: closestPlace['geometry']['location']['lng'],
+            );
+          }
         }
       }
     } catch (e) {
@@ -101,6 +122,23 @@ class LocationService {
     }
     return null;
   }
+
+// Helper function to calculate distance between two lat/lng points in meters
+  double _calculateDistance(
+      double lat1, double lng1, double lat2, double lng2) {
+    const earthRadius = 6371000; // meters
+    final dLat = _deg2rad(lat2 - lat1);
+    final dLng = _deg2rad(lng2 - lng1);
+    final a = sin(dLat / 2) * sin(dLat / 2) +
+        cos(_deg2rad(lat1)) *
+            cos(_deg2rad(lat2)) *
+            sin(dLng / 2) *
+            sin(dLng / 2);
+    final c = 2 * atan2(sqrt(a), sqrt(1 - a));
+    return earthRadius * c;
+  }
+
+  double _deg2rad(double deg) => deg * (pi / 180);
 
   /// Ensures that a park document exists in Firestore.
   Future<void> ensureParkExists(Park park) async {
@@ -116,9 +154,15 @@ class LocationService {
   /// Uploads the current user's check-in data to the active_users collection of the specified park.
   /// Ensures that the park document exists before updating the userCount.
   Future<void> uploadUserToActiveUsersTable(
-      String parkId, double lat, double lng) async {
+    double lat,
+    double lng,
+    String parkName,
+  ) async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
+
+    // Always generate the park ID using name, lat, lng
+    final parkId = generateParkID(lat, lng, parkName);
 
     // Check out from all other parks first
     final parksSnapshot = await _firestore.collection('parks').get();
@@ -148,10 +192,11 @@ class LocationService {
       // Create the park document with minimal data if it doesn't exist.
       await parkRef.set({
         'id': parkId,
-        'name': 'Unknown Park',
+        'name': parkName,
         'latitude': lat,
         'longitude': lng,
         'userCount': 0,
+        'createdAt': FieldValue.serverTimestamp(),
       });
     }
 

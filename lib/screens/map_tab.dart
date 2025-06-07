@@ -293,6 +293,7 @@ class _MapTabState extends State<MapTab>
         position.latitude,
         position.longitude,
       );
+      print('Found currentPark: $currentPark');
       if (currentPark != null && mounted) {
         await _locationService.ensureParkExists(currentPark);
         _showCheckInDialog(currentPark);
@@ -407,9 +408,12 @@ class _MapTabState extends State<MapTab>
   void _showCheckInDialog(Park park) async {
     final currentUser = FirebaseAuth.instance.currentUser;
     if (currentUser == null) return;
+
+    final parkId = generateParkID(park.latitude, park.longitude, park.name);
+
     DocumentReference activeDocRef = FirebaseFirestore.instance
         .collection('parks')
-        .doc(park.id)
+        .doc(parkId)
         .collection('active_users')
         .doc(currentUser.uid);
     DocumentSnapshot activeDoc = await activeDocRef.get();
@@ -419,13 +423,9 @@ class _MapTabState extends State<MapTab>
       final data = activeDoc.data() as Map<String, dynamic>;
       if (data.containsKey('checkedInAt')) {
         checkedInAt = (data['checkedInAt'] as Timestamp).toDate();
-        if (DateTime.now().difference(checkedInAt) >
-            const Duration(minutes: 30)) {
-          await activeDocRef.delete();
-          isCheckedIn = false;
-        }
       }
     }
+
     showDialog(
       context: context,
       builder: (context) {
@@ -444,30 +444,22 @@ class _MapTabState extends State<MapTab>
               onPressed: () async {
                 Navigator.of(context).pop();
                 if (isCheckedIn) {
-                  await activeDocRef.delete();
-                  if (_finalPosition != null) {
-                    await _fetchNearbyParks(
-                        _finalPosition!.latitude, _finalPosition!.longitude);
-                  }
+                  // Manual check out
+                  await FirebaseFirestore.instance
+                      .collection('parks')
+                      .doc(parkId)
+                      .collection('active_users')
+                      .doc(currentUser.uid)
+                      .delete();
                   ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text("Checked out of ${park.name}")),
+                    SnackBar(content: Text("Checked out successfully")),
                   );
                 } else {
-                  await _locationService.uploadUserToActiveUsersTable(
-                    park.id,
-                    park.latitude,
-                    park.longitude,
-                  );
-                  if (_finalPosition != null) {
-                    await _fetchNearbyParks(
-                        _finalPosition!.latitude, _finalPosition!.longitude);
-                  }
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(content: Text("Checked in to ${park.name}!")),
-                  );
+                  await _handleCheckIn(
+                      park, park.latitude, park.longitude, context);
                 }
               },
-              child: const Text("Yes"),
+              child: Text(isCheckedIn ? "Yes, Check Out" : "Yes, Check In"),
             ),
           ],
         );
@@ -475,8 +467,8 @@ class _MapTabState extends State<MapTab>
     );
   }
 
-  Future<void> _showUsersInPark(
-      String parkId, double parkLatitude, double parkLongitude) async {
+  Future<void> _showUsersInPark(String parkId, String parkName,
+      double parkLatitude, double parkLongitude) async {
     try {
       final currentUser = FirebaseAuth.instance.currentUser;
       if (currentUser == null) return;
@@ -547,8 +539,8 @@ class _MapTabState extends State<MapTab>
             'petPhotoUrl': petData['photoUrl']?.toString() ?? '',
             'ownerName': ownerName.isNotEmpty ? ownerName : 'Unknown Owner',
             'checkInTime': checkInTime != null
-                ? DateFormat('HH:mm')
-                    .format((checkInTime as Timestamp).toDate())
+                ? DateFormat.jm().format(
+                    (checkInTime as Timestamp).toDate()) // e.g., 2:30 PM
                 : '',
           });
         }
@@ -570,111 +562,135 @@ class _MapTabState extends State<MapTab>
               child: Column(
                 children: [
                   Expanded(
-                    child: ListView.separated(
-                      itemCount: userList.length,
-                      separatorBuilder: (_, __) => const SizedBox(height: 6),
-                      itemBuilder: (ctx, i) {
-                        final petData = userList[i];
-                        final ownerId = petData['ownerId'] as String? ?? '';
-                        final petId = petData['petId'] as String? ?? '';
-                        final petName = petData['petName'] as String? ?? '';
-                        final petPhoto =
-                            petData['petPhotoUrl'] as String? ?? '';
-                        final checkIn = petData['checkInTime'] as String? ?? '';
-                        bool mine = (ownerId == currentUser.uid);
+                    child: StatefulBuilder(
+                      builder: (context, setStateDialog) {
+                        return ListView.separated(
+                          itemCount: userList.length,
+                          separatorBuilder: (_, __) =>
+                              const SizedBox(height: 6),
+                          itemBuilder: (ctx, i) {
+                            final petData = userList[i];
+                            final ownerId = petData['ownerId'] as String? ?? '';
+                            final petId = petData['petId'] as String? ?? '';
+                            final petName = petData['petName'] as String? ?? '';
+                            final petPhoto =
+                                petData['petPhotoUrl'] as String? ?? '';
+                            final checkIn =
+                                petData['checkInTime'] as String? ?? '';
+                            bool mine = (ownerId == currentUser.uid);
 
-                        return ListTile(
-                          leading: CircleAvatar(
-                              backgroundImage: NetworkImage(petPhoto)),
-                          title: Text(petName),
-                          subtitle: Text(mine
-                              ? "Your pet – Checked in at $checkIn"
-                              : "Checked in at $checkIn"),
-                          trailing: mine
-                              ? null
-                              : IconButton(
-                                  icon: Icon(
-                                    _favoritePetIds.contains(petId)
-                                        ? Icons.favorite
-                                        : Icons.favorite_border,
-                                    color: Colors.red,
-                                  ),
-                                  onPressed: () async {
-                                    final currentUser =
-                                        FirebaseAuth.instance.currentUser;
-                                    if (currentUser == null) return;
+                            return ListTile(
+                              leading: (petPhoto.isNotEmpty)
+                                  ? CircleAvatar(
+                                      backgroundImage: NetworkImage(petPhoto))
+                                  : const CircleAvatar(
+                                      backgroundColor: Colors.brown,
+                                      child:
+                                          Icon(Icons.pets, color: Colors.white),
+                                    ),
+                              title: Text(petName),
+                              subtitle: Text(mine
+                                  ? "Your pet – Checked in at $checkIn"
+                                  : "Checked in at $checkIn"),
+                              trailing: mine
+                                  ? null
+                                  : IconButton(
+                                      icon: Icon(
+                                        _favoritePetIds.contains(petId)
+                                            ? Icons.favorite
+                                            : Icons.favorite_border,
+                                        color: Colors.red,
+                                      ),
+                                      onPressed: () async {
+                                        final currentUser =
+                                            FirebaseAuth.instance.currentUser;
+                                        if (currentUser == null) return;
 
-                                    if (_favoritePetIds.contains(petId)) {
-                                      // Unfriend and unfavorite
-                                      await FirebaseFirestore.instance
-                                          .collection('friends')
-                                          .doc(currentUser.uid)
-                                          .collection('userFriends')
-                                          .doc(ownerId)
-                                          .delete();
-                                      await FirebaseFirestore.instance
-                                          .collection('favorites')
-                                          .doc(currentUser.uid)
-                                          .collection('pets')
-                                          .doc(petId)
-                                          .delete();
-                                      setState(() {
-                                        _favoritePetIds.remove(petId);
-                                      });
-                                      ScaffoldMessenger.of(context)
-                                          .showSnackBar(
-                                        const SnackBar(
-                                            content: Text("Friend removed.")),
-                                      );
-                                    } else {
-                                      // Add friend and favorite
-                                      // Fetch owner name for friend entry
-                                      DocumentSnapshot ownerDoc =
+                                        if (_favoritePetIds.contains(petId)) {
+                                          // Unfriend and unfavorite
                                           await FirebaseFirestore.instance
-                                              .collection('owners')
+                                              .collection('friends')
+                                              .doc(currentUser.uid)
+                                              .collection('userFriends')
                                               .doc(ownerId)
-                                              .get();
-                                      String ownerName = "";
-                                      if (ownerDoc.exists) {
-                                        final data = ownerDoc.data()
-                                            as Map<String, dynamic>;
-                                        ownerName =
-                                            "${data['firstName'] ?? ''} ${data['lastName'] ?? ''}"
-                                                .trim();
-                                      }
-                                      if (ownerName.isEmpty) {
-                                        ownerName = ownerId;
-                                      }
-                                      await FirebaseFirestore.instance
-                                          .collection('friends')
-                                          .doc(currentUser.uid)
-                                          .collection('userFriends')
-                                          .doc(ownerId)
-                                          .set({
-                                        'friendId': ownerId,
-                                        'ownerName': ownerName,
-                                        'addedAt': FieldValue.serverTimestamp(),
-                                      });
-                                      await FirebaseFirestore.instance
-                                          .collection('favorites')
-                                          .doc(currentUser.uid)
-                                          .collection('pets')
-                                          .doc(petId)
-                                          .set({
-                                        'petId': petId,
-                                        'addedAt': FieldValue.serverTimestamp(),
-                                      });
-                                      setState(() {
-                                        _favoritePetIds.add(petId);
-                                      });
-                                      ScaffoldMessenger.of(context)
-                                          .showSnackBar(
-                                        const SnackBar(
-                                            content: Text("Friend added!")),
-                                      );
-                                    }
-                                  },
-                                ),
+                                              .delete();
+                                          await FirebaseFirestore.instance
+                                              .collection('favorites')
+                                              .doc(currentUser.uid)
+                                              .collection('pets')
+                                              .doc(petId)
+                                              .delete();
+                                          if (mounted) {
+                                            setState(() {
+                                              _favoritePetIds.remove(petId);
+                                            });
+                                            setStateDialog(
+                                                () {}); // <-- Update dialog UI
+                                          }
+                                          ScaffoldMessenger.of(context)
+                                              .showSnackBar(
+                                            const SnackBar(
+                                                content:
+                                                    Text("Friend removed.")),
+                                          );
+                                          _fetchFavorites();
+                                        } else {
+                                          // Add friend and favorite
+                                          DocumentSnapshot ownerDoc =
+                                              await FirebaseFirestore.instance
+                                                  .collection('owners')
+                                                  .doc(ownerId)
+                                                  .get();
+                                          String ownerName = "";
+                                          if (ownerDoc.exists) {
+                                            final data = ownerDoc.data()
+                                                as Map<String, dynamic>;
+                                            ownerName =
+                                                "${data['firstName'] ?? ''} ${data['lastName'] ?? ''}"
+                                                    .trim();
+                                          }
+                                          if (ownerName.isEmpty) {
+                                            ownerName = ownerId;
+                                          }
+                                          await FirebaseFirestore.instance
+                                              .collection('friends')
+                                              .doc(currentUser.uid)
+                                              .collection('userFriends')
+                                              .doc(ownerId)
+                                              .set({
+                                            'friendId': ownerId,
+                                            'ownerName': ownerName,
+                                            'addedAt':
+                                                FieldValue.serverTimestamp(),
+                                          });
+                                          await FirebaseFirestore.instance
+                                              .collection('favorites')
+                                              .doc(currentUser.uid)
+                                              .collection('pets')
+                                              .doc(petId)
+                                              .set({
+                                            'petId': petId,
+                                            'addedAt':
+                                                FieldValue.serverTimestamp(),
+                                          });
+                                          if (mounted) {
+                                            setState(() {
+                                              _favoritePetIds.add(petId);
+                                            });
+                                            setStateDialog(
+                                                () {}); // <-- Update dialog UI
+                                          }
+                                          ScaffoldMessenger.of(context)
+                                              .showSnackBar(
+                                            const SnackBar(
+                                                content: Text("Friend added!")),
+                                          );
+                                          _fetchFavorites();
+                                        }
+                                      },
+                                    ),
+                            );
+                          },
                         );
                       },
                     ),
@@ -698,7 +714,10 @@ class _MapTabState extends State<MapTab>
                             );
                           } else {
                             await _locationService.uploadUserToActiveUsersTable(
-                                parkId, parkLatitude, parkLongitude);
+                              parkLatitude,
+                              parkLongitude,
+                              parkName,
+                            );
                             ScaffoldMessenger.of(context).showSnackBar(
                               SnackBar(content: Text("Checked in to park")),
                             );
@@ -801,7 +820,7 @@ class _MapTabState extends State<MapTab>
     }
   }
 
-  Future<void> _handleCheckIn(String parkId, double parkLatitude,
+  Future<void> _handleCheckIn(Park park, double parkLatitude,
       double parkLongitude, BuildContext context) async {
     final currentUser = FirebaseAuth.instance.currentUser;
     if (currentUser == null) return;
@@ -812,9 +831,9 @@ class _MapTabState extends State<MapTab>
 
       // Then check in to this park
       await _locationService.uploadUserToActiveUsersTable(
-        parkId,
         parkLatitude,
         parkLongitude,
+        park.name,
       );
 
       // Refresh the map
@@ -822,9 +841,6 @@ class _MapTabState extends State<MapTab>
         await _fetchNearbyParks(
             _finalPosition!.latitude, _finalPosition!.longitude);
       }
-
-      // Close the dialog
-      Navigator.of(context, rootNavigator: true).pop();
 
       // Show confirmation
       ScaffoldMessenger.of(context).showSnackBar(
@@ -905,333 +921,373 @@ class _MapTabState extends State<MapTab>
 
   void _addEvent(String parkId, double parkLatitude, double parkLongitude) {
     final TextEditingController eventNameController = TextEditingController();
-    // Recurrence options: One Time, Daily, Weekly, Monthly.
+    final TextEditingController eventDescController = TextEditingController();
     String? selectedRecurrence = "One Time";
-    DateTime? oneTimeDate; // For one-time events.
-    DateTime? monthlyDate; // For monthly events.
-    String? selectedWeekday; // For weekly events.
+    DateTime? oneTimeDate;
+    DateTime? monthlyDate;
+    String? selectedWeekday;
     TimeOfDay? selectedStartTime;
     TimeOfDay? selectedEndTime;
 
     showDialog(
       context: context,
+      barrierDismissible: false,
       builder: (context) {
-        return StatefulBuilder(
-          builder: (context, setState) {
-            return AlertDialog(
-              title: const Text("Add Event"),
-              content: SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    TextField(
-                      controller: eventNameController,
-                      decoration: const InputDecoration(
-                        labelText: "Event Name *",
-                        hintText: "Enter event name",
-                        // Optionally, you can also set a different style for the label:
-                        // labelStyle: TextStyle(fontWeight: FontWeight.bold, color: Colors.red),
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    DropdownButtonFormField<String>(
-                      value: selectedRecurrence,
-                      decoration: const InputDecoration(
-                        labelText: "Recurrence",
-                      ),
-                      items: ["One Time", "Daily", "Weekly", "Monthly"]
-                          .map((String value) {
-                        return DropdownMenuItem<String>(
-                          value: value,
-                          child: Text(value),
-                        );
-                      }).toList(),
-                      onChanged: (String? newValue) {
-                        setState(() {
-                          selectedRecurrence = newValue;
-                          oneTimeDate = null;
-                          monthlyDate = null;
-                          selectedWeekday = null;
-                        });
-                      },
-                    ),
-                    const SizedBox(height: 8),
-                    if (selectedRecurrence == "One Time")
-                      Row(
-                        children: [
-                          Expanded(
-                            child: Text(
-                              oneTimeDate == null
-                                  ? "No date selected"
-                                  : "Date: ${DateFormat.yMd().format(oneTimeDate!)}",
-                            ),
-                          ),
-                          TextButton(
-                            onPressed: () async {
-                              DateTime? date = await showDatePicker(
-                                context: context,
-                                initialDate: DateTime.now(),
-                                firstDate: DateTime(2000),
-                                lastDate: DateTime(2100),
-                              );
-                              setState(() {
-                                oneTimeDate = date;
-                              });
-                            },
-                            child: const Text("Select Date"),
-                          ),
-                        ],
-                      ),
-                    if (selectedRecurrence == "Weekly")
-                      DropdownButtonFormField<String>(
-                        value: selectedWeekday,
+        return Scaffold(
+          appBar: AppBar(
+            title: const Text("Add Event"),
+            backgroundColor: const Color(0xFF567D46),
+            automaticallyImplyLeading: false,
+            actions: [
+              IconButton(
+                icon: const Icon(Icons.close),
+                onPressed: () => Navigator.of(context).pop(),
+              ),
+            ],
+          ),
+          body: StatefulBuilder(
+            builder: (context, setState) {
+              return Padding(
+                padding: const EdgeInsets.all(24.0),
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      TextField(
+                        controller: eventNameController,
+                        autofocus: true,
                         decoration: const InputDecoration(
-                          labelText: "Select Day of Week",
+                          labelText: "Event Name *",
+                          hintText: "Enter event name",
+                          border: OutlineInputBorder(),
                         ),
-                        items: [
-                          "Monday",
-                          "Tuesday",
-                          "Wednesday",
-                          "Thursday",
-                          "Friday",
-                          "Saturday",
-                          "Sunday"
-                        ].map((String day) {
+                      ),
+                      const SizedBox(height: 16),
+                      TextField(
+                        controller: eventDescController,
+                        maxLines: 3,
+                        decoration: const InputDecoration(
+                          labelText: "Description",
+                          hintText: "Enter event description",
+                          border: OutlineInputBorder(),
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      DropdownButtonFormField<String>(
+                        value: selectedRecurrence,
+                        decoration: const InputDecoration(
+                          labelText: "Recurrence",
+                          border: OutlineInputBorder(),
+                        ),
+                        items: ["One Time", "Daily", "Weekly", "Monthly"]
+                            .map((String value) {
                           return DropdownMenuItem<String>(
-                            value: day,
-                            child: Text(day),
+                            value: value,
+                            child: Text(value),
                           );
                         }).toList(),
                         onChanged: (String? newValue) {
                           setState(() {
-                            selectedWeekday = newValue;
+                            selectedRecurrence = newValue;
+                            oneTimeDate = null;
+                            monthlyDate = null;
+                            selectedWeekday = null;
                           });
                         },
                       ),
-                    if (selectedRecurrence == "Monthly")
+                      const SizedBox(height: 16),
+                      if (selectedRecurrence == "One Time")
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                oneTimeDate == null
+                                    ? "No date selected"
+                                    : "Date: ${DateFormat.yMd().format(oneTimeDate!)}",
+                              ),
+                            ),
+                            TextButton(
+                              onPressed: () async {
+                                DateTime? date = await showDatePicker(
+                                  context: context,
+                                  initialDate: DateTime.now(),
+                                  firstDate: DateTime(2000),
+                                  lastDate: DateTime(2100),
+                                );
+                                setState(() {
+                                  oneTimeDate = date;
+                                });
+                              },
+                              child: const Text("Select Date"),
+                            ),
+                          ],
+                        ),
+                      if (selectedRecurrence == "Weekly")
+                        DropdownButtonFormField<String>(
+                          value: selectedWeekday,
+                          decoration: const InputDecoration(
+                            labelText: "Select Day of Week",
+                            border: OutlineInputBorder(),
+                          ),
+                          items: [
+                            "Monday",
+                            "Tuesday",
+                            "Wednesday",
+                            "Thursday",
+                            "Friday",
+                            "Saturday",
+                            "Sunday"
+                          ].map((String day) {
+                            return DropdownMenuItem<String>(
+                              value: day,
+                              child: Text(day),
+                            );
+                          }).toList(),
+                          onChanged: (String? newValue) {
+                            setState(() {
+                              selectedWeekday = newValue;
+                            });
+                          },
+                        ),
+                      if (selectedRecurrence == "Monthly")
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                monthlyDate == null
+                                    ? "No date selected"
+                                    : "Date: ${DateFormat.d().format(monthlyDate!)}",
+                              ),
+                            ),
+                            TextButton(
+                              onPressed: () async {
+                                DateTime? date = await showDatePicker(
+                                  context: context,
+                                  initialDate: DateTime.now(),
+                                  firstDate: DateTime(2000),
+                                  lastDate: DateTime(2100),
+                                );
+                                setState(() {
+                                  monthlyDate = date;
+                                });
+                              },
+                              child: const Text("Select Date"),
+                            ),
+                          ],
+                        ),
+                      const SizedBox(height: 16),
                       Row(
                         children: [
                           Expanded(
                             child: Text(
-                              monthlyDate == null
-                                  ? "No date selected"
-                                  : "Date: ${DateFormat.d().format(monthlyDate!)}",
+                              selectedStartTime == null
+                                  ? "No start time selected"
+                                  : "Start: ${selectedStartTime!.format(context)}",
                             ),
                           ),
                           TextButton(
                             onPressed: () async {
-                              DateTime? date = await showDatePicker(
+                              TimeOfDay? time = await showTimePicker(
                                 context: context,
-                                initialDate: DateTime.now(),
-                                firstDate: DateTime(2000),
-                                lastDate: DateTime(2100),
+                                initialTime: TimeOfDay.now(),
                               );
-                              setState(() {
-                                monthlyDate = date;
-                              });
+                              if (time != null) {
+                                setState(() {
+                                  selectedStartTime = time;
+                                });
+                              }
                             },
-                            child: const Text("Select Date"),
+                            child: const Text("Select Start Time"),
                           ),
                         ],
                       ),
-                    const SizedBox(height: 8),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            selectedStartTime == null
-                                ? "No start time selected"
-                                : "Start: ${selectedStartTime!.format(context)}",
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              selectedEndTime == null
+                                  ? "No end time selected"
+                                  : "End: ${selectedEndTime!.format(context)}",
+                            ),
                           ),
-                        ),
-                        TextButton(
-                          onPressed: () async {
-                            TimeOfDay? time = await showTimePicker(
-                              context: context,
-                              initialTime: TimeOfDay.now(),
-                            );
-                            if (time != null) {
-                              setState(() {
-                                selectedStartTime = time;
-                              });
-                            }
-                          },
-                          child: const Text("Select Start Time"),
-                        ),
-                      ],
-                    ),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            selectedEndTime == null
-                                ? "No end time selected"
-                                : "End: ${selectedEndTime!.format(context)}",
+                          TextButton(
+                            onPressed: () async {
+                              TimeOfDay? time = await showTimePicker(
+                                context: context,
+                                initialTime: TimeOfDay.now(),
+                              );
+                              if (time != null) {
+                                setState(() {
+                                  selectedEndTime = time;
+                                });
+                              }
+                            },
+                            child: const Text("Select End Time"),
                           ),
-                        ),
-                        TextButton(
-                          onPressed: () async {
-                            TimeOfDay? time = await showTimePicker(
-                              context: context,
-                              initialTime: TimeOfDay.now(),
-                            );
-                            if (time != null) {
-                              setState(() {
-                                selectedEndTime = time;
-                              });
-                            }
-                          },
-                          child: const Text("Select End Time"),
-                        ),
-                      ],
-                    ),
-                  ],
+                        ],
+                      ),
+                      const SizedBox(height: 24),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.end,
+                        children: [
+                          TextButton(
+                            onPressed: () => Navigator.of(context).pop(),
+                            child: const Text("Cancel"),
+                          ),
+                          const SizedBox(width: 12),
+                          ElevatedButton(
+                            onPressed: () async {
+                              String eventName =
+                                  eventNameController.text.trim();
+                              String eventDesc =
+                                  eventDescController.text.trim();
+                              if (eventName.isEmpty ||
+                                  selectedStartTime == null ||
+                                  selectedEndTime == null ||
+                                  selectedRecurrence == null) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                      content: Text(
+                                          "Please complete all required fields")),
+                                );
+                                return;
+                              }
+                              if (selectedRecurrence == "One Time" &&
+                                  oneTimeDate == null) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                      content: Text(
+                                          "Please select a date for a one-time event")),
+                                );
+                                return;
+                              }
+                              if (selectedRecurrence == "Weekly" &&
+                                  selectedWeekday == null) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                      content: Text(
+                                          "Please select a day for a weekly event")),
+                                );
+                                return;
+                              }
+                              if (selectedRecurrence == "Monthly" &&
+                                  monthlyDate == null) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                      content: Text(
+                                          "Please select a date for a monthly event")),
+                                );
+                                return;
+                              }
+
+                              DateTime? eventStartDateTime;
+                              DateTime? eventEndDateTime;
+                              DateTime now = DateTime.now();
+                              if (selectedRecurrence == "One Time") {
+                                eventStartDateTime = DateTime(
+                                  oneTimeDate!.year,
+                                  oneTimeDate!.month,
+                                  oneTimeDate!.day,
+                                  selectedStartTime!.hour,
+                                  selectedStartTime!.minute,
+                                );
+                                eventEndDateTime = DateTime(
+                                  oneTimeDate!.year,
+                                  oneTimeDate!.month,
+                                  oneTimeDate!.day,
+                                  selectedEndTime!.hour,
+                                  selectedEndTime!.minute,
+                                );
+                              } else if (selectedRecurrence == "Monthly") {
+                                eventStartDateTime = DateTime(
+                                  now.year,
+                                  now.month,
+                                  monthlyDate!.day,
+                                  selectedStartTime!.hour,
+                                  selectedStartTime!.minute,
+                                );
+                                eventEndDateTime = DateTime(
+                                  now.year,
+                                  now.month,
+                                  monthlyDate!.day,
+                                  selectedEndTime!.hour,
+                                  selectedEndTime!.minute,
+                                );
+                              } else {
+                                eventStartDateTime = DateTime(
+                                  now.year,
+                                  now.month,
+                                  now.day,
+                                  selectedStartTime!.hour,
+                                  selectedStartTime!.minute,
+                                );
+                                eventEndDateTime = DateTime(
+                                  now.year,
+                                  now.month,
+                                  now.day,
+                                  selectedEndTime!.hour,
+                                  selectedEndTime!.minute,
+                                );
+                              }
+
+                              if (!eventEndDateTime
+                                  .isAfter(eventStartDateTime)) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                      content: Text(
+                                          "End time must be after start time")),
+                                );
+                                return;
+                              }
+
+                              Map<String, dynamic> eventData = {
+                                'parkId': parkId,
+                                'parkLatitude': parkLatitude,
+                                'parkLongitude': parkLongitude,
+                                'name': eventName,
+                                'description': eventDesc,
+                                'startDateTime': eventStartDateTime,
+                                'endDateTime': eventEndDateTime,
+                                'recurrence': selectedRecurrence,
+                                'likes': [],
+                                'createdBy':
+                                    FirebaseAuth.instance.currentUser?.uid ??
+                                        "",
+                                'createdAt': FieldValue.serverTimestamp(),
+                              };
+
+                              if (selectedRecurrence == "Weekly") {
+                                eventData['weekday'] = selectedWeekday;
+                              }
+                              if (selectedRecurrence == "One Time") {
+                                eventData['eventDate'] = oneTimeDate;
+                              }
+                              if (selectedRecurrence == "Monthly") {
+                                eventData['eventDay'] = monthlyDate!.day;
+                              }
+
+                              await FirebaseFirestore.instance
+                                  .collection('parks')
+                                  .doc(parkId)
+                                  .collection('events')
+                                  .add(eventData);
+
+                              Navigator.of(context).pop();
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                    content: Text("Event '$eventName' added")),
+                              );
+                            },
+                            child: const Text("Add"),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
                 ),
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.of(context).pop(),
-                  child: const Text("Cancel"),
-                ),
-                TextButton(
-                  onPressed: () async {
-                    String eventName = eventNameController.text.trim();
-                    if (eventName.isEmpty ||
-                        selectedStartTime == null ||
-                        selectedEndTime == null ||
-                        selectedRecurrence == null) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                            content:
-                                Text("Please complete all required fields")),
-                      );
-                      return;
-                    }
-                    if (selectedRecurrence == "One Time" &&
-                        oneTimeDate == null) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                            content: Text(
-                                "Please select a date for a one-time event")),
-                      );
-                      return;
-                    }
-                    if (selectedRecurrence == "Weekly" &&
-                        selectedWeekday == null) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                            content:
-                                Text("Please select a day for a weekly event")),
-                      );
-                      return;
-                    }
-                    if (selectedRecurrence == "Monthly" &&
-                        monthlyDate == null) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                            content: Text(
-                                "Please select a date for a monthly event")),
-                      );
-                      return;
-                    }
-
-                    DateTime? eventStartDateTime;
-                    DateTime? eventEndDateTime;
-                    DateTime now = DateTime.now();
-                    if (selectedRecurrence == "One Time") {
-                      eventStartDateTime = DateTime(
-                        oneTimeDate!.year,
-                        oneTimeDate!.month,
-                        oneTimeDate!.day,
-                        selectedStartTime!.hour,
-                        selectedStartTime!.minute,
-                      );
-                      eventEndDateTime = DateTime(
-                        oneTimeDate!.year,
-                        oneTimeDate!.month,
-                        oneTimeDate!.day,
-                        selectedEndTime!.hour,
-                        selectedEndTime!.minute,
-                      );
-                    } else if (selectedRecurrence == "Monthly") {
-                      eventStartDateTime = DateTime(
-                        now.year,
-                        now.month,
-                        monthlyDate!.day,
-                        selectedStartTime!.hour,
-                        selectedStartTime!.minute,
-                      );
-                      eventEndDateTime = DateTime(
-                        now.year,
-                        now.month,
-                        monthlyDate!.day,
-                        selectedEndTime!.hour,
-                        selectedEndTime!.minute,
-                      );
-                    } else {
-                      eventStartDateTime = DateTime(
-                        now.year,
-                        now.month,
-                        now.day,
-                        selectedStartTime!.hour,
-                        selectedStartTime!.minute,
-                      );
-                      eventEndDateTime = DateTime(
-                        now.year,
-                        now.month,
-                        now.day,
-                        selectedEndTime!.hour,
-                        selectedEndTime!.minute,
-                      );
-                    }
-
-                    if (!eventEndDateTime.isAfter(eventStartDateTime)) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                            content: Text("End time must be after start time")),
-                      );
-                      return;
-                    }
-
-                    Map<String, dynamic> eventData = {
-                      'parkId': parkId,
-                      'parkLatitude': parkLatitude,
-                      'parkLongitude': parkLongitude,
-                      'name': eventName,
-                      'startDateTime': eventStartDateTime,
-                      'endDateTime': eventEndDateTime,
-                      'recurrence': selectedRecurrence,
-                      'likes': [],
-                      'createdBy': FirebaseAuth.instance.currentUser?.uid ?? "",
-                      'createdAt': FieldValue.serverTimestamp(),
-                    };
-
-                    if (selectedRecurrence == "Weekly") {
-                      eventData['weekday'] = selectedWeekday;
-                    }
-                    if (selectedRecurrence == "One Time") {
-                      eventData['eventDate'] = oneTimeDate;
-                    }
-                    if (selectedRecurrence == "Monthly") {
-                      eventData['eventDay'] = monthlyDate!.day;
-                    }
-
-                    await FirebaseFirestore.instance
-                        .collection('parks')
-                        .doc(parkId)
-                        .collection('events')
-                        .add(eventData);
-
-                    Navigator.of(context).pop();
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(content: Text("Event '$eventName' added")),
-                    );
-                  },
-                  child: const Text("Add"),
-                ),
-              ],
-            );
-          },
+              );
+            },
+          ),
         );
       },
     );
@@ -1239,19 +1295,29 @@ class _MapTabState extends State<MapTab>
 
   Future<Marker> _createParkMarker(Park park) async {
     final firestore = FirebaseFirestore.instance;
-    final parkId = generateParkID(
-        park.latitude, park.longitude, park.name); // Use your function
+    // Always generate the same unique parkId for this park
+    final parkId = generateParkID(park.latitude, park.longitude, park.name);
+
+    final parkRef = firestore.collection('parks').doc(parkId);
+    final parkSnap = await parkRef.get();
+
+    // Only create the park if it doesn't already exist
+    if (!parkSnap.exists) {
+      await parkRef.set({
+        'id': parkId,
+        'name': park.name,
+        'latitude': park.latitude,
+        'longitude': park.longitude,
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+    }
 
     return Marker(
-      markerId: MarkerId(park.id),
+      markerId: MarkerId(parkId),
       position: LatLng(park.latitude, park.longitude),
-
-      // When the user taps the pin…
       onTap: () async {
-        final parkRef = firestore.collection('parks').doc(park.id);
+        // Ensure park exists before showing users
         final parkSnap = await parkRef.get();
-
-        // 1) If the park doesn’t exist yet, create it
         if (!parkSnap.exists) {
           await parkRef.set({
             'name': park.name,
@@ -1260,18 +1326,12 @@ class _MapTabState extends State<MapTab>
             'createdAt': FieldValue.serverTimestamp(),
           });
         }
-
-        // 2) Now open your popup (active users / check in dialog)
-        _showUsersInPark(park.id, park.latitude, park.longitude);
+        _showUsersInPark(parkId, park.name, park.latitude, park.longitude);
       },
-
       infoWindow: InfoWindow(
         title: park.name,
-        //snippet: 'Active Users: ${_activeUserCounts[park.id] ?? 0}',
-
-        // And the same logic if they tap the InfoWindow
         onTap: () async {
-          final parkRef = firestore.collection('parks').doc(park.id);
+          // Ensure park exists before showing users
           final parkSnap = await parkRef.get();
           if (!parkSnap.exists) {
             await parkRef.set({
@@ -1281,7 +1341,7 @@ class _MapTabState extends State<MapTab>
               'createdAt': FieldValue.serverTimestamp(),
             });
           }
-          _showUsersInPark(park.id, park.latitude, park.longitude);
+          _showUsersInPark(parkId, park.name, park.latitude, park.longitude);
         },
       ),
     );

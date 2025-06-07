@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:inthepark/utils/utils.dart';
 import 'package:location/location.dart' as loc;
 import 'package:inthepark/models/park_model.dart';
 import 'package:inthepark/screens/chatroom_screen.dart';
@@ -9,6 +10,7 @@ import 'package:inthepark/services/firestore_service.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:inthepark/widgets/ad_banner.dart';
 import 'package:inthepark/widgets/active_pets_dialog.dart';
+import 'package:intl/intl.dart';
 
 class ParksTab extends StatefulWidget {
   final void Function(String parkId) onShowEvents;
@@ -141,6 +143,18 @@ class _ParksTabState extends State<ParksTab> {
   }
 
   Future<void> _showActiveUsersDialog(String parkId) async {
+    final currentUser = FirebaseAuth.instance.currentUser;
+    if (currentUser == null) return;
+
+    // Fetch user's favorite pet IDs
+    final favPetsSnap = await FirebaseFirestore.instance
+        .collection('favorites')
+        .doc(currentUser.uid)
+        .collection('pets')
+        .get();
+    final Set<String> favoritePetIds =
+        favPetsSnap.docs.map((doc) => doc.id).toSet();
+
     final activeUsersSnapshot = await FirebaseFirestore.instance
         .collection('parks')
         .doc(parkId)
@@ -151,7 +165,6 @@ class _ParksTabState extends State<ParksTab> {
 
     for (var userDoc in activeUsersSnapshot.docs) {
       final userId = userDoc.id;
-      // Fetch pets for this user from the top-level pets collection
       final petsSnapshot = await FirebaseFirestore.instance
           .collection('pets')
           .where('ownerId', isEqualTo: userId)
@@ -159,17 +172,99 @@ class _ParksTabState extends State<ParksTab> {
 
       for (var petDoc in petsSnapshot.docs) {
         final petData = petDoc.data();
+        final checkedInAt = userDoc.data()['checkedInAt'];
+        String checkInTime = '';
+        if (checkedInAt != null) {
+          final dt = checkedInAt.toDate();
+          checkInTime = DateFormat.jm().format(dt); // e.g., 2:30 PM
+        }
         activePets.add({
           'petName': petData['name'] ?? 'Unknown Pet',
           'petPhotoUrl': petData['photoUrl'] ?? '',
           'ownerId': userId,
+          'petId': petDoc.id,
+          'checkInTime': checkInTime,
         });
       }
     }
 
     showDialog(
       context: context,
-      builder: (context) => ActivePetsDialog(pets: activePets),
+      builder: (context) {
+        return StatefulBuilder(
+          builder: (context, setStateDialog) {
+            return ActivePetsDialog(
+              pets: activePets,
+              favoritePetIds: favoritePetIds,
+              currentUserId: currentUser.uid,
+              onFavoriteToggle: (ownerId, petId) async {
+                if (favoritePetIds.contains(petId)) {
+                  // Unfriend and unfavorite
+                  await FirebaseFirestore.instance
+                      .collection('friends')
+                      .doc(currentUser.uid)
+                      .collection('userFriends')
+                      .doc(ownerId)
+                      .delete();
+                  await FirebaseFirestore.instance
+                      .collection('favorites')
+                      .doc(currentUser.uid)
+                      .collection('pets')
+                      .doc(petId)
+                      .delete();
+                  setStateDialog(() {
+                    favoritePetIds.remove(petId);
+                  });
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text("Friend removed.")),
+                  );
+                } else {
+                  // Add friend and favorite
+                  DocumentSnapshot ownerDoc = await FirebaseFirestore.instance
+                      .collection('owners')
+                      .doc(ownerId)
+                      .get();
+                  String ownerName = "";
+                  if (ownerDoc.exists) {
+                    final data = ownerDoc.data() as Map<String, dynamic>;
+                    ownerName =
+                        "${data['firstName'] ?? ''} ${data['lastName'] ?? ''}"
+                            .trim();
+                  }
+                  if (ownerName.isEmpty) {
+                    ownerName = ownerId;
+                  }
+                  await FirebaseFirestore.instance
+                      .collection('friends')
+                      .doc(currentUser.uid)
+                      .collection('userFriends')
+                      .doc(ownerId)
+                      .set({
+                    'friendId': ownerId,
+                    'ownerName': ownerName,
+                    'addedAt': FieldValue.serverTimestamp(),
+                  });
+                  await FirebaseFirestore.instance
+                      .collection('favorites')
+                      .doc(currentUser.uid)
+                      .collection('pets')
+                      .doc(petId)
+                      .set({
+                    'petId': petId,
+                    'addedAt': FieldValue.serverTimestamp(),
+                  });
+                  setStateDialog(() {
+                    favoritePetIds.add(petId);
+                  });
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text("Friend added!")),
+                  );
+                }
+              },
+            );
+          },
+        );
+      },
     );
   }
 
@@ -252,7 +347,8 @@ class _ParksTabState extends State<ParksTab> {
                   FutureBuilder<DocumentSnapshot>(
                     future: FirebaseFirestore.instance
                         .collection('parks')
-                        .doc(park.id)
+                        .doc(generateParkID(
+                            park.latitude, park.longitude, park.name))
                         .collection('active_users')
                         .doc(_currentUserId)
                         .get(),
@@ -264,21 +360,38 @@ class _ParksTabState extends State<ParksTab> {
                               checkedIn ? Colors.red : Colors.green,
                         ),
                         onPressed: () async {
+                          final parkId = generateParkID(
+                              park.latitude, park.longitude, park.name);
                           final ref = FirebaseFirestore.instance
                               .collection('parks')
-                              .doc(park.id)
+                              .doc(parkId)
                               .collection('active_users')
                               .doc(_currentUserId);
 
                           if (checkedIn) {
                             await ref.delete();
+                            await FirebaseFirestore.instance
+                                .collection('parks')
+                                .doc(parkId)
+                                .update(
+                                    {'userCount': FieldValue.increment(-1)});
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                  content: Text("Checked out of park")),
+                            );
                           } else {
                             await _checkOutFromAllParks();
-                            await ref.set({
-                              'checkedInAt': FieldValue.serverTimestamp(),
-                            });
+                            await _locationService.uploadUserToActiveUsersTable(
+                              park.latitude,
+                              park.longitude,
+                              park.name,
+                            );
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                  content: Text("Checked in to park")),
+                            );
                           }
-                          _updateActiveUserCount(park.id);
+                          _updateActiveUserCount(parkId);
                           setState(() {});
                         },
                         child: Text(

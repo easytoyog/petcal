@@ -102,7 +102,7 @@ class _EventsTabState extends State<EventsTab> {
 
       _applySearchFilter();
     } catch (e) {
-      print("Error fetching events: \$e");
+      print("Error fetching events: $e");
       setState(() => _isLoading = false);
     }
     setState(() => _isLoading = false);
@@ -184,6 +184,492 @@ class _EventsTabState extends State<EventsTab> {
     );
   }
 
+  void _showAddEventDialog() async {
+    final TextEditingController eventNameController = TextEditingController();
+    final TextEditingController eventDescController = TextEditingController();
+    final TextEditingController parkSearchController = TextEditingController();
+    String? selectedRecurrence = "One Time";
+    DateTime? oneTimeDate;
+    DateTime? monthlyDate;
+    String? selectedWeekday;
+    TimeOfDay? selectedStartTime;
+    TimeOfDay? selectedEndTime;
+    Map<String, dynamic>? selectedPark;
+    List<Map<String, dynamic>> parkResults = [];
+    bool isSearchingParks = false;
+
+    Future<void> searchParks(String query) async {
+      if (query.isEmpty) {
+        parkResults = [];
+        return;
+      }
+      isSearchingParks = true;
+      final snapshot = await FirebaseFirestore.instance
+          .collection('parks')
+          .where('name', isGreaterThanOrEqualTo: query)
+          .where('name', isLessThanOrEqualTo: query + '\uf8ff')
+          .limit(10)
+          .get();
+      parkResults = snapshot.docs.map((d) {
+        final data = d.data();
+        data['id'] = d.id;
+        return data;
+      }).toList();
+      isSearchingParks = false;
+    }
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) {
+        return Scaffold(
+          /*   appBar: AppBar(
+            title: const Text("Add Event"),
+            backgroundColor: const Color(0xFF567D46),
+            automaticallyImplyLeading: false,
+            actions: [
+              IconButton(
+                icon: const Icon(Icons.close),
+                onPressed: () => Navigator.of(context).pop(),
+              ),
+            ],
+          ),*/
+          body: StatefulBuilder(
+            builder: (context, setState) {
+              return Padding(
+                padding: const EdgeInsets.all(24.0),
+                child: SingleChildScrollView(
+                  child: Column(
+                    crossAxisAlignment:
+                        CrossAxisAlignment.start, // <-- left align labels
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Text(
+                        "Select Park *",
+                        style: TextStyle(fontWeight: FontWeight.w600),
+                        textAlign: TextAlign.left,
+                      ),
+                      const SizedBox(height: 8),
+                      TextField(
+                        controller: parkSearchController,
+                        decoration: const InputDecoration(
+                          labelText: "Search for a park",
+                          border: OutlineInputBorder(),
+                          alignLabelWithHint: true,
+                        ),
+                        onChanged: (value) async {
+                          setState(() => isSearchingParks = true);
+                          await searchParks(value);
+                          setState(() {});
+                        },
+                      ),
+                      if (parkSearchController.text.isNotEmpty)
+                        Container(
+                          constraints: const BoxConstraints(maxHeight: 200),
+                          child: isSearchingParks
+                              ? const Center(
+                                  child: Padding(
+                                  padding: EdgeInsets.all(8.0),
+                                  child: CircularProgressIndicator(),
+                                ))
+                              : ListView.builder(
+                                  shrinkWrap: true,
+                                  itemCount: parkResults.length,
+                                  itemBuilder: (ctx, idx) {
+                                    final park = parkResults[idx];
+                                    return ListTile(
+                                      title: Text(park['name'] ?? ''),
+                                      subtitle: park['address'] != null
+                                          ? Text(park['address'])
+                                          : null,
+                                      selected:
+                                          selectedPark?['id'] == park['id'],
+                                      onTap: () {
+                                        setState(() {
+                                          selectedPark = park;
+                                          parkSearchController.text =
+                                              park['name'];
+                                          parkResults = [];
+                                        });
+                                      },
+                                    );
+                                  },
+                                ),
+                        ),
+                      if (selectedPark != null)
+                        Padding(
+                          padding: const EdgeInsets.only(top: 8, bottom: 8),
+                          child: Row(
+                            children: [
+                              const Icon(Icons.park,
+                                  color: Colors.green, size: 18),
+                              const SizedBox(width: 6),
+                              Expanded(
+                                child: Text(
+                                  selectedPark!['name'] ?? '',
+                                  style: const TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                      color: Colors.green),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      const SizedBox(height: 16),
+                      const Text(
+                        "Event Name *",
+                        style: TextStyle(fontWeight: FontWeight.w600),
+                        textAlign: TextAlign.left,
+                      ),
+                      const SizedBox(height: 8),
+                      TextField(
+                        controller: eventNameController,
+                        autofocus: true,
+                        decoration: const InputDecoration(
+                          labelText: "Event Name",
+                          border: OutlineInputBorder(),
+                          alignLabelWithHint: true,
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      const Text(
+                        "Description",
+                        style: TextStyle(fontWeight: FontWeight.w600),
+                        textAlign: TextAlign.left,
+                      ),
+                      const SizedBox(height: 8),
+                      TextField(
+                        controller: eventDescController,
+                        maxLines: 3,
+                        decoration: const InputDecoration(
+                          labelText: "Description",
+                          border: OutlineInputBorder(),
+                          alignLabelWithHint: true,
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      DropdownButtonFormField<String>(
+                        value: selectedRecurrence,
+                        decoration: const InputDecoration(
+                          labelText: "Recurrence",
+                          border: OutlineInputBorder(),
+                          alignLabelWithHint: true,
+                        ),
+                        items: ["One Time", "Daily", "Weekly", "Monthly"]
+                            .map((String value) {
+                          return DropdownMenuItem<String>(
+                            value: value,
+                            child: Text(value),
+                          );
+                        }).toList(),
+                        onChanged: (String? newValue) {
+                          setState(() {
+                            selectedRecurrence = newValue;
+                            oneTimeDate = null;
+                            monthlyDate = null;
+                            selectedWeekday = null;
+                          });
+                        },
+                      ),
+                      const SizedBox(height: 16),
+                      if (selectedRecurrence == "One Time")
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                oneTimeDate == null
+                                    ? "No date selected"
+                                    : "Date: ${DateFormat.yMd().format(oneTimeDate!)}",
+                              ),
+                            ),
+                            TextButton(
+                              onPressed: () async {
+                                DateTime? date = await showDatePicker(
+                                  context: context,
+                                  initialDate: DateTime.now(),
+                                  firstDate: DateTime(2000),
+                                  lastDate: DateTime(2100),
+                                );
+                                setState(() {
+                                  oneTimeDate = date;
+                                });
+                              },
+                              child: const Text("Select Date"),
+                            ),
+                          ],
+                        ),
+                      if (selectedRecurrence == "Weekly")
+                        DropdownButtonFormField<String>(
+                          value: selectedWeekday,
+                          decoration: const InputDecoration(
+                            labelText: "Select Day of Week",
+                            border: OutlineInputBorder(),
+                            alignLabelWithHint: true,
+                          ),
+                          items: [
+                            "Monday",
+                            "Tuesday",
+                            "Wednesday",
+                            "Thursday",
+                            "Friday",
+                            "Saturday",
+                            "Sunday"
+                          ].map((String day) {
+                            return DropdownMenuItem<String>(
+                              value: day,
+                              child: Text(day),
+                            );
+                          }).toList(),
+                          onChanged: (String? newValue) {
+                            setState(() {
+                              selectedWeekday = newValue;
+                            });
+                          },
+                        ),
+                      if (selectedRecurrence == "Monthly")
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                monthlyDate == null
+                                    ? "No date selected"
+                                    : "Date: ${DateFormat.d().format(monthlyDate!)}",
+                              ),
+                            ),
+                            TextButton(
+                              onPressed: () async {
+                                DateTime? date = await showDatePicker(
+                                  context: context,
+                                  initialDate: DateTime.now(),
+                                  firstDate: DateTime(2000),
+                                  lastDate: DateTime(2100),
+                                );
+                                setState(() {
+                                  monthlyDate = date;
+                                });
+                              },
+                              child: const Text("Select Date"),
+                            ),
+                          ],
+                        ),
+                      const SizedBox(height: 16),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              selectedStartTime == null
+                                  ? "No start time selected"
+                                  : "Start: ${selectedStartTime!.format(context)}",
+                            ),
+                          ),
+                          TextButton(
+                            onPressed: () async {
+                              TimeOfDay? time = await showTimePicker(
+                                context: context,
+                                initialTime: TimeOfDay.now(),
+                              );
+                              if (time != null) {
+                                setState(() {
+                                  selectedStartTime = time;
+                                });
+                              }
+                            },
+                            child: const Text("Select Start Time"),
+                          ),
+                        ],
+                      ),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              selectedEndTime == null
+                                  ? "No end time selected"
+                                  : "End: ${selectedEndTime!.format(context)}",
+                            ),
+                          ),
+                          TextButton(
+                            onPressed: () async {
+                              TimeOfDay? time = await showTimePicker(
+                                context: context,
+                                initialTime: TimeOfDay.now(),
+                              );
+                              if (time != null) {
+                                setState(() {
+                                  selectedEndTime = time;
+                                });
+                              }
+                            },
+                            child: const Text("Select End Time"),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 24),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.end,
+                        children: [
+                          TextButton(
+                            onPressed: () => Navigator.of(context).pop(),
+                            child: const Text("Cancel"),
+                          ),
+                          const SizedBox(width: 12),
+                          ElevatedButton(
+                            onPressed: () async {
+                              String eventName =
+                                  eventNameController.text.trim();
+                              String eventDesc =
+                                  eventDescController.text.trim();
+                              if (selectedPark == null ||
+                                  eventName.isEmpty ||
+                                  selectedStartTime == null ||
+                                  selectedEndTime == null ||
+                                  selectedRecurrence == null) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                      content: Text(
+                                          "Please complete all required fields")),
+                                );
+                                return;
+                              }
+                              if (selectedRecurrence == "One Time" &&
+                                  oneTimeDate == null) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                      content: Text(
+                                          "Please select a date for a one-time event")),
+                                );
+                                return;
+                              }
+                              if (selectedRecurrence == "Weekly" &&
+                                  selectedWeekday == null) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                      content: Text(
+                                          "Please select a day for a weekly event")),
+                                );
+                                return;
+                              }
+                              if (selectedRecurrence == "Monthly" &&
+                                  monthlyDate == null) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                      content: Text(
+                                          "Please select a date for a monthly event")),
+                                );
+                                return;
+                              }
+
+                              DateTime? eventStartDateTime;
+                              DateTime? eventEndDateTime;
+                              DateTime now = DateTime.now();
+                              if (selectedRecurrence == "One Time") {
+                                eventStartDateTime = DateTime(
+                                  oneTimeDate!.year,
+                                  oneTimeDate!.month,
+                                  oneTimeDate!.day,
+                                  selectedStartTime!.hour,
+                                  selectedStartTime!.minute,
+                                );
+                                eventEndDateTime = DateTime(
+                                  oneTimeDate!.year,
+                                  oneTimeDate!.month,
+                                  oneTimeDate!.day,
+                                  selectedEndTime!.hour,
+                                  selectedEndTime!.minute,
+                                );
+                              } else if (selectedRecurrence == "Monthly") {
+                                eventStartDateTime = DateTime(
+                                  now.year,
+                                  now.month,
+                                  monthlyDate!.day,
+                                  selectedStartTime!.hour,
+                                  selectedStartTime!.minute,
+                                );
+                                eventEndDateTime = DateTime(
+                                  now.year,
+                                  now.month,
+                                  monthlyDate!.day,
+                                  selectedEndTime!.hour,
+                                  selectedEndTime!.minute,
+                                );
+                              } else {
+                                eventStartDateTime = DateTime(
+                                  now.year,
+                                  now.month,
+                                  now.day,
+                                  selectedStartTime!.hour,
+                                  selectedStartTime!.minute,
+                                );
+                                eventEndDateTime = DateTime(
+                                  now.year,
+                                  now.month,
+                                  now.day,
+                                  selectedEndTime!.hour,
+                                  selectedEndTime!.minute,
+                                );
+                              }
+
+                              if (!eventEndDateTime
+                                  .isAfter(eventStartDateTime)) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                      content: Text(
+                                          "End time must be after start time")),
+                                );
+                                return;
+                              }
+
+                              Map<String, dynamic> eventData = {
+                                'parkId': selectedPark!['id'],
+                                'parkLatitude': selectedPark!['latitude'],
+                                'parkLongitude': selectedPark!['longitude'],
+                                'name': eventName,
+                                'description': eventDesc,
+                                'startDateTime': eventStartDateTime,
+                                'endDateTime': eventEndDateTime,
+                                'recurrence': selectedRecurrence,
+                                'likes': [],
+                                'createdBy':
+                                    FirebaseAuth.instance.currentUser?.uid ??
+                                        "",
+                                'createdAt': FieldValue.serverTimestamp(),
+                              };
+
+                              if (selectedRecurrence == "Weekly") {
+                                eventData['weekday'] = selectedWeekday;
+                              }
+                              if (selectedRecurrence == "One Time") {
+                                eventData['eventDate'] = oneTimeDate;
+                              }
+                              if (selectedRecurrence == "Monthly") {
+                                eventData['eventDay'] = monthlyDate!.day;
+                              }
+
+                              await FirebaseFirestore.instance
+                                  .collection('events')
+                                  .add(eventData);
+
+                              Navigator.of(context).pop();
+                              _fetchEvents();
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                    content: Text("Event '$eventName' added")),
+                              );
+                            },
+                            child: const Text("Add"),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            },
+          ),
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final uid = FirebaseAuth.instance.currentUser?.uid;
@@ -241,7 +727,7 @@ class _EventsTabState extends State<EventsTab> {
                           onRefresh: _fetchEvents,
                           child: ListView(
                             padding: const EdgeInsets.only(
-                                bottom: 70, left: 8, right: 8, top: 8),
+                                bottom: 120, left: 8, right: 8, top: 8),
                             children: [
                               if (likedEvents.isNotEmpty) ...[
                                 const Padding(
@@ -272,6 +758,26 @@ class _EventsTabState extends State<EventsTab> {
               ],
             ),
           ),
+          // Add Event Button above the ad
+          /*  Positioned(
+            bottom: 72, // Height of AdBanner + some spacing
+            left: 16,
+            right: 16,
+            child: ElevatedButton.icon(
+              onPressed: _showAddEventDialog,
+              icon: const Icon(Icons.add),
+              label: const Text("Add Event"),
+              style: ElevatedButton.styleFrom(
+                minimumSize: const Size.fromHeight(48),
+                backgroundColor: Colors.green.shade700,
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                elevation: 4,
+              ),
+            ),
+          ), */
           const Positioned(
             bottom: 0,
             left: 0,

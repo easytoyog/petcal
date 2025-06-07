@@ -19,7 +19,14 @@ class ServiceTab extends StatefulWidget {
 }
 
 class _ServiceTabState extends State<ServiceTab> {
-  final _types = ['All', 'Dog Walker', 'Groomer', 'Daycare'];
+  final _types = [
+    'All',
+    'Dog Walker',
+    'Groomer',
+    'Daycare',
+    'Lost Dog',
+    'Other'
+  ];
   String _selectedType = 'All';
   List<ServiceAd> _ads = [];
   double? userLat;

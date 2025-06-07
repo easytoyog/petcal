@@ -63,6 +63,93 @@ class _ProfileTabState extends State<ProfileTab> {
     }
   }
 
+  void _showFeedbackDialog() {
+    final feedbackController = TextEditingController();
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) {
+        return Scaffold(
+          appBar: AppBar(
+            title: const Text("Send Us Your Feedback!"),
+            backgroundColor: const Color(0xFF567D46),
+            automaticallyImplyLeading: false,
+            actions: [
+              IconButton(
+                icon: const Icon(Icons.close),
+                onPressed: () => Navigator.of(ctx).pop(),
+              ),
+            ],
+          ),
+          body: Padding(
+            padding: const EdgeInsets.all(24.0),
+            child: Column(
+              children: [
+                const Text(
+                  "We'd love to hear your thoughts, suggestions, or issues.",
+                  style: TextStyle(fontSize: 18),
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 24),
+                Expanded(
+                  child: TextField(
+                    controller: feedbackController,
+                    maxLines: null,
+                    expands: true,
+                    autofocus: true, // <-- Auto focus when dialog appears
+                    decoration: InputDecoration(
+                      hintText: "Enter your feedback here...",
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(8.0),
+                        borderSide: const BorderSide(
+                          color: Colors.teal,
+                          width: 2.0,
+                        ),
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(8.0),
+                        borderSide: const BorderSide(
+                          color: Colors.teal,
+                          width: 2.0,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 24),
+                ElevatedButton(
+                  onPressed: () async {
+                    final feedback = feedbackController.text.trim();
+                    if (feedback.isEmpty) return;
+                    await FirebaseFirestore.instance
+                        .collection('feedback')
+                        .add({
+                      'feedback': feedback,
+                      'userId': FirebaseAuth.instance.currentUser?.uid,
+                      'timestamp': FieldValue.serverTimestamp(),
+                    });
+                    Navigator.of(ctx).pop();
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                          content: Text("Thank you for your feedback!")),
+                    );
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.tealAccent,
+                    foregroundColor: Colors.black,
+                    minimumSize: const Size.fromHeight(48),
+                  ),
+                  child: const Text("Submit"),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   /// Show bottom sheet to edit the Owner (basic example)
   void _showEditOwnerSheet() {
     if (_owner == null) return;
@@ -634,6 +721,17 @@ class _ProfileTabState extends State<ProfileTab> {
                                   fontWeight: FontWeight.bold,
                                   fontSize: 16,
                                 ),
+                              ),
+                            ),
+                            const SizedBox(height: 24),
+                            ElevatedButton.icon(
+                              onPressed: _showFeedbackDialog,
+                              icon: const Icon(Icons.feedback),
+                              label: const Text("Send Us Your Feedback!"),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: Colors.tealAccent,
+                                foregroundColor: Colors.black,
+                                minimumSize: const Size.fromHeight(48),
                               ),
                             ),
                           ],
