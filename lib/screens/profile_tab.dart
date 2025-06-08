@@ -5,6 +5,7 @@ import 'package:inthepark/services/firestore_service.dart';
 import 'package:inthepark/models/owner_model.dart';
 import 'package:inthepark/models/pet_model.dart';
 import 'package:inthepark/utils/image_upload_util.dart'; // for pet photo uploads
+import 'package:inthepark/screens/owner_detail_screen.dart'; // <-- Import the new screen
 
 class ProfileTab extends StatefulWidget {
   const ProfileTab({Key? key}) : super(key: key);
@@ -32,9 +33,9 @@ class _ProfileTabState extends State<ProfileTab> {
       final owner = await _firestoreService.getOwner();
       if (owner == null) {
         if (mounted) {
-          // Log the user out if no owner data is found
-          await FirebaseAuth.instance.signOut();
-          Navigator.of(context).pushReplacementNamed('/login');
+          Navigator.of(context).pushReplacement(
+            MaterialPageRoute(builder: (_) => OwnerDetailsScreen()),
+          );
         }
         return;
       }
@@ -555,7 +556,7 @@ class _ProfileTabState extends State<ProfileTab> {
           icon: const Icon(Icons.arrow_back),
           onPressed: () => Navigator.of(context).pop(),
         ),
-        title: const Text("Back"),
+        title: const Text("Profile"),
         backgroundColor: const Color(0xFF567D46),
       ),
       body: Stack(

@@ -16,6 +16,8 @@ import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:firebase_app_check/firebase_app_check.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:inthepark/screens/forgot_password_screen.dart';
+import 'package:inthepark/screens/wait_screen.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -78,7 +80,36 @@ class MyApp extends StatelessWidget {
           }
           // If user is logged in, navigate to HomeScreen.
           if (snapshot.hasData) {
-            return const HomeScreen();
+            final user = snapshot.data!;
+            if (!user.emailVerified) {
+              return WaitForEmailVerificationScreen(user: user);
+            }
+            return FutureBuilder<DocumentSnapshot>(
+              future: FirebaseFirestore.instance
+                  .collection('owners')
+                  .doc(user.uid)
+                  .get(),
+              builder: (context, snap) {
+                if (!snap.hasData) {
+                  return const Scaffold(
+                      body: Center(child: CircularProgressIndicator()));
+                }
+                final doc = snap.data!;
+                final data = doc.data() as Map<String, dynamic>? ?? {};
+                final missingProfile = !doc.exists ||
+                    !(data.containsKey('firstName') &&
+                        data['firstName'] != null &&
+                        data['firstName'].toString().trim().isNotEmpty) ||
+                    !(data.containsKey('lastName') &&
+                        data['lastName'] != null &&
+                        data['lastName'].toString().trim().isNotEmpty);
+
+                if (missingProfile) {
+                  return OwnerDetailsScreen();
+                }
+                return const HomeScreen();
+              },
+            );
           }
           // Otherwise, show the login screen.
           return const ModernLoginScreen();
@@ -93,6 +124,10 @@ class MyApp extends StatelessWidget {
         '/petDetails': (context) => AddPetScreen(),
         '/locationServiceChoice': (context) => LocationServiceChoiceScreen(),
         '/allsetup': (context) => AllSetUpScreen(),
+        '/forgotPassword': (context) {
+          final email = ModalRoute.of(context)?.settings.arguments as String?;
+          return ForgotPasswordScreen(initialEmail: email);
+        },
       },
     );
   }
@@ -336,25 +371,15 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
                   alignment: Alignment.centerRight,
                   child: GestureDetector(
                     onTap: () async {
-                      final email = emailController.text.trim();
-                      if (email.isEmpty) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                              content: Text("Please enter your email first.")),
-                        );
-                        return;
-                      }
-                      try {
-                        await FirebaseAuth.instance
-                            .sendPasswordResetEmail(email: email);
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                              content: Text("Password reset email sent!")),
-                        );
-                      } catch (e) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(content: Text("Error: ${e.toString()}")),
-                        );
+                      final result = await Navigator.pushNamed(
+                        context,
+                        '/forgotPassword',
+                        arguments: emailController.text.trim(),
+                      );
+                      if (result is String && result.isNotEmpty) {
+                        setState(() {
+                          emailController.text = result;
+                        });
                       }
                     },
                     child: Text(

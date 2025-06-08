@@ -1,3 +1,5 @@
+import 'dart:math';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -9,6 +11,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_html/flutter_html.dart';
 import 'package:inthepark/legal/terms_conditions.dart';
 import 'package:inthepark/legal/privacy_policy.dart';
+import 'package:inthepark/screens/wait_screen.dart';
 
 class AccountCreationScreen extends StatefulWidget {
   const AccountCreationScreen({Key? key}) : super(key: key);
@@ -19,9 +22,28 @@ class AccountCreationScreen extends StatefulWidget {
 
 class _AccountCreationScreenState extends State<AccountCreationScreen> {
   final TextEditingController emailController = TextEditingController();
+  final FocusNode emailFocusNode = FocusNode(); // <-- Add this line
   final TextEditingController passwordController = TextEditingController();
   final TextEditingController confirmPasswordController =
       TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    // Auto-focus after build
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      emailFocusNode.requestFocus();
+    });
+  }
+
+  @override
+  void dispose() {
+    emailController.dispose();
+    emailFocusNode.dispose(); // <-- Add this line
+    passwordController.dispose();
+    confirmPasswordController.dispose();
+    super.dispose();
+  }
 
   Future<void> createAccountWithEmailPassword(BuildContext context) async {
     if (passwordController.text != confirmPasswordController.text) {
@@ -46,36 +68,14 @@ class _AccountCreationScreenState extends State<AccountCreationScreen> {
 
       // Send email verification
       await user.sendEmailVerification();
-
-      // Attempt to create the Firestore document
-      try {
-        await FirebaseFirestore.instance.collection('owners').doc(uid).set({
-          'email': emailController.text.trim(),
-          'firstName': '', // Placeholder
-          'lastName': '', // Placeholder
-          'address': {}, // Placeholder
-          'phone': '', // Placeholder
-          'createdAt': FieldValue.serverTimestamp(),
-        });
-        print("Firestore record created successfully for UID: $uid");
-      } catch (firestoreError) {
-        print("Error writing Firestore document: $firestoreError");
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("Firestore error: $firestoreError")),
-        );
-      }
-
-      // Show a message to the user
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text(
-            "Account created! Please check your email to verify your account before logging in.",
-          ),
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(
+          builder: (_) => WaitForEmailVerificationScreen(user: user),
         ),
       );
 
       // Optionally, navigate to a "verify email" screen or back to login
-      Navigator.pushReplacementNamed(context, '/login');
     } on FirebaseAuthException catch (authError) {
       print("Authentication error: $authError");
       ScaffoldMessenger.of(context).showSnackBar(
@@ -136,171 +136,201 @@ class _AccountCreationScreenState extends State<AccountCreationScreen> {
             end: Alignment.bottomRight,
           ),
         ),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 24.0),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              const Icon(Icons.pets,
-                  size: 100, color: Colors.tealAccent), // Centered Icon
-              const SizedBox(height: 10),
-              const Text(
-                "Let's create your account!",
-                style: TextStyle(
-                  color: Colors.white,
-                  fontSize: 28,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-              const SizedBox(height: 30),
-              TextField(
-                controller: emailController,
-                style: const TextStyle(color: Colors.white),
-                decoration: InputDecoration(
-                  filled: true,
-                  fillColor: Colors.white.withOpacity(0.1),
-                  hintText: "Email",
-                  hintStyle: const TextStyle(color: Colors.white70),
-                  prefixIcon: const Icon(Icons.mail, color: Colors.white),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: BorderSide.none,
+        child: Center(
+          child: SingleChildScrollView(
+            padding:
+                const EdgeInsets.symmetric(horizontal: 24.0, vertical: 32.0),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                const Icon(Icons.pets,
+                    size: 100, color: Colors.tealAccent), // Centered Icon
+                const SizedBox(height: 10),
+                const Text(
+                  "Let's create your account!",
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 28,
+                    fontWeight: FontWeight.bold,
                   ),
                 ),
-              ),
-              const SizedBox(height: 20),
-              TextField(
-                controller: passwordController,
-                obscureText: true,
-                style: const TextStyle(color: Colors.white),
-                decoration: InputDecoration(
-                  filled: true,
-                  fillColor: Colors.white.withOpacity(0.1),
-                  hintText: "Password",
-                  hintStyle: const TextStyle(color: Colors.white70),
-                  prefixIcon: const Icon(Icons.lock, color: Colors.white),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: BorderSide.none,
-                  ),
-                ),
-              ),
-              const SizedBox(height: 20),
-              TextField(
-                controller: confirmPasswordController,
-                obscureText: true,
-                style: const TextStyle(color: Colors.white),
-                decoration: InputDecoration(
-                  filled: true,
-                  fillColor: Colors.white.withOpacity(0.1),
-                  hintText: "Confirm Password",
-                  hintStyle: const TextStyle(color: Colors.white70),
-                  prefixIcon: const Icon(Icons.lock, color: Colors.white),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: BorderSide.none,
-                  ),
-                ),
-              ),
-              const SizedBox(height: 20),
-              SizedBox(
-                width: MediaQuery.of(context).size.width / 2,
-                child: ElevatedButton(
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.tealAccent,
-                    foregroundColor: Colors.black,
-                    padding: const EdgeInsets.symmetric(vertical: 16.0),
-                    shape: RoundedRectangleBorder(
+                const SizedBox(height: 30),
+                TextField(
+                  controller: emailController,
+                  focusNode: emailFocusNode, // <-- Add this line
+                  style: const TextStyle(color: Colors.white),
+                  cursorColor: Colors.tealAccent, // <-- Add this line
+                  decoration: InputDecoration(
+                    filled: true,
+                    fillColor: Colors.white.withOpacity(0.1),
+                    hintText: "Email",
+                    hintStyle: const TextStyle(color: Colors.white70),
+                    prefixIcon: const Icon(Icons.mail, color: Colors.white),
+                    border: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide.none,
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: const BorderSide(
+                        color: Colors.tealAccent,
+                        width: 2,
+                      ),
                     ),
                   ),
-                  onPressed: () => createAccountWithEmailPassword(context),
-                  child: const Text("Create Account",
-                      style: TextStyle(fontSize: 18)),
                 ),
-              ),
-              const SizedBox(height: 20),
-              //Text(
-              //  "Or sign up with",
-              //  style: const TextStyle(color: Colors.white70),
-              //),
-              const SizedBox(height: 10),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  // ElevatedButton.icon(
-                  //   onPressed: () => createAccountWithGoogle(context),
-                  //   style: ElevatedButton.styleFrom(
-                  //     backgroundColor: Colors.white,
-                  //     foregroundColor: Colors.black,
-                  //     padding: const EdgeInsets.symmetric(
-                  //         vertical: 10.0, horizontal: 20.0),
-                  //     shape: RoundedRectangleBorder(
-                  //       borderRadius: BorderRadius.circular(8),
-                  //     ),
-                  //   ),
-                  //   icon: const FaIcon(FontAwesomeIcons.google,
-                  //       color: Colors.red, size: 20),
-                  //   label: const Text("Google"),
-                  // ),
-                  // const SizedBox(width: 10),
-                  // ElevatedButton.icon(
-                  //   onPressed: () => createAccountWithApple(context),
-                  //   style: ElevatedButton.styleFrom(
-                  //     backgroundColor: Colors.black,
-                  //     foregroundColor: Colors.white,
-                  //     padding: const EdgeInsets.symmetric(
-                  //         vertical: 10.0, horizontal: 20.0),
-                  //     shape: RoundedRectangleBorder(
-                  //       borderRadius: BorderRadius.circular(8),
-                  //     ),
-                  //   ),
-                  //   icon: const Icon(Icons.apple, color: Colors.white),
-                  //   label: const Text("Apple"),
-                  // ),
-                ],
-              ),
-              const SizedBox(height: 20),
-              RichText(
-                textAlign: TextAlign.center,
-                text: TextSpan(
-                  style: const TextStyle(color: Colors.white70, fontSize: 14),
+                const SizedBox(height: 20),
+                TextField(
+                  controller: passwordController,
+                  obscureText: true,
+                  style: const TextStyle(color: Colors.white),
+                  cursorColor: Colors.tealAccent, // <-- Add this line
+                  decoration: InputDecoration(
+                    filled: true,
+                    fillColor: Colors.white.withOpacity(0.1),
+                    hintText: "Password",
+                    hintStyle: const TextStyle(color: Colors.white70),
+                    prefixIcon: const Icon(Icons.lock, color: Colors.white),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide.none,
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: const BorderSide(
+                        color: Colors.tealAccent,
+                        width: 2,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 20),
+                TextField(
+                  controller: confirmPasswordController,
+                  obscureText: true,
+                  style: const TextStyle(color: Colors.white),
+                  cursorColor: Colors.tealAccent, // <-- Add this line
+                  decoration: InputDecoration(
+                    filled: true,
+                    fillColor: Colors.white.withOpacity(0.1),
+                    hintText: "Confirm Password",
+                    hintStyle: const TextStyle(color: Colors.white70),
+                    prefixIcon: const Icon(Icons.lock, color: Colors.white),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide.none,
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: const BorderSide(
+                        color: Colors.tealAccent,
+                        width: 2,
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 20),
+                SizedBox(
+                  width: MediaQuery.of(context).size.width / 2,
+                  child: ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.tealAccent,
+                      foregroundColor: Colors.black,
+                      padding: const EdgeInsets.symmetric(vertical: 16.0),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                    onPressed: () async {
+                      await createAccountWithEmailPassword(context);
+                    },
+                    child: const Text("Create Account",
+                        style: TextStyle(fontSize: 18)),
+                  ),
+                ),
+                const SizedBox(height: 20),
+                //Text(
+                //  "Or sign up with",
+                //  style: const TextStyle(color: Colors.white70),
+                //),
+                const SizedBox(height: 10),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    const TextSpan(
-                        text: "By creating an account, you agree to our "),
-                    TextSpan(
-                      text: "Terms",
-                      style: const TextStyle(
-                        decoration: TextDecoration.underline,
-                        color: Colors.tealAccent,
-                      ),
-                      recognizer: TapGestureRecognizer()
-                        ..onTap = () => showDocumentHtml(
-                              context,
-                              "Terms and Conditions",
-                              termsConditionsHtml,
-                            ),
-                    ),
-                    const TextSpan(text: " and "),
-                    TextSpan(
-                      text: "Privacy",
-                      style: const TextStyle(
-                        decoration: TextDecoration.underline,
-                        color: Colors.tealAccent,
-                      ),
-                      recognizer: TapGestureRecognizer()
-                        ..onTap = () => showDocumentHtml(
-                              context,
-                              "Privacy Policy",
-                              privacyPolicyHtml,
-                            ),
-                    ),
-                    const TextSpan(text: " document."),
+                    // ElevatedButton.icon(
+                    //   onPressed: () => createAccountWithGoogle(context),
+                    //   style: ElevatedButton.styleFrom(
+                    //     backgroundColor: Colors.white,
+                    //     foregroundColor: Colors.black,
+                    //     padding: const EdgeInsets.symmetric(
+                    //         vertical: 10.0, horizontal: 20.0),
+                    //     shape: RoundedRectangleBorder(
+                    //       borderRadius: BorderRadius.circular(8),
+                    //     ),
+                    //   ),
+                    //   icon: const FaIcon(FontAwesomeIcons.google,
+                    //       color: Colors.red, size: 20),
+                    //   label: const Text("Google"),
+                    // ),
+                    // const SizedBox(width: 10),
+                    // ElevatedButton.icon(
+                    //   onPressed: () => createAccountWithApple(context),
+                    //   style: ElevatedButton.styleFrom(
+                    //     backgroundColor: Colors.black,
+                    //     foregroundColor: Colors.white,
+                    //     padding: const EdgeInsets.symmetric(
+                    //         vertical: 10.0, horizontal: 20.0),
+                    //     shape: RoundedRectangleBorder(
+                    //       borderRadius: BorderRadius.circular(8),
+                    //     ),
+                    //   ),
+                    //   icon: const Icon(Icons.apple, color: Colors.white),
+                    //   label: const Text("Apple"),
+                    // ),
                   ],
                 ),
-              ),
-            ],
+                const SizedBox(height: 20),
+                RichText(
+                  textAlign: TextAlign.center,
+                  text: TextSpan(
+                    style: const TextStyle(color: Colors.white70, fontSize: 14),
+                    children: [
+                      const TextSpan(
+                          text: "By creating an account, you agree to our "),
+                      TextSpan(
+                        text: "Terms",
+                        style: const TextStyle(
+                          decoration: TextDecoration.underline,
+                          color: Colors.tealAccent,
+                        ),
+                        recognizer: TapGestureRecognizer()
+                          ..onTap = () => showDocumentHtml(
+                                context,
+                                "Terms and Conditions",
+                                termsConditionsHtml,
+                              ),
+                      ),
+                      const TextSpan(text: " and "),
+                      TextSpan(
+                        text: "Privacy",
+                        style: const TextStyle(
+                          decoration: TextDecoration.underline,
+                          color: Colors.tealAccent,
+                        ),
+                        recognizer: TapGestureRecognizer()
+                          ..onTap = () => showDocumentHtml(
+                                context,
+                                "Privacy Policy",
+                                privacyPolicyHtml,
+                              ),
+                      ),
+                      const TextSpan(text: " document."),
+                    ],
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),
