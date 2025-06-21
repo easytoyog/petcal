@@ -68,6 +68,7 @@ class _OwnerDetailsScreenState extends State<OwnerDetailsScreen> {
           'postalCode': postalCodeController.text.trim(),
           'country': countryController.text.trim(),
         },
+        'active': true, // <-- Add this line
         'updatedAt': FieldValue.serverTimestamp(),
       }, SetOptions(merge: true));
 

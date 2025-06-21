@@ -91,3 +91,46 @@ class Address {
     };
   }
 }
+
+class OwnerModel {
+  final String uid;
+  final String email;
+  final String firstName;
+  final String lastName;
+  final String phone;
+  final Map<String, dynamic> address;
+  final bool active;
+
+  OwnerModel({
+    required this.uid,
+    required this.email,
+    required this.firstName,
+    required this.lastName,
+    required this.phone,
+    required this.address,
+    this.active = true, // <-- Default to true
+  });
+
+  factory OwnerModel.fromMap(String uid, Map<String, dynamic> data) {
+    return OwnerModel(
+      uid: uid,
+      email: data['email'] ?? '',
+      firstName: data['firstName'] ?? '',
+      lastName: data['lastName'] ?? '',
+      phone: data['phone'] ?? '',
+      address: data['address'] ?? {},
+      active: data['active'] ?? true, // <-- Default to true if missing
+    );
+  }
+
+  Map<String, dynamic> toMap() {
+    return {
+      'email': email,
+      'firstName': firstName,
+      'lastName': lastName,
+      'phone': phone,
+      'address': address,
+      'active': active,
+    };
+  }
+}

@@ -173,4 +173,14 @@ class FirestoreService {
 
     return snapshot.docs.map((doc) => doc.id).toList();
   }
+
+  /// Mark the current user's account as inactive (soft delete)
+  Future<void> markAccountInactive() async {
+    final uid = getCurrentUserId();
+    if (uid == null) throw Exception("User not authenticated.");
+    await _firestore
+        .collection('owners')
+        .doc(uid)
+        .set({'active': false}, SetOptions(merge: true));
+  }
 }

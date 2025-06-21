@@ -262,6 +262,22 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
           await FirebaseAuth.instance.signOut();
           return null;
         }
+        // Check if user is active in Firestore
+        final doc = await FirebaseFirestore.instance
+            .collection('owners')
+            .doc(user.uid)
+            .get();
+        final data = doc.data() as Map<String, dynamic>? ?? {};
+        if (data.containsKey('active') && data['active'] == false) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text(
+                  "Your account has been deactivated. Please contact support ."),
+            ),
+          );
+          await FirebaseAuth.instance.signOut();
+          return null;
+        }
         await saveUserFcmToken(user);
         Navigator.of(context).pushReplacementNamed('/profile');
       }

@@ -38,7 +38,8 @@ dependencies:
   google_mobile_ads: ^6.0.0 # Check for latest version
   url_launcher: ^6.1.11
   firebase_messaging: ^15.2.5
-  
+  country_state_city_picker: ^1.2.8
+  dropdown_search: ^5.0.6
 
 flutter_launcher_icons:
   ios: true

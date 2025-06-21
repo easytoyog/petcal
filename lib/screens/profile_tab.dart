@@ -4,8 +4,10 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:inthepark/services/firestore_service.dart';
 import 'package:inthepark/models/owner_model.dart';
 import 'package:inthepark/models/pet_model.dart';
-import 'package:inthepark/utils/image_upload_util.dart'; // for pet photo uploads
-import 'package:inthepark/screens/owner_detail_screen.dart'; // <-- Import the new screen
+import 'package:inthepark/utils/image_upload_util.dart';
+import 'package:inthepark/screens/owner_detail_screen.dart';
+import 'package:inthepark/screens/edit_profile_screen.dart';
+import 'package:country_state_city_picker/country_state_city_picker.dart';
 
 class ProfileTab extends StatefulWidget {
   const ProfileTab({Key? key}) : super(key: key);
@@ -17,6 +19,17 @@ class ProfileTab extends StatefulWidget {
 class _ProfileTabState extends State<ProfileTab> {
   final _firestoreService = FirestoreService();
 
+  // Add the missing controllers
+  late final TextEditingController firstNameController;
+  late final TextEditingController lastNameController;
+  late final TextEditingController phoneController;
+  late final TextEditingController emailController;
+  late final TextEditingController streetController;
+  late final TextEditingController cityController;
+  late final TextEditingController stateController;
+  late final TextEditingController countryController;
+  late final TextEditingController postalCodeController;
+
   bool _isLoading = true;
   Owner? _owner;
   List<Pet> _pets = [];
@@ -25,6 +38,21 @@ class _ProfileTabState extends State<ProfileTab> {
   void initState() {
     super.initState();
     _loadOwnerAndPets();
+  }
+
+  @override
+  void dispose() {
+    // Don't forget to dispose controllers
+    firstNameController.dispose();
+    lastNameController.dispose();
+    phoneController.dispose();
+    emailController.dispose();
+    streetController.dispose();
+    cityController.dispose();
+    stateController.dispose();
+    countryController.dispose();
+    postalCodeController.dispose();
+    super.dispose();
   }
 
   Future<void> _loadOwnerAndPets() async {
@@ -43,25 +71,28 @@ class _ProfileTabState extends State<ProfileTab> {
       setState(() {
         _owner = owner;
         _pets = pets;
+        // Initialize controllers with current owner data
+        firstNameController =
+            TextEditingController(text: _owner?.firstName ?? '');
+        lastNameController =
+            TextEditingController(text: _owner?.lastName ?? '');
+        phoneController = TextEditingController(text: _owner?.phone ?? '');
+        emailController = TextEditingController(text: _owner?.email ?? '');
+        streetController =
+            TextEditingController(text: _owner?.address.street ?? '');
+        cityController =
+            TextEditingController(text: _owner?.address.city ?? '');
+        stateController =
+            TextEditingController(text: _owner?.address.state ?? '');
+        countryController =
+            TextEditingController(text: _owner?.address.country ?? '');
+        postalCodeController =
+            TextEditingController(text: _owner?.address.postalCode ?? '');
       });
     } catch (e) {
       print("Error loading profile data: $e");
     }
     setState(() => _isLoading = false);
-  }
-
-  /// Helper to convert the numeric locationType to friendly text
-  String _getLocationTypeString(int locationType) {
-    switch (locationType) {
-      case 1:
-        return "Automatic";
-      case 2:
-        return "App Open";
-      case 3:
-        return "Manual";
-      default:
-        return "Unknown";
-    }
   }
 
   void _showFeedbackDialog() {
@@ -98,7 +129,7 @@ class _ProfileTabState extends State<ProfileTab> {
                     controller: feedbackController,
                     maxLines: null,
                     expands: true,
-                    autofocus: true, // <-- Auto focus when dialog appears
+                    autofocus: true,
                     decoration: InputDecoration(
                       hintText: "Enter your feedback here...",
                       border: OutlineInputBorder(
@@ -151,105 +182,45 @@ class _ProfileTabState extends State<ProfileTab> {
     );
   }
 
-  /// Show bottom sheet to edit the Owner (basic example)
-  void _showEditOwnerSheet() {
+  /// Navigate to EditProfileScreen and handle the result
+  void _navigateToEditProfile() async {
     if (_owner == null) return;
 
-    final firstNameCtrl = TextEditingController(text: _owner!.firstName);
-    final lastNameCtrl = TextEditingController(text: _owner!.lastName);
-    final phoneCtrl = TextEditingController(text: _owner!.phone);
-    final emailCtrl = TextEditingController(text: _owner!.email);
-    int locationType = _owner!.locationType; // numeric, but we'll store as int
+    // ✅ Just update the existing controllers' text
+    firstNameController.text = _owner!.firstName;
+    lastNameController.text = _owner!.lastName;
+    phoneController.text = _owner!.phone;
+    emailController.text = _owner!.email;
+    streetController.text = _owner!.address.street ?? '';
+    cityController.text = _owner!.address.city ?? '';
+    stateController.text = _owner!.address.state ?? '';
+    countryController.text = _owner!.address.country ?? '';
+    postalCodeController.text = _owner!.address.postalCode ?? '';
 
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16.0)),
+    final result = await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => EditProfileScreen(
+          firstNameController: firstNameController,
+          lastNameController: lastNameController,
+          phoneController: phoneController,
+          emailController: emailController,
+          streetController: streetController,
+          cityController: cityController,
+          stateController: stateController,
+          countryController: countryController,
+          postalCodeController: postalCodeController,
+        ),
       ),
-      builder: (ctx) {
-        return DraggableScrollableSheet(
-          expand: false,
-          initialChildSize: 0.8,
-          maxChildSize: 1.0,
-          builder: (_, controller) {
-            return SingleChildScrollView(
-              controller: controller,
-              child: Padding(
-                padding: const EdgeInsets.symmetric(
-                    horizontal: 16.0, vertical: 24.0),
-                child: Column(
-                  children: [
-                    const Text(
-                      "Edit Profile",
-                      style:
-                          TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-                    ),
-                    const SizedBox(height: 16),
-                    TextField(
-                      controller: firstNameCtrl,
-                      decoration:
-                          const InputDecoration(labelText: "First Name"),
-                    ),
-                    TextField(
-                      controller: lastNameCtrl,
-                      decoration: const InputDecoration(labelText: "Last Name"),
-                    ),
-                    TextField(
-                      controller: phoneCtrl,
-                      decoration: const InputDecoration(labelText: "Phone"),
-                    ),
-                    TextField(
-                      controller: emailCtrl,
-                      decoration: const InputDecoration(labelText: "Email"),
-                    ),
-                    const SizedBox(height: 12),
-                    const Text(
-                      "Location Type",
-                      style: TextStyle(fontWeight: FontWeight.bold),
-                    ),
-                    DropdownButton<int>(
-                      value: locationType,
-                      items: const [
-                        DropdownMenuItem(value: 1, child: Text("Automatic")),
-                        DropdownMenuItem(value: 2, child: Text("App Open")),
-                        DropdownMenuItem(value: 3, child: Text("Manual")),
-                      ],
-                      onChanged: (val) {
-                        if (val != null) {
-                          setState(() {
-                            locationType = val;
-                          });
-                        }
-                      },
-                    ),
-                    const SizedBox(height: 20),
-                    ElevatedButton(
-                      onPressed: () async {
-                        Navigator.of(ctx).pop(); // close bottom sheet
-                        await _saveUpdatedOwner(
-                          firstName: firstNameCtrl.text.trim(),
-                          lastName: lastNameCtrl.text.trim(),
-                          phone: phoneCtrl.text.trim(),
-                          email: emailCtrl.text.trim(),
-                          locType: locationType,
-                        );
-                      },
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.tealAccent,
-                        foregroundColor: Colors.black,
-                      ),
-                      child: const Text("Save Changes"),
-                    ),
-                    const SizedBox(height: 40),
-                  ],
-                ),
-              ),
-            );
-          },
-        );
-      },
     );
+
+    if (result == true) {
+      await _saveUpdatedOwner(
+        firstName: firstNameController.text.trim(),
+        lastName: lastNameController.text.trim(),
+        phone: phoneController.text.trim(),
+      );
+    }
   }
 
   /// Actually update the owner in Firestore
@@ -257,20 +228,40 @@ class _ProfileTabState extends State<ProfileTab> {
     required String firstName,
     required String lastName,
     required String phone,
-    required String email,
-    required int locType,
   }) async {
     if (_owner == null) return;
 
+    final updatedAddress = {
+      'street': streetController.text.trim(),
+      'city': cityController.text.trim(),
+      'state': stateController.text.trim(),
+      'country': countryController.text.trim(),
+      'postalCode': postalCodeController.text.trim(),
+    };
+
+    await FirebaseFirestore.instance.collection('owners').doc(_owner!.uid).set({
+      'firstName': firstNameController.text.trim(),
+      'lastName': lastNameController.text.trim(),
+      'phone': phoneController.text.trim(),
+      'address': updatedAddress,
+      // ...other fields as needed...
+    }, SetOptions(merge: true));
+
     final updated = Owner(
       uid: _owner!.uid,
+      email: _owner!.email,
+      locationType: _owner!.locationType,
       firstName: firstName,
       lastName: lastName,
       phone: phone,
-      email: email,
-      pets: _owner!.pets, // keep the existing pets
-      address: _owner!.address, // or keep existing address if you have one
-      locationType: locType,
+      pets: _owner!.pets,
+      address: Address(
+        street: streetController.text.trim(),
+        city: cityController.text.trim(),
+        state: stateController.text.trim(),
+        country: countryController.text.trim(),
+        postalCode: postalCodeController.text.trim(),
+      ),
     );
 
     try {
@@ -278,8 +269,14 @@ class _ProfileTabState extends State<ProfileTab> {
       setState(() {
         _owner = updated;
       });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Profile updated successfully!")),
+      );
     } catch (e) {
       print("Error updating owner: $e");
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Error updating profile: $e")),
+      );
     }
   }
 
@@ -460,12 +457,10 @@ class _ProfileTabState extends State<ProfileTab> {
                             foregroundColor: Colors.black,
                           ),
                           onPressed: () async {
-                            // Pick and upload the new pet photo
                             final uploadedUrl =
                                 await ImageUploadUtil.pickAndUploadPetPhoto(
                                     pet.id);
                             if (uploadedUrl != null) {
-                              // Use the modal's setState to update the local photoUrl variable
                               setModalState(() {
                                 photoUrl = uploadedUrl;
                               });
@@ -561,7 +556,6 @@ class _ProfileTabState extends State<ProfileTab> {
       ),
       body: Stack(
         children: [
-          // Fullscreen gradient
           Container(
             decoration: const BoxDecoration(
               gradient: LinearGradient(
@@ -571,11 +565,9 @@ class _ProfileTabState extends State<ProfileTab> {
               ),
             ),
           ),
-          // Main content
           _isLoading
               ? const Center(child: CircularProgressIndicator())
               : _owner == null
-                  // Show a loader while redirecting, not a message
                   ? const Center(child: CircularProgressIndicator())
                   : SafeArea(
                       child: SingleChildScrollView(
@@ -616,14 +608,11 @@ class _ProfileTabState extends State<ProfileTab> {
                                           Text("Phone: ${_owner!.phone}"),
                                           Text("Email: ${_owner!.email}"),
                                           const SizedBox(height: 4),
-                                          Text(
-                                            "Location: ${_getLocationTypeString(_owner!.locationType)}",
-                                          ),
                                         ],
                                       ),
                                     ),
                                     IconButton(
-                                      onPressed: _showEditOwnerSheet,
+                                      onPressed: _navigateToEditProfile,
                                       icon: const Icon(Icons.edit,
                                           color: Colors.black54),
                                       tooltip: "Edit Profile",
@@ -702,29 +691,6 @@ class _ProfileTabState extends State<ProfileTab> {
                               ),
 
                             const SizedBox(height: 32),
-                            ElevatedButton(
-                              onPressed: _logout,
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: Colors.white,
-                                foregroundColor: Colors.black,
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 30, vertical: 12),
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(8),
-                                  side: const BorderSide(
-                                      color: Colors.black54), // subtle border
-                                ),
-                                elevation: 2, // adds a bit of depth
-                              ),
-                              child: const Text(
-                                "Log Out",
-                                style: TextStyle(
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 16,
-                                ),
-                              ),
-                            ),
-                            const SizedBox(height: 24),
                             ElevatedButton.icon(
                               onPressed: _showFeedbackDialog,
                               icon: const Icon(Icons.feedback),
@@ -733,6 +699,29 @@ class _ProfileTabState extends State<ProfileTab> {
                                 backgroundColor: Colors.tealAccent,
                                 foregroundColor: Colors.black,
                                 minimumSize: const Size.fromHeight(48),
+                              ),
+                            ),
+                            const SizedBox(height: 20),
+                            Padding(
+                              padding:
+                                  const EdgeInsets.symmetric(vertical: 8.0),
+                              child: Center(
+                                child: SizedBox(
+                                  width: 200,
+                                  child: ElevatedButton(
+                                    style: ElevatedButton.styleFrom(
+                                      backgroundColor: Colors.black,
+                                      foregroundColor: Colors.white,
+                                      padding: const EdgeInsets.symmetric(
+                                          vertical: 14.0),
+                                      shape: RoundedRectangleBorder(
+                                        borderRadius: BorderRadius.circular(12),
+                                      ),
+                                    ),
+                                    onPressed: _logout,
+                                    child: const Text("Log Out"),
+                                  ),
+                                ),
                               ),
                             ),
                           ],
