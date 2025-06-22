@@ -2,7 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:inthepark/screens/owner_detail_screen.dart';
-import 'signup_screen.dart'; // Or your next screen
+// Or your next screen
 
 class WaitForEmailVerificationScreen extends StatefulWidget {
   final User user;

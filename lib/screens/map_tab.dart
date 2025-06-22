@@ -416,7 +416,6 @@ class _MapTabState extends State<MapTab>
               'petId': petDoc.id,
             });
           }
-          ;
 
           for (var userDoc in usersSnapshot.docs) {
             final userId = userDoc.id;
@@ -641,10 +640,11 @@ class _MapTabState extends State<MapTab>
                                           );
                                         }
                                         isProcessing.value = false;
-                                        if (mounted)
+                                        if (mounted) {
                                           Navigator.of(context,
                                                   rootNavigator: true)
                                               .pop();
+                                        }
                                       },
                                 child: processing
                                     ? const SizedBox(

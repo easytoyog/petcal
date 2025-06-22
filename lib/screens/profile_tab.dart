@@ -7,7 +7,6 @@ import 'package:inthepark/models/pet_model.dart';
 import 'package:inthepark/utils/image_upload_util.dart';
 import 'package:inthepark/screens/owner_detail_screen.dart';
 import 'package:inthepark/screens/edit_profile_screen.dart';
-import 'package:country_state_city_picker/country_state_city_picker.dart';
 
 class ProfileTab extends StatefulWidget {
   const ProfileTab({Key? key}) : super(key: key);

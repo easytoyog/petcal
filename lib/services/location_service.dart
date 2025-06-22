@@ -267,10 +267,8 @@ class LocationService {
     if (cached != null) return cached;
 
     final locData = await getCurrentLocation();
-    if (locData != null) {
-      await saveUserLocation(locData.latitude!, locData.longitude!);
-      return LatLng(locData.latitude!, locData.longitude!);
-    }
-    return null;
+    await saveUserLocation(locData.latitude!, locData.longitude!);
+    return LatLng(locData.latitude!, locData.longitude!);
+      return null;
   }
 }
