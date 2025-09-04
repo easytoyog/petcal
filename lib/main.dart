@@ -36,7 +36,7 @@ Future<void> main() async {
     print("🟢 Firebase messaging initialized");
 
     await FirebaseAppCheck.instance.activate(
-      androidProvider: AndroidProvider.debug,
+      androidProvider: AndroidProvider.playIntegrity, // PROD ONLY
       appleProvider: AppleProvider.debug,
     );
 
@@ -267,7 +267,7 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
             .collection('owners')
             .doc(user.uid)
             .get();
-        final data = doc.data() as Map<String, dynamic>? ?? {};
+        final data = doc.data() ?? {};
         if (data.containsKey('active') && data['active'] == false) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(

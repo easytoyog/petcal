@@ -1,4 +1,4 @@
-package com.example.petcalendar
+package ca.inthepark
 
 import io.flutter.embedding.android.FlutterActivity
 

@@ -8,6 +8,7 @@ class Park {
   final double longitude;
   int userCount; // Number of users currently in the park
   double? distance; // Distance from the user (optional)
+  List<String> services; // List of services provided by the park
 
   Park({
     required this.id,
@@ -16,6 +17,7 @@ class Park {
     required this.longitude,
     this.userCount = 0,
     this.distance,
+    this.services = const [],
   });
 
   factory Park.fromJson(Map<String, dynamic> json) {
@@ -26,6 +28,7 @@ class Park {
       longitude: json['longitude'],
       userCount: json['userCount'] ?? 0,
       distance: json['distance'],
+      services: List<String>.from(json['services'] ?? []),
     );
   }
 
@@ -37,6 +40,7 @@ class Park {
       'longitude': longitude,
       'userCount': userCount,
       'distance': distance,
+      'services': services,
     };
   }
 
@@ -47,6 +51,7 @@ class Park {
       name: data['name'] ?? 'Unnamed Park',
       latitude: data['latitude']?.toDouble() ?? 0.0,
       longitude: data['longitude']?.toDouble() ?? 0.0,
+      services: List<String>.from(data['services'] ?? []),
     );
   }
 
@@ -55,7 +60,10 @@ class Park {
     double dLat = (latitude - userLat) * (pi / 180);
     double dLng = (longitude - userLng) * (pi / 180);
     double a = sin(dLat / 2) * sin(dLat / 2) +
-        cos(userLat * (pi / 180)) * cos(latitude * (pi / 180)) * sin(dLng / 2) * sin(dLng / 2);
+        cos(userLat * (pi / 180)) *
+            cos(latitude * (pi / 180)) *
+            sin(dLng / 2) *
+            sin(dLng / 2);
     double c = 2 * atan2(sqrt(a), sqrt(1 - a));
     return earthRadius * c;
   }

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -25,34 +26,56 @@ class _ParksTabState extends State<ParksTab> {
       LocationService(dotenv.env['GOOGLE_MAPS_API_KEY'] ?? '');
   final String? _currentUserId = FirebaseAuth.instance.currentUser?.uid;
   final FirestoreService _fs = FirestoreService();
-  String? _loadingParkId;
+
+  // UI/state
+  bool _isSearching = false;
+  bool _hasFetchedNearby = false;
+  String? _mutatingParkId; // for check-in/out spinner
+
+  // Data
   List<Park> _favoriteParks = [];
   Set<String> _favoriteParkIds = {};
   List<Park> _nearbyParks = [];
-  bool _hasFetchedNearby = false;
-  bool _isSearching = false;
-  final Map<String, int> _activeUserCounts = {};
 
-  @override
-  void initState() {
-    super.initState();
-    _fetchFavoriteParks();
-  }
+  // Cached park meta
+  final Map<String, int> _activeUserCounts = {}; // parkId -> count
+  final Map<String, List<String>> _parkServices = {}; // parkId -> services[]
+  final Set<String> _checkedInParkIds = {}; // where current user is checked-in
 
-  // --- Ensure a park doc exists in Firestore before any action ---
-  Future<void> _ensureParkExists(Park park) async {
-    final ref = FirebaseFirestore.instance.collection('parks').doc(park.id);
+  // ---------- Helpers ----------
+  String _parkIdOf(Park p) => generateParkID(p.latitude, p.longitude, p.name);
+
+  Future<void> _ensureParkDoc(Park p) async {
+    final parkId = _parkIdOf(p);
+    final ref = FirebaseFirestore.instance.collection('parks').doc(parkId);
     final snap = await ref.get();
     if (!snap.exists) {
       await ref.set({
-        'name': park.name,
-        'latitude': park.latitude,
-        'longitude': park.longitude,
+        'id': parkId,
+        'name': p.name,
+        'latitude': p.latitude,
+        'longitude': p.longitude,
         'createdAt': FieldValue.serverTimestamp(),
+        'userCount': 0,
+        'services': [],
       });
     }
   }
 
+  @override
+  void initState() {
+    super.initState();
+    _bootstrap();
+  }
+
+  Future<void> _bootstrap() async {
+    await Future.wait([
+      _fetchFavoriteParks(),
+      _refreshCheckedInSet(),
+    ]);
+  }
+
+  // ---------- Favorites ----------
   Future<void> _fetchFavoriteParks() async {
     if (_currentUserId == null) return;
     try {
@@ -62,239 +85,400 @@ class _ParksTabState extends State<ParksTab> {
           .collection('likedParks')
           .get();
 
-      final parkIds = likedSnapshot.docs.map((doc) => doc.id).toList();
-      List<Park> parks = [];
-      for (var i = 0; i < parkIds.length; i += 10) {
-        final batchIds = parkIds.sublist(
-            i, i + 10 > parkIds.length ? parkIds.length : i + 10);
-        final batchSnap = await FirebaseFirestore.instance
-            .collection('parks')
-            .where(FieldPath.documentId, whereIn: batchIds)
-            .get();
-        parks.addAll(batchSnap.docs.map((doc) => Park.fromFirestore(doc)));
-      }
+      final parkIds = likedSnapshot.docs.map((d) => d.id).toList();
+      _favoriteParkIds = parkIds.toSet();
 
-      for (var park in parks) {
-        _updateActiveUserCount(park.id);
+      // Fetch park docs in chunks
+      final List<Park> parks = [];
+      for (var i = 0; i < parkIds.length; i += 10) {
+        final chunk = parkIds.sublist(i, (i + 10).clamp(0, parkIds.length));
+        final qs = await FirebaseFirestore.instance
+            .collection('parks')
+            .where(FieldPath.documentId, whereIn: chunk)
+            .get();
+        parks.addAll(qs.docs.map((d) => Park.fromFirestore(d)));
+        _hydrateMetaFromDocs(qs.docs);
       }
 
       if (!mounted) return;
       setState(() {
         _favoriteParks = parks;
-        _favoriteParkIds = parks.map((p) => p.id).toSet();
       });
 
-      if (parks.isEmpty) _fetchNearbyParks();
+      if (parks.isEmpty) {
+        // No favorites — pre-fill nearby for UX
+        _fetchNearbyParks();
+      }
     } catch (e) {
-      print("Error fetching favorite parks: $e");
+      // debugPrint("Error fetching favorite parks: $e");
     }
   }
 
+  // ---------- Nearby ----------
   Future<void> _fetchNearbyParks() async {
     setState(() => _isSearching = true);
     try {
-      final locData = await loc.Location().getLocation();
+      final l = await loc.Location().getLocation();
       final parks = await _locationService.findNearbyParks(
-        locData.latitude!,
-        locData.longitude!,
+        l.latitude!,
+        l.longitude!,
       );
-      for (var park in parks) {
-        _updateActiveUserCount(park.id);
-      }
+
+      // Ensure docs exist (safe, idempotent)
+      await Future.wait(parks.map(_ensureParkDoc));
+
+      // Hydrate meta for all these parks
+      final ids = parks.map(_parkIdOf).toList();
+      await _hydrateMetaForIds(ids);
 
       if (!mounted) return;
       setState(() {
         _nearbyParks = parks;
         _hasFetchedNearby = true;
-        _isSearching = false;
       });
     } catch (e) {
-      print("Error fetching nearby parks: $e");
-      if (!mounted) return;
-      setState(() => _isSearching = false);
+      // debugPrint("Error fetching nearby parks: $e");
+    } finally {
+      if (mounted) setState(() => _isSearching = false);
     }
   }
 
-  Future<void> _updateActiveUserCount(String parkId) async {
-    final snap = await FirebaseFirestore.instance
-        .collection('parks')
-        .doc(parkId)
-        .collection('active_users')
-        .get();
-    if (!mounted) return;
-    setState(() {
-      _activeUserCounts[parkId] = snap.size;
+  // ---------- Meta (userCount + services) ----------
+  void _hydrateMetaFromDocs(
+      List<QueryDocumentSnapshot<Map<String, dynamic>>> docs) {
+    for (final d in docs) {
+      final data = d.data();
+      _activeUserCounts[d.id] = (data['userCount'] ?? 0) as int;
+      final svcs = (data['services'] as List?)?.cast<String>() ?? const [];
+      _parkServices[d.id] = svcs;
+    }
+  }
+
+  Future<void> _hydrateMetaForIds(List<String> parkIds) async {
+    for (var i = 0; i < parkIds.length; i += 10) {
+      final chunk = parkIds.sublist(i, (i + 10).clamp(0, parkIds.length));
+      final qs = await FirebaseFirestore.instance
+          .collection('parks')
+          .where(FieldPath.documentId, whereIn: chunk)
+          .get();
+      _hydrateMetaFromDocs(qs.docs);
+    }
+    if (mounted) setState(() {});
+  }
+
+  // ---------- Checked-in set ----------
+  Future<void> _refreshCheckedInSet() async {
+    _checkedInParkIds.clear();
+    if (_currentUserId == null) return;
+    try {
+      final snaps = await FirebaseFirestore.instance
+          .collectionGroup('active_users')
+          .where(FieldPath.documentId, isEqualTo: _currentUserId)
+          .get();
+      for (final doc in snaps.docs) {
+        final parkRef = doc.reference.parent.parent; // parks/{parkId}
+        if (parkRef != null) _checkedInParkIds.add(parkRef.id);
+      }
+      if (mounted) setState(() {});
+    } catch (_) {
+      // ignore
+    }
+  }
+
+  // ---------- Transactions: make negatives impossible ----------
+  Future<void> _txCheckOut(String parkId) async {
+    final db = FirebaseFirestore.instance;
+    final parkRef = db.collection('parks').doc(parkId);
+    final userRef = parkRef.collection('active_users').doc(_currentUserId);
+
+    await db.runTransaction((tx) async {
+      final userSnap = await tx.get(userRef);
+      if (!userSnap.exists) return; // nothing to do
+
+      final parkSnap = await tx.get(parkRef);
+      final cur = (parkSnap.data()?['userCount'] ?? 0) as int;
+
+      tx.delete(userRef);
+      final next = cur > 0 ? cur - 1 : 0; // floor at 0
+      tx.update(parkRef, {'userCount': next});
+    });
+  }
+
+  Future<void> _txCheckIn(String parkId) async {
+    final db = FirebaseFirestore.instance;
+    final parkRef = db.collection('parks').doc(parkId);
+    final userRef = parkRef.collection('active_users').doc(_currentUserId);
+
+    await db.runTransaction((tx) async {
+      final userSnap = await tx.get(userRef);
+      if (userSnap.exists) return; // already checked in
+
+      final parkSnap = await tx.get(parkRef);
+      final cur = (parkSnap.data()?['userCount'] ?? 0) as int;
+
+      tx.set(userRef, {'checkedInAt': FieldValue.serverTimestamp()});
+      tx.update(parkRef, {'userCount': cur + 1});
     });
   }
 
   Future<void> _checkOutFromAllParks() async {
     if (_currentUserId == null) return;
-    final parksSnap =
-        await FirebaseFirestore.instance.collection('parks').get();
-    List<Future> futures = [];
-    for (var parkDoc in parksSnap.docs) {
-      final ref = FirebaseFirestore.instance
-          .collection('parks')
-          .doc(parkDoc.id)
-          .collection('active_users')
-          .doc(_currentUserId);
-      final ds = await ref.get();
-      if (ds.exists) {
-        futures.add(ref.delete());
-        futures.add(FirebaseFirestore.instance
-            .collection('parks')
-            .doc(parkDoc.id)
-            .update({'userCount': FieldValue.increment(-1)}));
+    try {
+      final snaps = await FirebaseFirestore.instance
+          .collectionGroup('active_users')
+          .where(FieldPath.documentId, isEqualTo: _currentUserId)
+          .get();
+
+      for (final doc in snaps.docs) {
+        final parkRef = doc.reference.parent.parent; // parks/{parkId}
+        if (parkRef == null) continue;
+
+        await FirebaseFirestore.instance.runTransaction((tx) async {
+          final userSnap = await tx.get(doc.reference);
+          if (!userSnap.exists) return;
+
+          final parkSnap = await tx.get(parkRef);
+          final cur = (parkSnap.data()?['userCount'] ?? 0) as int;
+
+          tx.delete(doc.reference);
+          tx.update(parkRef, {'userCount': cur > 0 ? cur - 1 : 0});
+        });
+
+        _checkedInParkIds.remove(parkRef.id);
+        _activeUserCounts.update(
+          parkRef.id,
+          (v) => (v - 1).clamp(0, 1 << 30),
+          ifAbsent: () => 0,
+        );
       }
+    } catch (_) {
+      // ignore
     }
-    await Future.wait(futures);
   }
 
+  // ---------- Active pets dialog (optimized) ----------
   Future<void> _showActiveUsersDialog(String parkId) async {
     final currentUser = FirebaseAuth.instance.currentUser;
     if (currentUser == null) return;
 
-    // Fetch user's favorite pet IDs
+    // Load favorites once
     final favPetsSnap = await FirebaseFirestore.instance
         .collection('favorites')
         .doc(currentUser.uid)
         .collection('pets')
         .get();
-    final Set<String> favoritePetIds =
-        favPetsSnap.docs.map((doc) => doc.id).toSet();
+    final favoritePetIds = favPetsSnap.docs.map((d) => d.id).toSet();
 
+    // Who's active?
     final activeUsersSnapshot = await FirebaseFirestore.instance
         .collection('parks')
         .doc(parkId)
         .collection('active_users')
         .get();
+    final userIds = activeUsersSnapshot.docs.map((d) => d.id).toList();
 
-    List<Map<String, dynamic>> activePets = [];
-
-    for (var userDoc in activeUsersSnapshot.docs) {
-      final userId = userDoc.id;
+    // Load all pets for these owners in chunks of 10
+    final List<Map<String, dynamic>> activePets = [];
+    for (var i = 0; i < userIds.length; i += 10) {
+      final chunk = userIds.sublist(i, (i + 10).clamp(0, userIds.length));
       final petsSnapshot = await FirebaseFirestore.instance
           .collection('pets')
-          .where('ownerId', isEqualTo: userId)
+          .where('ownerId', whereIn: chunk)
           .get();
 
-      for (var petDoc in petsSnapshot.docs) {
-        final petData = petDoc.data();
-        final checkedInAt = userDoc.data()['checkedInAt'];
-        String checkInTime = '';
-        if (checkedInAt != null) {
-          final dt = checkedInAt.toDate();
-          checkInTime = DateFormat.jm().format(dt); // e.g., 2:30 PM
+      // index check-in times by owner
+      final checkInByOwner = <String, String>{};
+      for (final u in activeUsersSnapshot.docs) {
+        final ts = (u.data()['checkedInAt']);
+        String timeStr = '';
+        if (ts != null) {
+          final dt = (ts as Timestamp).toDate();
+          timeStr = DateFormat.jm().format(dt);
         }
+        checkInByOwner[u.id] = timeStr;
+      }
+
+      for (final petDoc in petsSnapshot.docs) {
+        final pet = petDoc.data();
+        final ownerId = pet['ownerId'] as String? ?? '';
         activePets.add({
-          'petName': petData['name'] ?? 'Unknown Pet',
-          'petPhotoUrl': petData['photoUrl'] ?? '',
-          'ownerId': userId,
+          'petName': pet['name'] ?? 'Unknown Pet',
+          'petPhotoUrl': pet['photoUrl'] ?? '',
+          'ownerId': ownerId,
           'petId': petDoc.id,
-          'checkInTime': checkInTime,
+          'checkInTime': checkInByOwner[ownerId] ?? '',
         });
       }
     }
 
+    if (!mounted) return;
     showDialog(
       context: context,
       builder: (context) {
-        return StatefulBuilder(
-          builder: (context, setStateDialog) {
-            return ActivePetsDialog(
-              pets: activePets,
-              favoritePetIds: favoritePetIds,
-              currentUserId: currentUser.uid,
-              onFavoriteToggle: (ownerId, petId) async {
-                if (favoritePetIds.contains(petId)) {
-                  // Unfriend and unfavorite
-                  await FirebaseFirestore.instance
-                      .collection('friends')
-                      .doc(currentUser.uid)
-                      .collection('userFriends')
-                      .doc(ownerId)
-                      .delete();
-                  await FirebaseFirestore.instance
-                      .collection('favorites')
-                      .doc(currentUser.uid)
-                      .collection('pets')
-                      .doc(petId)
-                      .delete();
-                  setStateDialog(() {
-                    favoritePetIds.remove(petId);
-                  });
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text("Friend removed.")),
-                  );
-                } else {
-                  // Add friend and favorite
-                  DocumentSnapshot ownerDoc = await FirebaseFirestore.instance
-                      .collection('owners')
-                      .doc(ownerId)
-                      .get();
-                  String ownerName = "";
-                  if (ownerDoc.exists) {
-                    final data = ownerDoc.data() as Map<String, dynamic>;
-                    ownerName =
-                        "${data['firstName'] ?? ''} ${data['lastName'] ?? ''}"
-                            .trim();
-                  }
-                  if (ownerName.isEmpty) {
-                    ownerName = ownerId;
-                  }
-                  await FirebaseFirestore.instance
-                      .collection('friends')
-                      .doc(currentUser.uid)
-                      .collection('userFriends')
-                      .doc(ownerId)
-                      .set({
-                    'friendId': ownerId,
-                    'ownerName': ownerName,
-                    'addedAt': FieldValue.serverTimestamp(),
-                  });
-                  await FirebaseFirestore.instance
-                      .collection('favorites')
-                      .doc(currentUser.uid)
-                      .collection('pets')
-                      .doc(petId)
-                      .set({
-                    'petId': petId,
-                    'addedAt': FieldValue.serverTimestamp(),
-                  });
-                  setStateDialog(() {
-                    favoritePetIds.add(petId);
-                  });
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text("Friend added!")),
-                  );
-                }
-              },
-            );
+        return ActivePetsDialog(
+          pets: activePets,
+          favoritePetIds: favoritePetIds,
+          currentUserId: currentUser.uid,
+          onFavoriteToggle: (ownerId, petId) async {
+            if (favoritePetIds.contains(petId)) {
+              // Unfriend/unfavorite
+              await FirebaseFirestore.instance
+                  .collection('friends')
+                  .doc(currentUser.uid)
+                  .collection('userFriends')
+                  .doc(ownerId)
+                  .delete();
+              await FirebaseFirestore.instance
+                  .collection('favorites')
+                  .doc(currentUser.uid)
+                  .collection('pets')
+                  .doc(petId)
+                  .delete();
+              favoritePetIds.remove(petId);
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text("Friend removed.")),
+                );
+              }
+            } else {
+              // Friend/favorite
+              final ownerDoc = await FirebaseFirestore.instance
+                  .collection('owners')
+                  .doc(ownerId)
+                  .get();
+              String ownerName = "";
+              if (ownerDoc.exists) {
+                final data = ownerDoc.data() as Map<String, dynamic>;
+                ownerName =
+                    "${data['firstName'] ?? ''} ${data['lastName'] ?? ''}"
+                        .trim();
+              }
+              if (ownerName.isEmpty) ownerName = ownerId;
+
+              await FirebaseFirestore.instance
+                  .collection('friends')
+                  .doc(currentUser.uid)
+                  .collection('userFriends')
+                  .doc(ownerId)
+                  .set({
+                'friendId': ownerId,
+                'ownerName': ownerName,
+                'addedAt': FieldValue.serverTimestamp(),
+              });
+              await FirebaseFirestore.instance
+                  .collection('favorites')
+                  .doc(currentUser.uid)
+                  .collection('pets')
+                  .doc(petId)
+                  .set({
+                'petId': petId,
+                'addedAt': FieldValue.serverTimestamp(),
+              });
+              favoritePetIds.add(petId);
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text("Friend added!")),
+                );
+              }
+            }
           },
         );
       },
     );
   }
 
+  // ---------- Like / unlike ----------
+  Future<void> _toggleLike(Park park) async {
+    final parkId = _parkIdOf(park);
+    await _ensureParkDoc(park);
+    if (_favoriteParkIds.contains(parkId)) {
+      await _fs.unlikePark(parkId);
+      _favoriteParkIds.remove(parkId);
+      _favoriteParks.removeWhere((p) => _parkIdOf(p) == parkId);
+    } else {
+      await _fs.likePark(parkId);
+      _favoriteParkIds.add(parkId);
+      if (!_favoriteParks.any((p) => _parkIdOf(p) == parkId)) {
+        _favoriteParks.add(park);
+      }
+    }
+    if (mounted) setState(() {});
+  }
+
+  // ---------- Check-in / out (uses transactions) ----------
+  Future<void> _toggleCheckIn(Park park) async {
+    if (_currentUserId == null) return;
+    final parkId = _parkIdOf(park);
+    setState(() => _mutatingParkId = parkId);
+
+    try {
+      final isCheckedIn = _checkedInParkIds.contains(parkId);
+
+      if (isCheckedIn) {
+        // Out (transactional)
+        await _txCheckOut(parkId);
+        _checkedInParkIds.remove(parkId);
+        _activeUserCounts.update(
+          parkId,
+          (v) => (v - 1).clamp(0, 1 << 30),
+          ifAbsent: () => 0,
+        );
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text("Checked out of park")),
+          );
+        }
+      } else {
+        // First clear any other check-ins (transactional per park)
+        await _checkOutFromAllParks();
+
+        // In (transactional)
+        await _txCheckIn(parkId);
+
+        _checkedInParkIds
+          ..clear()
+          ..add(parkId);
+        _activeUserCounts.update(
+          parkId,
+          (v) => v + 1,
+          ifAbsent: () => 1,
+        );
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text("Checked in to park")),
+          );
+        }
+      }
+    } catch (_) {
+      // ignore
+    } finally {
+      if (mounted) setState(() => _mutatingParkId = null);
+    }
+  }
+
+  // ---------- UI ----------
   Widget _buildParkCard(Park park, {required bool isFavorite}) {
-    final userCount = _activeUserCounts[park.id] ?? 0;
-    final liked = _favoriteParkIds.contains(park.id);
-    final bgColor = isFavorite ? Colors.green.shade50 : null;
+    final parkId = _parkIdOf(park);
+    final liked = _favoriteParkIds.contains(parkId);
+    final userCount = _activeUserCounts[parkId] ?? 0;
+    final services = _parkServices[parkId] ?? park.services ?? const <String>[];
+    final isCheckedIn = _checkedInParkIds.contains(parkId);
+    final isBusy = _mutatingParkId == parkId;
 
     return Card(
-      color: bgColor,
+      color: isFavorite ? Colors.green.shade50 : null,
       margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       child: InkWell(
         onTap: () async {
-          await _ensureParkExists(park);
-          _showActiveUsersDialog(park.id);
+          await _ensureParkDoc(park);
+          _showActiveUsersDialog(parkId);
         },
         child: Padding(
           padding: const EdgeInsets.all(12),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // name + favorite toggle
+              // Title + like toggle
               Row(
                 children: [
                   Expanded(
@@ -302,135 +486,90 @@ class _ParksTabState extends State<ParksTab> {
                       park.name,
                       style: const TextStyle(
                           fontSize: 16, fontWeight: FontWeight.bold),
+                      overflow: TextOverflow.ellipsis,
                     ),
                   ),
                   IconButton(
                     icon: Icon(liked ? Icons.favorite : Icons.favorite_border),
                     color: liked ? Colors.green : Colors.grey,
-                    onPressed: () async {
-                      await _ensureParkExists(park);
-                      if (liked) {
-                        await _fs.unlikePark(park.id);
-                        setState(() {
-                          _favoriteParkIds.remove(park.id);
-                          _favoriteParks.removeWhere((p) => p.id == park.id);
-                        });
-                      } else {
-                        await _fs.likePark(park.id);
-                        setState(() {
-                          _favoriteParkIds.add(park.id);
-                          _favoriteParks.add(park);
-                        });
-                      }
-                    },
+                    onPressed: () => _toggleLike(park),
                   ),
                 ],
               ),
 
-              // active users count
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 4),
-                child: Text("Active Users: $userCount"),
-              ),
+              // Services chips
+              if (services.isNotEmpty) ...[
+                const SizedBox(height: 6),
+                Wrap(
+                  spacing: 6,
+                  runSpacing: -6,
+                  children: services.map((s) {
+                    final icon = s == "Off-leash Dog Park"
+                        ? Icons.pets
+                        : s == "Off-leash Trail"
+                            ? Icons.terrain
+                            : s == "Off-leash Beach"
+                                ? Icons.beach_access
+                                : Icons.park;
+                    return Chip(
+                      avatar: Icon(icon, size: 16, color: Colors.green),
+                      label: Text(s, style: const TextStyle(fontSize: 12)),
+                      backgroundColor: Colors.green[50],
+                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      visualDensity:
+                          const VisualDensity(horizontal: -4, vertical: -4),
+                    );
+                  }).toList(),
+                ),
+              ],
 
-              // buttons: Chat, Events, CheckIn/Out
+              const SizedBox(height: 6),
+
+              // Active users count
+              Text("Active Users: $userCount"),
+
+              const SizedBox(height: 8),
+
+              // Actions
               Row(
                 children: [
                   ElevatedButton(
                     onPressed: () => Navigator.push(
                       context,
                       MaterialPageRoute(
-                          builder: (_) => ChatRoomScreen(parkId: park.id)),
+                        builder: (_) => ChatRoomScreen(parkId: parkId),
+                      ),
                     ),
                     child:
                         const Text("Park Chat", style: TextStyle(fontSize: 12)),
                   ),
                   const SizedBox(width: 8),
                   ElevatedButton(
-                    onPressed: () => widget.onShowEvents(park.id),
+                    onPressed: () => widget.onShowEvents(parkId),
                     child: const Text("Park Events",
                         style: TextStyle(fontSize: 12)),
                   ),
                   const SizedBox(width: 8),
-                  FutureBuilder<DocumentSnapshot>(
-                    future: FirebaseFirestore.instance
-                        .collection('parks')
-                        .doc(generateParkID(
-                            park.latitude, park.longitude, park.name))
-                        .collection('active_users')
-                        .doc(_currentUserId)
-                        .get(),
-                    builder: (ctx, snap) {
-                      final checkedIn = snap.hasData && snap.data!.exists;
-                      final isLoading = _loadingParkId == park.id;
-                      final isAnyLoading = _loadingParkId != null;
-
-                      return ElevatedButton(
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor:
-                              checkedIn ? Colors.red : Colors.green,
-                        ),
-                        onPressed: isAnyLoading && !isLoading
-                            ? null
-                            : () async {
-                                setState(() {
-                                  _loadingParkId = park.id;
-                                });
-                                final parkId = generateParkID(
-                                    park.latitude, park.longitude, park.name);
-                                final ref = FirebaseFirestore.instance
-                                    .collection('parks')
-                                    .doc(parkId)
-                                    .collection('active_users')
-                                    .doc(_currentUserId);
-
-                                if (checkedIn) {
-                                  await ref.delete();
-                                  await FirebaseFirestore.instance
-                                      .collection('parks')
-                                      .doc(parkId)
-                                      .update({
-                                    'userCount': FieldValue.increment(-1)
-                                  });
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    const SnackBar(
-                                        content: Text("Checked out of park")),
-                                  );
-                                } else {
-                                  await _checkOutFromAllParks();
-                                  await _locationService
-                                      .uploadUserToActiveUsersTable(
-                                    park.latitude,
-                                    park.longitude,
-                                    park.name,
-                                  );
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    const SnackBar(
-                                        content: Text("Checked in to park")),
-                                  );
-                                }
-                                await _updateActiveUserCount(parkId);
-                                setState(() {
-                                  _loadingParkId = null;
-                                });
-                              },
-                        child: isLoading
-                            ? const SizedBox(
-                                width: 18,
-                                height: 18,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  valueColor: AlwaysStoppedAnimation<Color>(
-                                      Colors.white),
-                                ),
-                              )
-                            : Text(
-                                checkedIn ? "Check Out" : "Check In",
-                                style: const TextStyle(
-                                    fontSize: 12, color: Colors.white),
-                              ),
-                      );
-                    },
+                  ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: isCheckedIn ? Colors.red : Colors.green,
+                    ),
+                    onPressed: isBusy ? null : () => _toggleCheckIn(park),
+                    child: isBusy
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              valueColor:
+                                  AlwaysStoppedAnimation<Color>(Colors.white),
+                            ),
+                          )
+                        : Text(
+                            isCheckedIn ? "Check Out" : "Check In",
+                            style: const TextStyle(
+                                fontSize: 12, color: Colors.white),
+                          ),
                   ),
                 ],
               ),
@@ -441,6 +580,7 @@ class _ParksTabState extends State<ParksTab> {
     );
   }
 
+  // ---------- Build ----------
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -449,7 +589,7 @@ class _ParksTabState extends State<ParksTab> {
           ListView(
             padding: const EdgeInsets.only(bottom: 70),
             children: [
-              // --- Favourite parks ---
+              // Favorites
               if (_favoriteParks.isNotEmpty) ...[
                 const Padding(
                   padding: EdgeInsets.symmetric(horizontal: 10, vertical: 8),
@@ -458,11 +598,10 @@ class _ParksTabState extends State<ParksTab> {
                           TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
                 ),
                 ..._favoriteParks
-                    .map((p) => _buildParkCard(p, isFavorite: true))
-                    .toList(),
+                    .map((p) => _buildParkCard(p, isFavorite: true)),
               ],
 
-              // --- Nearby Parks header ---
+              // Nearby header
               const Padding(
                 padding: EdgeInsets.symmetric(horizontal: 10, vertical: 8),
                 child: Text("Nearby Parks",
@@ -470,7 +609,7 @@ class _ParksTabState extends State<ParksTab> {
                         TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
               ),
 
-              // Find Nearby button below the heading
+              // CTA to fetch nearby
               if (!_hasFetchedNearby && !_isSearching)
                 Padding(
                   padding:
@@ -487,10 +626,8 @@ class _ParksTabState extends State<ParksTab> {
                   child: Center(child: CircularProgressIndicator()),
                 ),
 
-              // --- Nearby parks list ---
-              ..._nearbyParks
-                  .map((p) => _buildParkCard(p, isFavorite: false))
-                  .toList(),
+              // Nearby list
+              ..._nearbyParks.map((p) => _buildParkCard(p, isFavorite: false)),
             ],
           ),
           const Positioned(

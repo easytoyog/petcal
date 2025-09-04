@@ -1,19 +1,25 @@
 import 'dart:async';
+import 'dart:ui'; // for BackdropFilter (frosted filter bar)
 import 'package:flutter/material.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:intl/intl.dart';
 import 'package:location/location.dart' as loc;
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:geocoding/geocoding.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:inthepark/models/park_model.dart';
 import 'package:inthepark/services/location_service.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:inthepark/screens/chatroom_screen.dart';
 import 'package:inthepark/services/firestore_service.dart';
-import 'package:inthepark/utils/utils.dart'; // Import your utility
-import 'package:inthepark/widgets/active_pets_dialog.dart';
+import 'package:inthepark/utils/utils.dart';
+
+// ---------- Moved out of the State class ----------
+class _FilterOption {
+  final String value; // exact service string in Firestore
+  final String label; // short label to show
+  final IconData icon;
+  const _FilterOption(this.value, this.label, this.icon);
+}
 
 class MapTab extends StatefulWidget {
   final void Function(String parkId) onShowEvents;
@@ -27,25 +33,40 @@ class _MapTabState extends State<MapTab>
     with AutomaticKeepAliveClientMixin<MapTab> {
   GoogleMapController? _mapController;
   final loc.Location _location = loc.Location();
-  final LocationService _locationService = LocationService(
-    dotenv.env['GOOGLE_MAPS_API_KEY'] ?? '',
-  );
-  // Use default center if location is not yet loaded.
+  final LocationService _locationService =
+      LocationService(dotenv.env['GOOGLE_MAPS_API_KEY'] ?? '');
+
   LatLng? _finalPosition;
   final Set<String> _existingParkIds = {};
-  // We no longer block the whole screen while loading location.
-  bool _isLocationLoading = true;
   LatLng _currentMapCenter = const LatLng(43.7615, -79.4111);
-  // Markers keyed by parkId.
+
+  // Keyed by Firestore parkId (generateParkID)
   final Map<String, Marker> _markersMap = {};
-  // List of favorite pet IDs.
+  // Park data cache (by parkId)
+  final Map<String, List<String>> _parkServicesById = {};
+
+  List<Park> _allParks = []; // raw nearby parks
+  final Set<String> _selectedFilters = {};
+
   List<String> _favoritePetIds = [];
   final String? currentUserId = FirebaseAuth.instance.currentUser?.uid;
-  // For search button loading state.
+
   bool _isSearching = false;
   bool _isMapReady = false;
 
   Timer? _locationSaveDebounce;
+  Timer? _filterDebounce;
+
+  // Park snapshot listeners scoped to visible markers
+  final List<StreamSubscription<QuerySnapshot>> _parksSubs = [];
+
+  // ---------- Filter options ----------
+  final List<_FilterOption> _filterOptions = const [
+    _FilterOption('Off-leash Dog Park', 'Dog Park', Icons.pets),
+    _FilterOption('Off-leash Trail', 'Off-leash Trail', Icons.terrain),
+    _FilterOption('On-leash Trail', 'On-leash Trail', Icons.directions_walk),
+    _FilterOption('Off-leash Beach', 'Beach', Icons.beach_access),
+  ];
 
   @override
   bool get wantKeepAlive => true;
@@ -56,7 +77,14 @@ class _MapTabState extends State<MapTab>
     _isSearching = true;
     _fetchFavorites();
     _locationService.enableBackgroundLocation();
+
+    // Fast path: show map with saved/cached location
     _loadSavedLocationAndSetMap();
+
+    // Defer heavier work for better perceived load time
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _initLocationFlow();
+    });
   }
 
   Future<void> _loadSavedLocationAndSetMap() async {
@@ -69,84 +97,34 @@ class _MapTabState extends State<MapTab>
 
   @override
   void dispose() {
+    for (final s in _parksSubs) {
+      s.cancel();
+    }
+    _locationSaveDebounce?.cancel();
+    _filterDebounce?.cancel();
     _mapController?.dispose();
     super.dispose();
-  }
-
-  // --- Dialog to show active users, events, and add event ---
-  void _showUsersPopup(BuildContext context) {
-    showGeneralDialog(
-      context: context,
-      barrierLabel: "Users",
-      barrierDismissible: true,
-      barrierColor: Colors.black.withOpacity(0.5),
-      transitionDuration: Duration(milliseconds: 300),
-      pageBuilder: (context, animation1, animation2) {
-        return Align(
-          alignment: Alignment.center,
-          child: Material(
-            borderRadius: BorderRadius.circular(16),
-            child: Container(
-              width: 300,
-              height: 200,
-              padding: EdgeInsets.all(20),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Text(
-                    "Number of Users",
-                    style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
-                  ),
-                  SizedBox(height: 20),
-                  Text(
-                    "42",
-                    style: TextStyle(fontSize: 20),
-                  ),
-                  SizedBox(height: 20),
-                  ElevatedButton(
-                    onPressed: () => Navigator.of(context).pop(),
-                    child: Text("Close"),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        );
-      },
-      transitionBuilder: (context, animation1, animation2, child) {
-        return FadeTransition(
-          opacity: animation1,
-          child: ScaleTransition(
-            scale: CurvedAnimation(
-              parent: animation1,
-              curve: Curves.easeOutBack,
-            ),
-            child: child,
-          ),
-        );
-      },
-    );
   }
 
   Future<void> _fetchFavorites() async {
     if (currentUserId == null) return;
     try {
-      QuerySnapshot snapshot = await FirebaseFirestore.instance
+      final snapshot = await FirebaseFirestore.instance
           .collection('favorites')
           .doc(currentUserId)
           .collection('pets')
           .get();
-      List<String> favIds = snapshot.docs.map((doc) => doc.id).toList();
+      final favIds = snapshot.docs.map((doc) => doc.id).toList();
+      if (!mounted) return;
       setState(() {
         _favoritePetIds = favIds;
       });
     } catch (e) {
-      print("Error fetching favorites: $e");
+      debugPrint("Error fetching favorites: $e");
     }
   }
 
-  /// This method loads the user location and nearby parks,
-  /// then updates the markers and (if applicable) triggers the check-in dialog.
+  /// Load user location and nearby parks, update markers, maybe prompt check-in.
   Future<void> _initLocationFlow() async {
     try {
       final userLocation = await _locationService.getUserLocationOrCached();
@@ -158,14 +136,11 @@ class _MapTabState extends State<MapTab>
 
         _mapController?.animateCamera(
           CameraUpdate.newCameraPosition(
-            CameraPosition(
-              target: userLocation,
-              zoom: 18,
-            ),
+            CameraPosition(target: userLocation, zoom: 17),
           ),
         );
 
-        _loadNearbyParks(userLocation);
+        await _loadNearbyParks(userLocation);
       } else {
         setState(() {
           _finalPosition = const LatLng(43.7615, -79.4111);
@@ -174,55 +149,41 @@ class _MapTabState extends State<MapTab>
         });
       }
     } catch (e) {
-      print("Error in _initLocationFlow: $e");
-      setState(() {
-        _isSearching = false;
-      });
+      debugPrint("Error in _initLocationFlow: $e");
+      if (mounted) setState(() => _isSearching = false);
     }
   }
 
   Future<void> _loadNearbyParks(LatLng position) async {
     try {
-      // Set searching state to true
-      setState(() {
-        _isSearching = true;
-      });
+      setState(() => _isSearching = true);
 
-      // Clear previous markers
-      _markersMap.clear();
-
-      // Fetch nearby parks
-      List<Park> nearbyParks = await _locationService.findNearbyParks(
+      final nearbyParks = await _locationService.findNearbyParks(
         position.latitude,
         position.longitude,
       );
+      _allParks = nearbyParks;
 
-      // Create markers concurrently
-      final markerFutures = nearbyParks.map((park) async {
-        final marker = await _createParkMarker(park);
-        return MapEntry(park.id, marker);
-      }).toList();
+      // Apply markers keyed by Firestore parkId (generateParkID)
+      await _applyMarkerDiff(nearbyParks);
 
-      final markerEntries = await Future.wait(markerFutures);
+      // Hydrate services for filters immediately
+      await _hydrateServicesForParks(nearbyParks);
 
-      // Update markers in setState to trigger UI refresh
-      setState(() {
-        for (var entry in markerEntries) {
-          _markersMap[entry.key] = entry.value;
-        }
-        _isSearching = false; // Reset searching state
-      });
+      // Scope snapshots to current markers (also keeps services up to date)
+      _rebuildParksListeners();
+
+      if (!mounted) return;
+      setState(() => _isSearching = false);
 
       // Check for check-in opportunity
-      Park? currentPark = await _locationService.isUserAtPark(
+      final currentPark = await _locationService.isUserAtPark(
         position.latitude,
         position.longitude,
       );
-      print('Found currentPark: $currentPark');
       if (currentPark != null && mounted) {
         await _locationService.ensureParkExists(currentPark);
 
-        // Check if the user is already checked in to this park
         final currentUser = FirebaseAuth.instance.currentUser;
         if (currentUser != null) {
           final parkId = generateParkID(
@@ -239,55 +200,230 @@ class _MapTabState extends State<MapTab>
         }
       }
     } catch (e) {
-      print("Error loading nearby parks: $e");
-      if (mounted) {
-        setState(() {
-          _isSearching = false; // Reset searching state on error
-        });
+      debugPrint("Error loading nearby parks: $e");
+      if (mounted) setState(() => _isSearching = false);
+    }
+  }
+
+  // Fetch 'services' arrays for a given list of parks and cache them
+  Future<void> _hydrateServicesForParks(List<Park> parks) async {
+    final ids = parks
+        .map((p) => generateParkID(p.latitude, p.longitude, p.name))
+        .toList()
+        .chunked(10);
+
+    for (final chunk in ids) {
+      final qs = await FirebaseFirestore.instance
+          .collection('parks')
+          .where(FieldPath.documentId, whereIn: chunk)
+          .get();
+
+      for (final d in qs.docs) {
+        final svcs =
+            (d.data()['services'] as List?)?.cast<String>() ?? const [];
+        _parkServicesById[d.id] = svcs;
       }
     }
   }
 
-  Future<int> _getUserCountInPark(String parkId) async {
-    try {
-      final parkRef =
-          FirebaseFirestore.instance.collection('parks').doc(parkId);
-      final usersSnapshot = await parkRef.collection('active_users').get();
-      return usersSnapshot.size;
-    } catch (e) {
-      print("Error getting active user count for park $parkId: $e");
-      return 0;
+  // Apply minimal changes instead of clearing markers
+  Future<void> _applyMarkerDiff(List<Park> parks) async {
+    final next = <String, Marker>{};
+
+    // build markers concurrently (keyed by Firestore parkId)
+    final futures = parks.map((p) async {
+      final m = await _createParkMarker(p);
+      final parkId = generateParkID(p.latitude, p.longitude, p.name);
+      return MapEntry(parkId, m);
+    }).toList();
+
+    for (final entry in await Future.wait(futures)) {
+      next[entry.key] = entry.value;
     }
+
+    final toRemove = _markersMap.keys.toSet().difference(next.keys.toSet());
+    final toAdd = next.keys.toSet().difference(_markersMap.keys.toSet());
+    final toUpdate = next.keys
+        .where((k) => _markersMap.containsKey(k) && _markersMap[k] != next[k]);
+
+    if (toRemove.isEmpty && toAdd.isEmpty && toUpdate.isEmpty) return;
+
+    if (!mounted) return;
+    setState(() {
+      for (final k in toRemove) {
+        _markersMap.remove(k);
+      }
+      for (final k in toAdd) {
+        _markersMap[k] = next[k]!;
+      }
+      for (final k in toUpdate) {
+        _markersMap[k] = next[k]!;
+      }
+    });
+  }
+
+  // Rebuild Firestore listeners to only watch parks currently on the map.
+  // Also keep services live-updated so filters are accurate.
+  void _rebuildParksListeners() {
+    for (final s in _parksSubs) {
+      s.cancel();
+    }
+    _parksSubs.clear();
+
+    final ids = _markersMap.keys.toList();
+    if (ids.isEmpty) return;
+
+    // whereIn supports up to 10 per query – chunk them
+    final chunks = ids.chunked(10);
+    for (final chunk in chunks) {
+      final sub = FirebaseFirestore.instance
+          .collection('parks')
+          .where(FieldPath.documentId, whereIn: chunk)
+          .snapshots()
+          .listen((snapshot) {
+        bool changedInfo = false;
+        bool servicesChanged = false;
+
+        for (final parkDoc in snapshot.docs) {
+          final parkId = parkDoc.id;
+          if (_markersMap.containsKey(parkId)) {
+            final data = parkDoc.data();
+            final count = (data['userCount'] ?? 0) as int;
+            final services =
+                (data['services'] as List?)?.cast<String>() ?? const [];
+            // update info window users
+            final oldMarker = _markersMap[parkId]!;
+            final updated = oldMarker.copyWith(
+              infoWindowParam: InfoWindow(
+                title: oldMarker.infoWindow.title,
+                snippet: 'Users: $count',
+              ),
+            );
+            if (updated != oldMarker) {
+              _markersMap[parkId] = updated;
+              changedInfo = true;
+            }
+            // update service cache
+            final prevSvcs = _parkServicesById[parkId] ?? const [];
+            if (!_listEquals(prevSvcs, services)) {
+              _parkServicesById[parkId] = services;
+              servicesChanged = true;
+            }
+          }
+        }
+
+        if (changedInfo && mounted) setState(() {});
+
+        // if services changed AND a filter is active, reapply filters (debounced)
+        if (servicesChanged && _selectedFilters.isNotEmpty) {
+          _filterDebounce?.cancel();
+          _filterDebounce = Timer(const Duration(milliseconds: 120), () {
+            if (mounted) _applyFilters();
+          });
+        }
+      });
+
+      _parksSubs.add(sub);
+    }
+  }
+
+  bool _listEquals(List<String> a, List<String> b) {
+    if (a.length != b.length) return false;
+    final sa = a.toSet();
+    final sb = b.toSet();
+    if (sa.length != sb.length) return false;
+    for (final v in sa) {
+      if (!sb.contains(v)) return false;
+    }
+    return true;
   }
 
   void _onMapCreated(GoogleMapController controller) {
     _mapController = controller;
-    // Initialize the current map center.
     _currentMapCenter = _finalPosition ?? const LatLng(43.7615, -79.4111);
 
-    // If we already have the user's location, move the camera there
     if (_finalPosition != null) {
       _mapController?.animateCamera(
         CameraUpdate.newCameraPosition(
-          CameraPosition(
-            target: _finalPosition!,
-            zoom: 18,
-          ),
+          CameraPosition(target: _finalPosition!, zoom: 17),
         ),
       );
     }
-    _initLocationFlow();
-    _listenToParkUpdates();
+    // init flow & listeners are handled in initState
   }
 
   void _onCameraMove(CameraPosition position) {
     _currentMapCenter = position.target;
     _locationSaveDebounce?.cancel();
     _locationSaveDebounce = Timer(const Duration(seconds: 2), () {
-      _locationService.saveUserLocation(
-          _currentMapCenter.latitude, _currentMapCenter.longitude);
+      final c = _currentMapCenter;
+      _locationService.saveUserLocation(c.latitude, c.longitude);
     });
   }
+
+  // ---- Center-on-me support ----
+  Future<bool> _ensureLocationPermission() async {
+    bool serviceEnabled = await _location.serviceEnabled();
+    if (!serviceEnabled) {
+      serviceEnabled = await _location.requestService();
+      if (!serviceEnabled) return false;
+    }
+
+    var permissionGranted = await _location.hasPermission();
+    if (permissionGranted == loc.PermissionStatus.denied) {
+      permissionGranted = await _location.requestPermission();
+      if (permissionGranted != loc.PermissionStatus.granted) return false;
+    }
+    if (permissionGranted == loc.PermissionStatus.deniedForever) {
+      return false;
+    }
+    return true;
+  }
+
+  Future<void> _centerOnUser() async {
+    try {
+      if (!await _ensureLocationPermission()) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("Location permission is required.")),
+        );
+        return;
+      }
+
+      // Try service’s cached/fast path first
+      LatLng? user = await _locationService.getUserLocationOrCached();
+
+      // Fallback to direct GPS read
+      if (user == null) {
+        final l = await _location.getLocation();
+        if (l.latitude != null && l.longitude != null) {
+          user = LatLng(l.latitude!, l.longitude!);
+        }
+      }
+
+      if (user == null) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("Unable to get current location.")),
+        );
+        return;
+      }
+
+      _finalPosition = user;
+      _mapController?.animateCamera(
+        CameraUpdate.newCameraPosition(
+          CameraPosition(target: user, zoom: 17),
+        ),
+      );
+      await _loadNearbyParks(user);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Error centering on your location: $e")),
+      );
+    }
+  }
+  // --------------------------------
 
   void _showCheckInDialog(Park park) async {
     final currentUser = FirebaseAuth.instance.currentUser;
@@ -295,20 +431,23 @@ class _MapTabState extends State<MapTab>
 
     final parkId = generateParkID(park.latitude, park.longitude, park.name);
 
-    DocumentReference activeDocRef = FirebaseFirestore.instance
+    final activeDocRef = FirebaseFirestore.instance
         .collection('parks')
         .doc(parkId)
         .collection('active_users')
         .doc(currentUser.uid);
-    DocumentSnapshot activeDoc = await activeDocRef.get();
+    final activeDoc = await activeDocRef.get();
     bool isCheckedIn = activeDoc.exists;
     if (isCheckedIn) {
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("You are already checked in to this park.")),
+        const SnackBar(
+            content: Text("You are already checked in to this park.")),
       );
       return;
     }
 
+    if (!mounted) return;
     showDialog(
       context: context,
       barrierDismissible: false,
@@ -353,21 +492,42 @@ class _MapTabState extends State<MapTab>
 
   Future<void> _showUsersInPark(String parkId, String parkName,
       double parkLatitude, double parkLongitude) async {
-    try {
-      final currentUser = FirebaseAuth.instance.currentUser;
-      if (currentUser == null) return;
+    final currentUser = FirebaseAuth.instance.currentUser;
+    final parkDoc =
+        await FirebaseFirestore.instance.collection('parks').doc(parkId).get();
+    List<String> services = [];
+    if (parkDoc.exists &&
+        parkDoc.data() != null &&
+        parkDoc.data()!.containsKey('services')) {
+      services = List<String>.from(parkDoc['services'] ?? []);
+    }
+    if (currentUser == null) return;
 
-      // 1) Determine initial liked state once:
-      final FirestoreService fs = FirestoreService();
+    if (!mounted) return;
+    // quick loading dialog
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) {
+        return const AlertDialog(
+          content: SizedBox(
+            height: 120,
+            child: Center(child: CircularProgressIndicator()),
+          ),
+        );
+      },
+    );
+
+    try {
+      final fs = FirestoreService();
       bool isLiked = await fs.isParkLiked(parkId);
 
-      // 2) Check‑in/out state for this park (unchanged)
-      DocumentReference activeDocRef = FirebaseFirestore.instance
+      final activeDocRef = FirebaseFirestore.instance
           .collection('parks')
           .doc(parkId)
           .collection('active_users')
           .doc(currentUser.uid);
-      DocumentSnapshot activeDoc = await activeDocRef.get();
+      final activeDoc = await activeDocRef.get();
       bool isCheckedIn = activeDoc.exists;
       DateTime? checkedInAt;
       if (isCheckedIn) {
@@ -382,21 +542,12 @@ class _MapTabState extends State<MapTab>
         }
       }
 
-      // 3) Build list of active users & their pets (unchanged)
-      DocumentReference parkRef =
+      final parkRef =
           FirebaseFirestore.instance.collection('parks').doc(parkId);
-      QuerySnapshot usersSnapshot =
-          await parkRef.collection('active_users').get();
-      print('usersSnapshot.docs.length: ${usersSnapshot.docs.length}');
-      for (var userDoc in usersSnapshot.docs) {
-        print('userDoc.id: ${userDoc.id}');
-        print('userDoc.data(): ${userDoc.data()}');
-      }
+      final usersSnapshot = await parkRef.collection('active_users').get();
       final userIds = usersSnapshot.docs.map((doc) => doc.id).toList();
 
-      List<Map<String, dynamic>> userList = [];
-
-      // Batch fetch all pets for these users
+      final List<Map<String, dynamic>> userList = [];
       if (userIds.isNotEmpty) {
         for (var i = 0; i < userIds.length; i += 10) {
           final batchIds = userIds.sublist(
@@ -406,33 +557,31 @@ class _MapTabState extends State<MapTab>
               .where('ownerId', whereIn: batchIds)
               .get();
 
-          // Map ownerId to their pets
-          Map<String, List<Map<String, dynamic>>> petsByOwner = {};
-          for (var petDoc in petsSnapshot.docs) {
+          final Map<String, List<Map<String, dynamic>>> petsByOwner = {};
+          for (final petDoc in petsSnapshot.docs) {
             final petData = petDoc.data();
-            final ownerId = petData['ownerId'];
-            petsByOwner.putIfAbsent(ownerId, () => []).add({
+            final ownerId = petData['ownerId'] as String;
+            (petsByOwner[ownerId] ??= []).add({
               ...petData,
               'petId': petDoc.id,
             });
           }
 
-          for (var userDoc in usersSnapshot.docs) {
-            final userId = userDoc.id;
-            final checkInTime =
-                (userDoc.data() as Map<String, dynamic>)['checkedInAt'];
-            final ownerPets = petsByOwner[userId] ?? [];
-            for (var pet in ownerPets) {
+          for (final ownerId in batchIds) {
+            final userDoc =
+                usersSnapshot.docs.firstWhere((d) => d.id == ownerId);
+            final checkInTime = (userDoc.data()
+                as Map<String, dynamic>)['checkedInAt'] as Timestamp?;
+            final ownerPets = petsByOwner[ownerId] ?? [];
+            for (final pet in ownerPets) {
               userList.add({
                 'petId': pet['petId'],
-                'ownerId': userId,
+                'ownerId': ownerId,
                 'petName': pet['name'] ?? 'Unknown Pet',
                 'petPhotoUrl': pet['photoUrl'] ?? '',
-                'ownerName':
-                    '', // You can batch fetch owner names too if needed
+                'ownerName': '',
                 'checkInTime': checkInTime != null
-                    ? DateFormat.jm()
-                        .format((checkInTime as Timestamp).toDate())
+                    ? DateFormat.jm().format(checkInTime.toDate())
                     : '',
               });
             }
@@ -441,18 +590,146 @@ class _MapTabState extends State<MapTab>
       }
 
       if (!mounted) return;
+      Navigator.of(context, rootNavigator: true).pop(); // close loading
 
-      // 4) Show the dialog
       showDialog(
         context: context,
         builder: (context) {
           return AlertDialog(
-            insetPadding: const EdgeInsets.symmetric(
-                horizontal: 10, vertical: 24), // Reduce horizontal padding
-            title: Text("$parkName - Pets in Park"),
+            insetPadding:
+                const EdgeInsets.symmetric(horizontal: 10, vertical: 24),
+            title: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(parkName),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    ...services.map((service) => Padding(
+                          padding: const EdgeInsets.only(right: 8.0),
+                          child: Chip(
+                            avatar: Icon(
+                              service == "Off-leash Dog Park"
+                                  ? Icons.pets
+                                  : service == "Off-leash Trail"
+                                      ? Icons.terrain
+                                      : service == "Off-leash Beach"
+                                          ? Icons.beach_access
+                                          : Icons.park,
+                              size: 18,
+                              color: Colors.green,
+                            ),
+                            label: Text(service,
+                                style: const TextStyle(fontSize: 12)),
+                            backgroundColor: Colors.green[50],
+                          ),
+                        )),
+                    // Add service button (auto-selects first available)
+                    GestureDetector(
+                      onTap: () async {
+                        final all = const [
+                          "Off-leash Trail",
+                          "Off-leash Dog Park",
+                          "Off-leash Beach"
+                        ];
+                        final options =
+                            all.where((s) => !services.contains(s)).toList();
+
+                        if (options.isEmpty) {
+                          // Nothing to add
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                  content:
+                                      Text("All services are already added.")),
+                            );
+                          }
+                          return;
+                        }
+
+                        final newService = await showDialog<String>(
+                          context: context,
+                          builder: (ctx) {
+                            String? selected = options.first; // prefill
+                            return StatefulBuilder(
+                              builder: (ctx, setState) {
+                                return AlertDialog(
+                                  title: const Text("Add Service"),
+                                  content: DropdownButtonFormField<String>(
+                                    value: selected,
+                                    items: options
+                                        .map((s) => DropdownMenuItem(
+                                              value: s,
+                                              child: Text(s),
+                                            ))
+                                        .toList(),
+                                    onChanged: (val) =>
+                                        setState(() => selected = val),
+                                  ),
+                                  actions: [
+                                    TextButton(
+                                      onPressed: () => Navigator.of(ctx).pop(),
+                                      child: const Text("Cancel"),
+                                    ),
+                                    ElevatedButton(
+                                      onPressed: () =>
+                                          Navigator.of(ctx).pop(selected),
+                                      child: const Text("Add"),
+                                    ),
+                                  ],
+                                );
+                              },
+                            );
+                          },
+                        );
+
+                        if (newService != null &&
+                            newService.isNotEmpty &&
+                            !services.contains(newService)) {
+                          services.add(newService);
+                          await FirebaseFirestore.instance
+                              .collection('parks')
+                              .doc(parkId)
+                              .update({
+                            'services': services,
+                            'updatedAt': FieldValue.serverTimestamp(),
+                          });
+
+                          // Update local cache so filters reflect immediately
+                          _parkServicesById[parkId] =
+                              List<String>.from(services);
+
+                          // Refresh dialog UI
+                          if (context.mounted) {
+                            Navigator.of(context, rootNavigator: true).pop();
+                            _showUsersInPark(
+                                parkId, parkName, parkLatitude, parkLongitude);
+                          }
+
+                          // If filters are active, reapply
+                          if (_selectedFilters.isNotEmpty) {
+                            _applyFilters();
+                          }
+                        }
+                      },
+                      child: Container(
+                        margin: const EdgeInsets.only(left: 4),
+                        decoration: BoxDecoration(
+                          color: Colors.green,
+                          borderRadius: BorderRadius.circular(16),
+                        ),
+                        padding: const EdgeInsets.all(4),
+                        child: const Icon(Icons.add,
+                            color: Colors.white, size: 18),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
             content: SizedBox(
-              width: 420, // Make the dialog wider
-              height: 500, // Optionally make it taller
+              width: 420,
+              height: 500,
               child: Column(
                 children: [
                   Expanded(
@@ -471,7 +748,7 @@ class _MapTabState extends State<MapTab>
                                 petData['petPhotoUrl'] as String? ?? '';
                             final checkIn =
                                 petData['checkInTime'] as String? ?? '';
-                            bool mine = (ownerId == currentUser.uid);
+                            final mine = (ownerId == currentUser.uid);
 
                             return ListTile(
                               leading: (petPhoto.isNotEmpty)
@@ -501,7 +778,6 @@ class _MapTabState extends State<MapTab>
                                         if (currentUser == null) return;
 
                                         if (_favoritePetIds.contains(petId)) {
-                                          // Unfriend and unfavorite
                                           await FirebaseFirestore.instance
                                               .collection('friends')
                                               .doc(currentUser.uid)
@@ -518,21 +794,20 @@ class _MapTabState extends State<MapTab>
                                             setState(() {
                                               _favoritePetIds.remove(petId);
                                             });
-                                            setStateDialog(
-                                                () {}); // <-- Update dialog UI
+                                            setStateDialog(() {});
                                           }
-                                          ScaffoldMessenger.of(context)
-                                              .showSnackBar(
-                                            const SnackBar(
-                                                content:
-                                                    Text("Friend removed.")),
-                                          );
+                                          if (context.mounted) {
+                                            ScaffoldMessenger.of(context)
+                                                .showSnackBar(const SnackBar(
+                                                    content: Text(
+                                                        "Friend removed.")));
+                                          }
                                           _fetchFavorites();
                                         } else {
-                                          // Add friend and favorite
-                                          DocumentSnapshot ownerDoc =
+                                          // Use public_profiles mirror for display name
+                                          final ownerDoc =
                                               await FirebaseFirestore.instance
-                                                  .collection('owners')
+                                                  .collection('public_profiles')
                                                   .doc(ownerId)
                                                   .get();
                                           String ownerName = "";
@@ -540,7 +815,8 @@ class _MapTabState extends State<MapTab>
                                             final data = ownerDoc.data()
                                                 as Map<String, dynamic>;
                                             ownerName =
-                                                "${data['firstName'] ?? ''} ${data['lastName'] ?? ''}"
+                                                (data['displayName'] ?? '')
+                                                    .toString()
                                                     .trim();
                                           }
                                           if (ownerName.isEmpty) {
@@ -571,14 +847,14 @@ class _MapTabState extends State<MapTab>
                                             setState(() {
                                               _favoritePetIds.add(petId);
                                             });
-                                            setStateDialog(
-                                                () {}); // <-- Update dialog UI
+                                            setStateDialog(() {});
                                           }
-                                          ScaffoldMessenger.of(context)
-                                              .showSnackBar(
-                                            const SnackBar(
-                                                content: Text("Friend added!")),
-                                          );
+                                          if (context.mounted) {
+                                            ScaffoldMessenger.of(context)
+                                                .showSnackBar(const SnackBar(
+                                                    content:
+                                                        Text("Friend added!")));
+                                          }
                                           _fetchFavorites();
                                         }
                                       },
@@ -589,14 +865,11 @@ class _MapTabState extends State<MapTab>
                       },
                     ),
                   ),
-
-                  // 5) Check‑in / Chat / Events buttons (unchanged)
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceEvenly,
                     children: [
                       StatefulBuilder(
                         builder: (context, setStateDialog) {
-                          // Initialize isProcessing with false using a ValueNotifier for proper state management
                           final isProcessing = ValueNotifier<bool>(false);
                           return ValueListenableBuilder<bool>(
                             valueListenable: isProcessing,
@@ -612,19 +885,12 @@ class _MapTabState extends State<MapTab>
                                         isProcessing.value = true;
                                         if (isCheckedIn) {
                                           await activeDocRef.delete();
-                                          await FirebaseFirestore.instance
-                                              .collection('parks')
-                                              .doc(parkId)
-                                              .update({
-                                            'userCount':
-                                                FieldValue.increment(-1)
-                                          });
-                                          ScaffoldMessenger.of(context)
-                                              .showSnackBar(
-                                            SnackBar(
-                                                content: Text(
-                                                    "Checked out of park")),
-                                          );
+                                          if (context.mounted) {
+                                            ScaffoldMessenger.of(context)
+                                                .showSnackBar(const SnackBar(
+                                                    content: Text(
+                                                        "Checked out of park")));
+                                          }
                                         } else {
                                           await _locationService
                                               .uploadUserToActiveUsersTable(
@@ -632,12 +898,12 @@ class _MapTabState extends State<MapTab>
                                             parkLongitude,
                                             parkName,
                                           );
-                                          ScaffoldMessenger.of(context)
-                                              .showSnackBar(
-                                            SnackBar(
-                                                content:
-                                                    Text("Checked in to park")),
-                                          );
+                                          if (context.mounted) {
+                                            ScaffoldMessenger.of(context)
+                                                .showSnackBar(const SnackBar(
+                                                    content: Text(
+                                                        "Checked in to park")));
+                                          }
                                         }
                                         isProcessing.value = false;
                                         if (mounted) {
@@ -697,35 +963,37 @@ class _MapTabState extends State<MapTab>
                 ],
               ),
             ),
-
-            // 6) Actions: Like/Unlike + Close
-            // … inside your AlertDialog’s actions:
             actions: [
-              StatefulBuilder(builder: (ctx, setState) {
+              StatefulBuilder(builder: (ctx, setStateLike) {
                 return TextButton.icon(
                   onPressed: () async {
                     try {
                       if (isLiked) {
                         await fs.unlikePark(parkId);
-                        ScaffoldMessenger.of(ctx).showSnackBar(
-                          const SnackBar(
-                              content: Text("Removed park from liked parks")),
-                        );
+                        if (ctx.mounted) {
+                          ScaffoldMessenger.of(ctx).showSnackBar(
+                            const SnackBar(
+                                content: Text("Removed park from liked parks")),
+                          );
+                        }
                       } else {
                         await fs.likePark(parkId);
+                        if (ctx.mounted) {
+                          ScaffoldMessenger.of(ctx).showSnackBar(
+                            const SnackBar(content: Text("Park liked!")),
+                          );
+                        }
+                      }
+                      setStateLike(() => isLiked = !isLiked);
+                    } catch (e) {
+                      if (ctx.mounted) {
                         ScaffoldMessenger.of(ctx).showSnackBar(
-                          const SnackBar(content: Text("Park liked!")),
+                          SnackBar(content: Text("Error updating like: $e")),
                         );
                       }
-                      setState(() => isLiked = !isLiked);
-                    } catch (e) {
-                      ScaffoldMessenger.of(ctx).showSnackBar(
-                        SnackBar(content: Text("Error updating like: $e")),
-                      );
                     }
                   },
                   icon: Icon(
-                    // hollow when not liked, filled when liked
                     isLiked ? Icons.thumb_up : Icons.thumb_up_outlined,
                     size: 16,
                     color: isLiked ? Colors.green : Colors.grey,
@@ -748,10 +1016,10 @@ class _MapTabState extends State<MapTab>
         },
       );
     } catch (e) {
-      print("Error showing users in park: $e");
+      if (!mounted) return;
+      Navigator.of(context, rootNavigator: true).pop();
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Error loading active users: $e")),
-      );
+          SnackBar(content: Text("Error loading active users: $e")));
     }
   }
 
@@ -761,40 +1029,36 @@ class _MapTabState extends State<MapTab>
     if (currentUser == null) return;
 
     try {
-      // First, check out from all other parks
-      _checkOutFromAllParks();
+      await _checkOutFromAllParks(); // batched
 
-      // Then check in to this park
       await _locationService.uploadUserToActiveUsersTable(
         parkLatitude,
         parkLongitude,
         park.name,
       );
 
-      // Refresh the map
       if (_finalPosition != null) {
         await _loadNearbyParks(_finalPosition!);
       }
 
-      // Show confirmation
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Checked in successfully")),
-      );
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text("Checked in successfully")));
+      }
     } catch (e) {
-      print("Error checking in: $e");
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Error checking in: $e")),
-      );
+      debugPrint("Error checking in: $e");
+      if (context.mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text("Error checking in: $e")));
+      }
     }
   }
 
-  // Handle the check-out process
   Future<void> _handleCheckOut(String parkId, BuildContext context) async {
     final currentUser = FirebaseAuth.instance.currentUser;
     if (currentUser == null) return;
 
     try {
-      // Check out from this park
       await FirebaseFirestore.instance
           .collection('parks')
           .doc(parkId)
@@ -802,55 +1066,43 @@ class _MapTabState extends State<MapTab>
           .doc(currentUser.uid)
           .delete();
 
-      await FirebaseFirestore.instance
-          .collection('parks')
-          .doc(parkId)
-          .update({'userCount': FieldValue.increment(-1)});
-
-      // Refresh the map
       if (_finalPosition != null) {
         await _loadNearbyParks(_finalPosition!);
       }
 
-      // Close the dialog
-      Navigator.of(context, rootNavigator: true).pop();
-
-      // Show confirmation
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Checked out successfully")),
-      );
+      if (context.mounted) {
+        Navigator.of(context, rootNavigator: true).pop();
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("Checked out successfully")),
+        );
+      }
     } catch (e) {
-      print("Error checking out: $e");
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Error checking out: $e")),
-      );
+      debugPrint("Error checking out: $e");
+      if (context.mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text("Error checking out: $e")));
+      }
     }
   }
 
-  // Check out from all parks the user is currently checked in to
   Future<void> _checkOutFromAllParks() async {
     final currentUser = FirebaseAuth.instance.currentUser;
     if (currentUser == null) return;
 
     try {
-      // Query only parks where the user is checked in
-      final activeUserSnaps = await FirebaseFirestore.instance
+      final snaps = await FirebaseFirestore.instance
           .collectionGroup('active_users')
           .where(FieldPath.documentId, isEqualTo: currentUser.uid)
           .get();
 
-      List<Future> futures = [];
-      for (var doc in activeUserSnaps.docs) {
+      final wb = FirebaseFirestore.instance.batch();
+      for (final doc in snaps.docs) {
         final parkDocRef = doc.reference.parent.parent;
-        if (parkDocRef != null) {
-          futures.add(doc.reference.delete());
-          futures
-              .add(parkDocRef.update({'userCount': FieldValue.increment(-1)}));
-        }
+        wb.delete(doc.reference);
       }
-      await Future.wait(futures);
+      await wb.commit();
     } catch (e) {
-      print("Error checking out from all parks: $e");
+      debugPrint('Error checking out from all parks: $e');
     }
   }
 
@@ -914,13 +1166,10 @@ class _MapTabState extends State<MapTab>
                           labelText: "Recurrence",
                           border: OutlineInputBorder(),
                         ),
-                        items: ["One Time", "Daily", "Weekly", "Monthly"]
-                            .map((String value) {
-                          return DropdownMenuItem<String>(
-                            value: value,
-                            child: Text(value),
-                          );
-                        }).toList(),
+                        items: const ["One Time", "Daily", "Weekly", "Monthly"]
+                            .map((String value) => DropdownMenuItem(
+                                value: value, child: Text(value)))
+                            .toList(),
                         onChanged: (String? newValue) {
                           setState(() {
                             selectedRecurrence = newValue;
@@ -943,15 +1192,13 @@ class _MapTabState extends State<MapTab>
                             ),
                             TextButton(
                               onPressed: () async {
-                                DateTime? date = await showDatePicker(
+                                final date = await showDatePicker(
                                   context: context,
                                   initialDate: DateTime.now(),
                                   firstDate: DateTime(2000),
                                   lastDate: DateTime(2100),
                                 );
-                                setState(() {
-                                  oneTimeDate = date;
-                                });
+                                setState(() => oneTimeDate = date);
                               },
                               child: const Text("Select Date"),
                             ),
@@ -964,7 +1211,7 @@ class _MapTabState extends State<MapTab>
                             labelText: "Select Day of Week",
                             border: OutlineInputBorder(),
                           ),
-                          items: [
+                          items: const [
                             "Monday",
                             "Tuesday",
                             "Wednesday",
@@ -972,16 +1219,12 @@ class _MapTabState extends State<MapTab>
                             "Friday",
                             "Saturday",
                             "Sunday"
-                          ].map((String day) {
-                            return DropdownMenuItem<String>(
-                              value: day,
-                              child: Text(day),
-                            );
-                          }).toList(),
+                          ]
+                              .map((String day) => DropdownMenuItem(
+                                  value: day, child: Text(day)))
+                              .toList(),
                           onChanged: (String? newValue) {
-                            setState(() {
-                              selectedWeekday = newValue;
-                            });
+                            setState(() => selectedWeekday = newValue);
                           },
                         ),
                       if (selectedRecurrence == "Monthly")
@@ -996,15 +1239,13 @@ class _MapTabState extends State<MapTab>
                             ),
                             TextButton(
                               onPressed: () async {
-                                DateTime? date = await showDatePicker(
+                                final date = await showDatePicker(
                                   context: context,
                                   initialDate: DateTime.now(),
                                   firstDate: DateTime(2000),
                                   lastDate: DateTime(2100),
                                 );
-                                setState(() {
-                                  monthlyDate = date;
-                                });
+                                setState(() => monthlyDate = date);
                               },
                               child: const Text("Select Date"),
                             ),
@@ -1022,14 +1263,12 @@ class _MapTabState extends State<MapTab>
                           ),
                           TextButton(
                             onPressed: () async {
-                              TimeOfDay? time = await showTimePicker(
+                              final time = await showTimePicker(
                                 context: context,
                                 initialTime: TimeOfDay.now(),
                               );
                               if (time != null) {
-                                setState(() {
-                                  selectedStartTime = time;
-                                });
+                                setState(() => selectedStartTime = time);
                               }
                             },
                             child: const Text("Select Start Time"),
@@ -1047,14 +1286,12 @@ class _MapTabState extends State<MapTab>
                           ),
                           TextButton(
                             onPressed: () async {
-                              TimeOfDay? time = await showTimePicker(
+                              final time = await showTimePicker(
                                 context: context,
                                 initialTime: TimeOfDay.now(),
                               );
                               if (time != null) {
-                                setState(() {
-                                  selectedEndTime = time;
-                                });
+                                setState(() => selectedEndTime = time);
                               }
                             },
                             child: const Text("Select End Time"),
@@ -1072,14 +1309,13 @@ class _MapTabState extends State<MapTab>
                           const SizedBox(width: 12),
                           ElevatedButton(
                             onPressed: () async {
-                              String eventName =
-                                  eventNameController.text.trim();
-                              String eventDesc =
-                                  eventDescController.text.trim();
+                              final eventName = eventNameController.text.trim();
+                              final eventDesc = eventDescController.text.trim();
                               if (eventName.isEmpty ||
                                   selectedStartTime == null ||
                                   selectedEndTime == null ||
                                   selectedRecurrence == null) {
+                                if (!mounted) return;
                                 ScaffoldMessenger.of(context).showSnackBar(
                                   const SnackBar(
                                       content: Text(
@@ -1089,6 +1325,7 @@ class _MapTabState extends State<MapTab>
                               }
                               if (selectedRecurrence == "One Time" &&
                                   oneTimeDate == null) {
+                                if (!mounted) return;
                                 ScaffoldMessenger.of(context).showSnackBar(
                                   const SnackBar(
                                       content: Text(
@@ -1098,6 +1335,7 @@ class _MapTabState extends State<MapTab>
                               }
                               if (selectedRecurrence == "Weekly" &&
                                   selectedWeekday == null) {
+                                if (!mounted) return;
                                 ScaffoldMessenger.of(context).showSnackBar(
                                   const SnackBar(
                                       content: Text(
@@ -1107,6 +1345,7 @@ class _MapTabState extends State<MapTab>
                               }
                               if (selectedRecurrence == "Monthly" &&
                                   monthlyDate == null) {
+                                if (!mounted) return;
                                 ScaffoldMessenger.of(context).showSnackBar(
                                   const SnackBar(
                                       content: Text(
@@ -1117,7 +1356,7 @@ class _MapTabState extends State<MapTab>
 
                               DateTime? eventStartDateTime;
                               DateTime? eventEndDateTime;
-                              DateTime now = DateTime.now();
+                              final now = DateTime.now();
                               if (selectedRecurrence == "One Time") {
                                 eventStartDateTime = DateTime(
                                   oneTimeDate!.year,
@@ -1167,6 +1406,7 @@ class _MapTabState extends State<MapTab>
 
                               if (!eventEndDateTime
                                   .isAfter(eventStartDateTime)) {
+                                if (!mounted) return;
                                 ScaffoldMessenger.of(context).showSnackBar(
                                   const SnackBar(
                                       content: Text(
@@ -1175,7 +1415,7 @@ class _MapTabState extends State<MapTab>
                                 return;
                               }
 
-                              Map<String, dynamic> eventData = {
+                              final eventData = <String, dynamic>{
                                 'parkId': parkId,
                                 'parkLatitude': parkLatitude,
                                 'parkLongitude': parkLongitude,
@@ -1207,6 +1447,7 @@ class _MapTabState extends State<MapTab>
                                   .collection('events')
                                   .add(eventData);
 
+                              if (!mounted) return;
                               Navigator.of(context).pop();
                               ScaffoldMessenger.of(context).showSnackBar(
                                 SnackBar(
@@ -1232,7 +1473,7 @@ class _MapTabState extends State<MapTab>
     final firestore = FirebaseFirestore.instance;
     final parkId = generateParkID(park.latitude, park.longitude, park.name);
 
-    // Only check Firestore if we haven't seen this parkId before
+    // Create park doc once if missing (guarded by in-memory set)
     if (!_existingParkIds.contains(parkId)) {
       final parkRef = firestore.collection('parks').doc(parkId);
       final parkSnap = await parkRef.get();
@@ -1251,13 +1492,12 @@ class _MapTabState extends State<MapTab>
     return Marker(
       markerId: MarkerId(parkId),
       position: LatLng(park.latitude, park.longitude),
-      onTap: () async {
-        // No need to check Firestore again, just use the cache
+      onTap: () {
         _showUsersInPark(parkId, park.name, park.latitude, park.longitude);
       },
       infoWindow: InfoWindow(
         title: park.name,
-        onTap: () async {
+        onTap: () {
           _showUsersInPark(parkId, park.name, park.latitude, park.longitude);
         },
       ),
@@ -1265,34 +1505,30 @@ class _MapTabState extends State<MapTab>
   }
 
   Future<void> _searchNearbyParks() async {
-    setState(() {
-      _isSearching = true;
-    });
+    setState(() => _isSearching = true);
     try {
-      List<Park> nearbyParks = await _locationService.findNearbyParks(
+      final nearbyParks = await _locationService.findNearbyParks(
         _currentMapCenter.latitude,
         _currentMapCenter.longitude,
       );
-      Map<String, Marker> newMarkersMap = {};
-      for (var park in nearbyParks) {
-        final marker = await _createParkMarker(park);
-        newMarkersMap[park.id] = marker;
-      }
-      setState(() {
-        _markersMap.addAll(newMarkersMap);
-        _isSearching = false;
-      });
+      _allParks = nearbyParks;
+
+      await _applyMarkerDiff(nearbyParks);
+      await _hydrateServicesForParks(nearbyParks);
+      _rebuildParksListeners();
+
+      if (!mounted) return;
+      setState(() => _isSearching = false);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text("Found ${nearbyParks.length} parks nearby")),
       );
     } catch (e) {
-      print("Error searching nearby parks: $e");
-      setState(() {
-        _isSearching = false;
-      });
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Error searching for parks: $e")),
-      );
+      debugPrint("Error searching nearby parks: $e");
+      if (mounted) {
+        setState(() => _isSearching = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text("Error searching for parks: $e")));
+      }
     }
   }
 
@@ -1300,19 +1536,18 @@ class _MapTabState extends State<MapTab>
     final currentUser = FirebaseAuth.instance.currentUser;
     if (currentUser == null) return;
     try {
-      DocumentSnapshot ownerDoc = await FirebaseFirestore.instance
-          .collection('owners')
+      // Pull friendly display name from public_profiles mirror
+      final ownerDoc = await FirebaseFirestore.instance
+          .collection('public_profiles')
           .doc(friendUserId)
           .get();
       String ownerName = "";
       if (ownerDoc.exists) {
         final data = ownerDoc.data() as Map<String, dynamic>;
-        ownerName =
-            "${data['firstName'] ?? ''} ${data['lastName'] ?? ''}".trim();
+        ownerName = (data['displayName'] ?? '').toString().trim();
       }
-      if (ownerName.isEmpty) {
-        ownerName = friendUserId;
-      }
+      if (ownerName.isEmpty) ownerName = friendUserId;
+
       await FirebaseFirestore.instance
           .collection('friends')
           .doc(currentUser.uid)
@@ -1332,15 +1567,17 @@ class _MapTabState extends State<MapTab>
         'petId': petId,
         'addedAt': FieldValue.serverTimestamp(),
       });
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Friend added!")),
-      );
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text("Friend added!")));
+      }
       _fetchFavorites();
     } catch (e) {
-      print("Error adding friend: $e");
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Error adding friend.")),
-      );
+      debugPrint("Error adding friend: $e");
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text("Error adding friend.")));
+      }
     }
   }
 
@@ -1360,77 +1597,24 @@ class _MapTabState extends State<MapTab>
           .collection('pets')
           .doc(petId)
           .delete();
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Friend removed.")),
-      );
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text("Friend removed.")));
+      }
       _fetchFavorites();
     } catch (e) {
-      print("Error unfriending: $e");
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Error removing friend.")),
-      );
+      debugPrint("Error unfriending: $e");
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text("Error removing friend.")));
+      }
     }
-  }
-
-  void _confirmUnfriend(String friendUserId, String petId) {
-    showDialog(
-      context: context,
-      builder: (ctx) {
-        return AlertDialog(
-          title: const Text("Unfriend"),
-          content: const Text("Are you sure you want to unfriend?"),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(ctx).pop(),
-              child: const Text("No"),
-            ),
-            TextButton(
-              onPressed: () {
-                Navigator.of(ctx).pop();
-                _unfriend(friendUserId, petId);
-              },
-              child: const Text("Yes"),
-            ),
-          ],
-        );
-      },
-    );
   }
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    // If the tab is active and we're not already searching
-    if (mounted && !_isSearching && _finalPosition != null) {
-      setState(() {
-        _isSearching = true;
-      });
-      _loadNearbyParks(_finalPosition!);
-    }
-  }
-
-  void _listenToParkUpdates() {
-    FirebaseFirestore.instance
-        .collection('parks')
-        .snapshots()
-        .listen((snapshot) {
-      for (var parkDoc in snapshot.docs) {
-        final parkId = parkDoc.id;
-        if (_markersMap.containsKey(parkId)) {
-          _getUserCountInPark(parkId).then((count) {
-            final oldMarker = _markersMap[parkId]!;
-            final updatedMarker = oldMarker.copyWith(
-              infoWindowParam: InfoWindow(
-                title: oldMarker.infoWindow.title,
-                snippet: 'Users: $count',
-              ),
-            );
-            _markersMap[parkId] = updatedMarker;
-            setState(() {});
-          });
-        }
-      }
-    });
+    // Removed extra fetching here to avoid duplicate loads.
   }
 
   @override
@@ -1454,7 +1638,6 @@ class _MapTabState extends State<MapTab>
       );
     }
 
-    // Once location is ready, show the map
     return Container(
       decoration: const BoxDecoration(
         gradient: LinearGradient(
@@ -1463,51 +1646,186 @@ class _MapTabState extends State<MapTab>
           end: Alignment.bottomRight,
         ),
       ),
-      child: Stack(
+      child: Column(
         children: [
-          GoogleMap(
-            initialCameraPosition: CameraPosition(
-              target: _finalPosition!,
-              zoom: 18,
-            ),
-            mapType: MapType.normal,
-            myLocationEnabled: true,
-            myLocationButtonEnabled: true,
-            markers: _markersMap.values.toSet(),
-            onMapCreated: _onMapCreated,
-            onCameraMove: _onCameraMove,
-          ),
-          Positioned(
-            bottom: 90,
-            right: 10,
-            child: FloatingActionButton.extended(
-              onPressed: _isSearching ? null : _searchNearbyParks,
-              label: _isSearching
-                  ? Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: const [
-                        SizedBox(
-                          width: 20,
-                          height: 20,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            valueColor:
-                                AlwaysStoppedAnimation<Color>(Colors.white),
-                          ),
-                        ),
-                        SizedBox(width: 10),
-                        Text("Searching..."),
-                      ],
-                    )
-                  : const Text("Search Nearby Parks"),
-              icon: _isSearching ? null : const Icon(Icons.search),
-              backgroundColor: const Color(0xFF567D46),
-              foregroundColor: Colors.white,
-              elevation: 4,
+          // Map + controls
+          Expanded(
+            child: Stack(
+              children: [
+                GoogleMap(
+                  onMapCreated: _onMapCreated,
+                  onCameraMove: _onCameraMove,
+                  initialCameraPosition: CameraPosition(
+                    target: _currentMapCenter,
+                    zoom: 14,
+                  ),
+                  markers: _markersMap.values.toSet(),
+                  myLocationEnabled: true,
+                  myLocationButtonEnabled: false,
+                  compassEnabled: true,
+                ),
+                // Floating modern filter bar
+                _buildFilterBar(),
+
+                if (_isSearching)
+                  const Center(child: CircularProgressIndicator()),
+                // Center-on-me button
+                Positioned(
+                  bottom: 150,
+                  right: 16,
+                  child: FloatingActionButton(
+                    backgroundColor: Colors.white,
+                    foregroundColor: Colors.green,
+                    heroTag: 'center_me',
+                    onPressed: _centerOnUser,
+                    child: const Icon(Icons.my_location),
+                  ),
+                ),
+                // Search button
+                Positioned(
+                  bottom: 80,
+                  right: 16,
+                  child: FloatingActionButton(
+                    backgroundColor: Colors.green,
+                    heroTag: 'search_map',
+                    onPressed: _searchNearbyParks,
+                    child: const Icon(Icons.search, color: Colors.white),
+                  ),
+                ),
+              ],
             ),
           ),
         ],
       ),
     );
+  }
+
+  // ---------- Modern floating filter bar ----------
+  Widget _buildFilterBar() {
+    final hasSelection = _selectedFilters.isNotEmpty;
+
+    return SafeArea(
+      child: Align(
+        alignment: Alignment.topCenter,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(22),
+            child: BackdropFilter(
+              filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
+              child: Container(
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.85),
+                  borderRadius: BorderRadius.circular(22),
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Colors.black12,
+                      blurRadius: 12,
+                      offset: Offset(0, 4),
+                    ),
+                  ],
+                ),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                child: SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: Row(
+                    children: [
+                      ..._filterOptions.map(_modernFilterChip),
+                      if (hasSelection) ...[
+                        const SizedBox(width: 6),
+                        TextButton.icon(
+                          style: TextButton.styleFrom(
+                            foregroundColor: Colors.green.shade800,
+                            padding: const EdgeInsets.symmetric(horizontal: 10),
+                            shape: const StadiumBorder(),
+                          ),
+                          onPressed: () {
+                            setState(() => _selectedFilters.clear());
+                            _applyFilters();
+                          },
+                          icon: const Icon(Icons.close_rounded, size: 16),
+                          label: const Text('Clear'),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _modernFilterChip(_FilterOption opt) {
+    final selected = _selectedFilters.contains(opt.value);
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      child: FilterChip(
+        label: Text(opt.label),
+        avatar: Icon(
+          opt.icon,
+          size: 18,
+          color: selected ? Colors.white : Colors.green.shade700,
+        ),
+        selected: selected,
+        onSelected: (val) {
+          setState(() {
+            if (val) {
+              _selectedFilters.add(opt.value);
+            } else {
+              _selectedFilters.remove(opt.value);
+            }
+          });
+          _applyFilters();
+        },
+        showCheckmark: false,
+        labelStyle: TextStyle(
+          fontSize: 13,
+          fontWeight: FontWeight.w600,
+          color: selected ? Colors.white : Colors.green.shade900,
+        ),
+        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        shape: StadiumBorder(
+          side: BorderSide(
+            color: selected ? Colors.green.shade600 : Colors.green.shade200,
+            width: 1.2,
+          ),
+        ),
+        selectedColor: Colors.green.shade600,
+        backgroundColor: Colors.white,
+        elevation: 0,
+        pressElevation: 0,
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      ),
+    );
+  }
+
+  void _applyFilters() async {
+    // Determine which parks match the active filters using the service cache
+    final filtered = _selectedFilters.isEmpty
+        ? _allParks
+        : _allParks.where((p) {
+            final parkId = generateParkID(p.latitude, p.longitude, p.name);
+            final svcs = _parkServicesById[parkId] ?? p.services ?? const [];
+            return svcs.any((s) => _selectedFilters.contains(s));
+          }).toList();
+
+    await _applyMarkerDiff(filtered);
+    _rebuildParksListeners();
+  }
+}
+
+// -------- Helpers --------
+
+extension _ChunkExt<T> on List<T> {
+  List<List<T>> chunked(int size) {
+    final out = <List<T>>[];
+    for (var i = 0; i < length; i += size) {
+      out.add(sublist(i, i + size > length ? length : i + size));
+    }
+    return out;
   }
 }

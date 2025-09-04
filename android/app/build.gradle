@@ -1,3 +1,5 @@
+
+
 plugins {
     id "com.android.application"
     id "kotlin-android"
@@ -6,8 +8,14 @@ plugins {
     id 'com.google.gms.google-services'
 }
 
+def keyProperties = new Properties()
+def keyPropertiesFile = rootProject.file('key.properties')
+if (keyPropertiesFile.exists()) {
+    keyProperties.load(new FileInputStream(keyPropertiesFile))
+}
+
 android {
-    namespace "com.example.petcalendar" // Ensure this matches your package name
+    namespace "ca.inthepark" // Ensure this matches your package name
     compileSdkVersion 35
     ndkVersion = flutter.ndkVersion
 
@@ -27,17 +35,26 @@ android {
     }
 
     defaultConfig {
-        applicationId "pet.calendar"
+        applicationId "ca.inthepark"
         minSdkVersion 23
         targetSdkVersion 35
         versionCode 1
         versionName "1.0"
     }
 
+    signingConfigs {
+        release {
+            storeFile file(keyProperties['storeFile'])
+            storePassword keyProperties['storePassword']
+            keyAlias keyProperties['keyAlias']
+            keyPassword keyProperties['keyPassword']
+        }
+    }
+
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            signingConfig signingConfigs.debug
+            signingConfig signingConfigs.release
+            // ... other release build type configurations
         }
     }
 }
@@ -72,4 +89,3 @@ flutter {
     source "../.."
 }
 
-apply plugin: 'com.google.gms.google-services'

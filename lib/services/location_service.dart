@@ -1,19 +1,19 @@
+import 'dart:convert';
 import 'dart:math';
 
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:inthepark/utils/utils.dart';
-import 'package:location/location.dart' as loc;
-import 'package:http/http.dart' as http;
-import 'dart:convert';
-import '../models/park_model.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:http/http.dart' as http;
+import 'package:inthepark/utils/utils.dart';
+import 'package:inthepark/models/park_model.dart';
+import 'package:location/location.dart' as loc;
+import 'package:shared_preferences/shared_preferences.dart';
 
 class LocationService {
   final loc.Location _location = loc.Location();
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
-  final String _googlePlacesApiKey; // Your Google Places API key
+  final String _googlePlacesApiKey;
 
   LocationService(this._googlePlacesApiKey);
 
@@ -32,39 +32,44 @@ class LocationService {
 
     _location.changeSettings(
         interval: 5000, accuracy: loc.LocationAccuracy.high);
-    _location.enableBackgroundMode(enable: true);
+    try {
+      await _location.enableBackgroundMode(enable: true);
+    } catch (_) {
+      // Background mode not supported / not granted – ignore gracefully.
+    }
   }
 
-  /// Finds parks within a 500m radius of the user's location.
-  /// Returns a list of Park objects.
+  /// Google Places Nearby Search for parks within ~500m.
   Future<List<Park>> findNearbyParks(double userLat, double userLng) async {
     const String baseUrl =
         "https://maps.googleapis.com/maps/api/place/nearbysearch/json";
     const String type = "park";
-    const int radius = 500; // Search radius in meters for finding nearby parks
+    const int radius = 500;
 
     final String url =
         "$baseUrl?location=$userLat,$userLng&radius=$radius&type=$type&key=$_googlePlacesApiKey";
-    List<Park> parks = [];
 
+    final parks = <Park>[];
     try {
       final response = await http.get(Uri.parse(url));
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
-        if (data['status'] == 'OK' && data['results'].isNotEmpty) {
-          for (var place in data['results']) {
-            // Create a Park instance from the API data.
-            Park park = Park(
-              id: generateParkID(
-                place['geometry']['location']['lat'],
-                place['geometry']['location']['lng'],
-                place['name'],
-              ),
-              name: place['name'],
-              latitude: place['geometry']['location']['lat'],
-              longitude: place['geometry']['location']['lng'],
+        if (data['status'] == 'OK' && (data['results'] as List).isNotEmpty) {
+          for (final place in data['results']) {
+            final name = (place['name'] ?? '').toString();
+            final lat =
+                (place['geometry']['location']['lat'] as num).toDouble();
+            final lng =
+                (place['geometry']['location']['lng'] as num).toDouble();
+
+            final park = Park(
+              id: generateParkID(lat, lng, name),
+              name: name,
+              latitude: lat,
+              longitude: lng,
             );
-            // Check if a park with the same name (ignoring case) is already added.
+
+            // Dedup by name (case-insensitive)
             if (parks
                 .any((p) => p.name.toLowerCase() == park.name.toLowerCase())) {
               continue;
@@ -74,16 +79,18 @@ class LocationService {
         }
       }
     } catch (e) {
-      print("Error finding nearby parks: $e");
+      // Network/parse errors are non-fatal for UI – just return what we have.
+      // print("Error finding nearby parks: $e");
     }
     return parks;
   }
 
+  /// Is the user currently within ~150m of a park? Returns the closest match.
   Future<Park?> isUserAtPark(double userLat, double userLng) async {
     const String baseUrl =
         "https://maps.googleapis.com/maps/api/place/nearbysearch/json";
     const String type = "park";
-    const int radius = 150; // or your preferred radius
+    const int radius = 150;
 
     final String url =
         "$baseUrl?location=$userLat,$userLng&radius=$radius&type=$type&key=$_googlePlacesApiKey";
@@ -92,43 +99,49 @@ class LocationService {
       final response = await http.get(Uri.parse(url));
       if (response.statusCode == 200) {
         final data = json.decode(response.body);
-        if (data['status'] == 'OK' && data['results'].isNotEmpty) {
+        if (data['status'] == 'OK' && (data['results'] as List).isNotEmpty) {
           double minDistance = double.infinity;
           Map<String, dynamic>? closestPlace;
-          for (var place in data['results']) {
-            final parkLat = place['geometry']['location']['lat'];
-            final parkLng = place['geometry']['location']['lng'];
+
+          for (final place in data['results']) {
+            final parkLat =
+                (place['geometry']['location']['lat'] as num).toDouble();
+            final parkLng =
+                (place['geometry']['location']['lng'] as num).toDouble();
             final distance =
                 _calculateDistance(userLat, userLng, parkLat, parkLng);
             if (distance < minDistance) {
               minDistance = distance;
-              closestPlace = place;
+              closestPlace = place as Map<String, dynamic>;
             }
           }
+
           if (closestPlace != null) {
+            final name = (closestPlace['name'] ?? '').toString();
+            final lat =
+                (closestPlace['geometry']['location']['lat'] as num).toDouble();
+            final lng =
+                (closestPlace['geometry']['location']['lng'] as num).toDouble();
+
             return Park(
-              id: generateParkID(
-                closestPlace['geometry']['location']['lat'],
-                closestPlace['geometry']['location']['lng'],
-                closestPlace['name'],
-              ),
-              name: closestPlace['name'],
-              latitude: closestPlace['geometry']['location']['lat'],
-              longitude: closestPlace['geometry']['location']['lng'],
+              id: generateParkID(lat, lng, name),
+              name: name,
+              latitude: lat,
+              longitude: lng,
             );
           }
         }
       }
     } catch (e) {
-      print("Error determining if user is at park: $e");
+      // print("Error determining if user is at park: $e");
     }
     return null;
   }
 
-// Helper function to calculate distance between two lat/lng points in meters
+  // Haversine distance in meters
   double _calculateDistance(
       double lat1, double lng1, double lat2, double lng2) {
-    const earthRadius = 6371000; // meters
+    const earthRadius = 6371000.0;
     final dLat = _deg2rad(lat2 - lat1);
     final dLng = _deg2rad(lng2 - lng1);
     final a = sin(dLat / 2) * sin(dLat / 2) +
@@ -140,21 +153,25 @@ class LocationService {
     return earthRadius * c;
   }
 
-  double _deg2rad(double deg) => deg * (pi / 180);
+  double _deg2rad(double deg) => deg * (pi / 180.0);
 
-  /// Ensures that a park document exists in Firestore.
+  /// Ensure a park doc exists with only safe, allow-listed fields.
   Future<void> ensureParkExists(Park park) async {
     final parkRef = _firestore.collection('parks').doc(park.id);
-    final parkDoc = await parkRef.get();
-
-    if (!parkDoc.exists) {
-      // Park doesn't exist, create it using park.toJson()
-      await parkRef.set(park.toJson());
+    final snap = await parkRef.get();
+    if (!snap.exists) {
+      await parkRef.set({
+        'id': park.id,
+        'name': park.name,
+        'latitude': park.latitude,
+        'longitude': park.longitude,
+        'createdAt': FieldValue.serverTimestamp(),
+      });
     }
   }
 
-  /// Uploads the current user's check-in data to the active_users collection of the specified park.
-  /// Ensures that the park document exists before updating the userCount.
+  /// Check the current user into a park (single-check-in).
+  /// Cloud Functions increment/decrement `userCount`.
   Future<void> uploadUserToActiveUsersTable(
     double lat,
     double lng,
@@ -162,82 +179,69 @@ class LocationService {
   ) async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
+    final uid = user.uid;
 
-    // Always generate the park ID using name, lat, lng
+    final db = FirebaseFirestore.instance;
     final parkId = generateParkID(lat, lng, parkName);
 
-    // Check out from all other parks first
-    final parksSnapshot = await _firestore.collection('parks').get();
-    for (var parkDoc in parksSnapshot.docs) {
-      final otherParkId = parkDoc.id;
-      if (otherParkId != parkId) {
-        final userRef = _firestore
-            .collection('parks')
-            .doc(otherParkId)
-            .collection('active_users')
-            .doc(user.uid);
-        final userDoc = await userRef.get();
-        if (userDoc.exists) {
-          await userRef.delete();
-          // Decrement userCount if needed
-          await _firestore.collection('parks').doc(otherParkId).update({
-            'userCount': FieldValue.increment(-1),
-          });
-        }
-      }
-    }
-
-    final parkRef = _firestore.collection('parks').doc(parkId);
-    final parkDoc = await parkRef.get();
-
-    if (!parkDoc.exists) {
-      // Create the park document with minimal data if it doesn't exist.
-      await parkRef.set({
-        'id': parkId,
-        'name': parkName,
-        'latitude': lat,
-        'longitude': lng,
-        'userCount': 0,
-        'createdAt': FieldValue.serverTimestamp(),
-      });
-    }
-
-    // Add the user to the active_users subcollection.
-    final userRef = parkRef.collection('active_users').doc(user.uid);
-    await userRef.set({
-      'uid': user.uid,
+    // 1) Ensure park exists (safe fields only)
+    await db.collection('parks').doc(parkId).set({
+      'id': parkId,
+      'name': parkName,
       'latitude': lat,
       'longitude': lng,
-      'timestamp': FieldValue.serverTimestamp(),
+      'createdAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+
+    // 2) Single-check-in: delete any existing active_users/{uid} anywhere
+    final snaps = await db
+        .collectionGroup('active_users')
+        .where(FieldPath.documentId, isEqualTo: uid)
+        .get();
+
+    if (snaps.docs.isNotEmpty) {
+      final batch = db.batch();
+      for (final d in snaps.docs) {
+        batch.delete(d.reference);
+      }
+      await batch.commit();
+      // onDocumentDeleted CF will decrement userCount
+    }
+
+    // 3) Create/overwrite check-in here – ONLY the allowed field(s)
+    await db
+        .collection('parks')
+        .doc(parkId)
+        .collection('active_users')
+        .doc(uid)
+        .set({
       'checkedInAt': FieldValue.serverTimestamp(),
     });
 
-    // Increment the park's userCount field.
-    await parkRef.update({'userCount': FieldValue.increment(1)});
+    // Do NOT touch userCount here (server maintains it).
   }
 
-  /// Removes the current user from the active_users collection of the specified park.
+  /// Uncheck the current user from a specific park.
+  /// Cloud Functions will decrement `userCount`.
   Future<void> removeUserFromActiveUsersTable(String parkId) async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
 
-    final parkRef = _firestore.collection('parks').doc(parkId);
-    final userRef = parkRef.collection('active_users').doc(user.uid);
+    final userRef = _firestore
+        .collection('parks')
+        .doc(parkId)
+        .collection('active_users')
+        .doc(user.uid);
 
     await userRef.delete();
-
-    // Only update the userCount if the park document exists.
-    final parkDoc = await parkRef.get();
-    if (parkDoc.exists) {
-      await parkRef.update({'userCount': FieldValue.increment(-1)});
-    }
+    // No client-side userCount updates.
   }
 
   Future<loc.LocationData> getCurrentLocation() async {
     return await _location.getLocation();
   }
 
-  /// Save user location and timestamp to cache
+  /// Cache user location
   Future<void> saveUserLocation(double latitude, double longitude) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setDouble('last_latitude', latitude);
@@ -246,29 +250,33 @@ class LocationService {
         'last_location_timestamp', DateTime.now().millisecondsSinceEpoch);
   }
 
-  /// Get cached user location if not too old
+  /// Read cached user location if recent
   Future<LatLng?> getSavedUserLocation({int maxAgeSeconds = 300}) async {
     final prefs = await SharedPreferences.getInstance();
     final latitude = prefs.getDouble('last_latitude');
     final longitude = prefs.getDouble('last_longitude');
     final timestamp = prefs.getInt('last_location_timestamp');
+
     if (latitude != null && longitude != null && timestamp != null) {
-      final age = DateTime.now().millisecondsSinceEpoch - timestamp;
-      if (age < maxAgeSeconds * 1000) {
+      final ageMs = DateTime.now().millisecondsSinceEpoch - timestamp;
+      if (ageMs < maxAgeSeconds * 1000) {
         return LatLng(latitude, longitude);
       }
     }
     return null;
   }
 
-  /// Get user location, using cache if recent, otherwise request new
+  /// Get user location, prefer cache, else read & cache fresh
   Future<LatLng?> getUserLocationOrCached({int maxAgeSeconds = 300}) async {
-    LatLng? cached = await getSavedUserLocation(maxAgeSeconds: maxAgeSeconds);
+    final cached = await getSavedUserLocation(maxAgeSeconds: maxAgeSeconds);
     if (cached != null) return cached;
 
     final locData = await getCurrentLocation();
-    await saveUserLocation(locData.latitude!, locData.longitude!);
-    return LatLng(locData.latitude!, locData.longitude!);
-      return null;
+    final lat = locData.latitude;
+    final lng = locData.longitude;
+    if (lat == null || lng == null) return null;
+
+    await saveUserLocation(lat, lng);
+    return LatLng(lat, lng);
   }
 }

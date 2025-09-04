@@ -6,8 +6,6 @@ import 'package:firebase_auth/firebase_auth.dart';
 // import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_html/flutter_html.dart';
-import 'package:inthepark/legal/terms_conditions.dart';
-import 'package:inthepark/legal/privacy_policy.dart';
 import 'package:inthepark/screens/wait_screen.dart';
 
 class AccountCreationScreen extends StatefulWidget {
@@ -97,7 +95,8 @@ class _AccountCreationScreenState extends State<AccountCreationScreen> {
   // Future<void> createAccountWithApple(BuildContext context) async { ... }
 
   void showDocumentHtml(
-      BuildContext context, String title, String htmlContent) {
+      BuildContext context, String title, String filePath) async {
+    final htmlContent = await rootBundle.loadString(filePath); // Load HTML file
     showDialog(
       context: context,
       builder: (BuildContext context) {
@@ -106,7 +105,7 @@ class _AccountCreationScreenState extends State<AccountCreationScreen> {
           content: SizedBox(
             width: double.maxFinite,
             child: SingleChildScrollView(
-              child: Html(data: htmlContent),
+              child: Html(data: htmlContent), // Render HTML content
             ),
           ),
           actions: [
@@ -284,7 +283,7 @@ class _AccountCreationScreenState extends State<AccountCreationScreen> {
                                 ..onTap = () => showDocumentHtml(
                                       context,
                                       "Terms and Conditions",
-                                      termsConditionsHtml,
+                                      "lib/legal/termsandconditions.html", // Path to the HTML file
                                     ),
                             ),
                             const TextSpan(text: " and "),
@@ -298,7 +297,7 @@ class _AccountCreationScreenState extends State<AccountCreationScreen> {
                                 ..onTap = () => showDocumentHtml(
                                       context,
                                       "Privacy Policy",
-                                      privacyPolicyHtml,
+                                      "lib/legal/privacy.html",
                                     ),
                             ),
                             const TextSpan(text: " document."),

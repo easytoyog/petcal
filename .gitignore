@@ -43,3 +43,6 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Firebase/Google credentials
+pet-app-38a26-firebase-adminsdk-4l7ed-bab7e02cde.json

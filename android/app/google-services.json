@@ -1,10 +1,47 @@
 {
   "project_info": {
     "project_number": "1096202742656",
+    "firebase_url": "https://pet-app-38a26-default-rtdb.firebaseio.com",
     "project_id": "pet-app-38a26",
     "storage_bucket": "pet-app-38a26.firebasestorage.app"
   },
   "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1096202742656:android:66a57520ca86ce3c312f65",
+        "android_client_info": {
+          "package_name": "ca.inthepark"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "1096202742656-0e0i9a3drsvgnek7ksb7g715n3egqts7.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAL8wi_j77BwBg9ar9sm8yp-FbDktBauYo"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "1096202742656-0e0i9a3drsvgnek7ksb7g715n3egqts7.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "1096202742656-9g1lkmgd1cubha6atkumugdan3bq6s2k.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.example.petcalendar"
+              }
+            }
+          ]
+        }
+      }
+    },
     {
       "client_info": {
         "mobilesdk_app_id": "1:1096202742656:android:525c5938d1b96b13312f65",
@@ -29,6 +66,13 @@
             {
               "client_id": "1096202742656-0e0i9a3drsvgnek7ksb7g715n3egqts7.apps.googleusercontent.com",
               "client_type": 3
+            },
+            {
+              "client_id": "1096202742656-9g1lkmgd1cubha6atkumugdan3bq6s2k.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.example.petcalendar"
+              }
             }
           ]
         }
