@@ -15,6 +15,14 @@
       },
       "oauth_client": [
         {
+          "client_id": "1096202742656-o220uou5gkjnd957934m0ouejc98vj5j.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "ca.inthepark",
+            "certificate_hash": "36774e410b7856698f6011cde2d6d94274b4eb96"
+          }
+        },
+        {
           "client_id": "1096202742656-0e0i9a3drsvgnek7ksb7g715n3egqts7.apps.googleusercontent.com",
           "client_type": 3
         }
@@ -32,10 +40,10 @@
               "client_type": 3
             },
             {
-              "client_id": "1096202742656-9g1lkmgd1cubha6atkumugdan3bq6s2k.apps.googleusercontent.com",
+              "client_id": "1096202742656-50sb9vn1en4t2okq74ngchdl9kkaveeo.apps.googleusercontent.com",
               "client_type": 2,
               "ios_info": {
-                "bundle_id": "com.example.petcalendar"
+                "bundle_id": "ca.inthepark"
               }
             }
           ]
@@ -68,10 +76,10 @@
               "client_type": 3
             },
             {
-              "client_id": "1096202742656-9g1lkmgd1cubha6atkumugdan3bq6s2k.apps.googleusercontent.com",
+              "client_id": "1096202742656-50sb9vn1en4t2okq74ngchdl9kkaveeo.apps.googleusercontent.com",
               "client_type": 2,
               "ios_info": {
-                "bundle_id": "com.example.petcalendar"
+                "bundle_id": "ca.inthepark"
               }
             }
           ]

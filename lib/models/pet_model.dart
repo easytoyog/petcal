@@ -1,53 +1,76 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 
 class Pet {
-  final String id;
-  final String ownerId;
-  final String name;
-  final String photoUrl;
-  final String? breed;        // Optional
-  final String? temperament;  // Optional
-  final double? weight;       // Optional
-  final DateTime? birthday;   // Optional
+  final String id;          // Firestore doc id (not stored in map)
+  final String ownerId;     // required
+  final String name;        // required, non-empty
+  final String? photoUrl;   // optional
+  final String? breed;      // optional
+  final String? temperament;// optional
+  final double? weight;     // optional
+  final DateTime? birthday; // optional
 
   Pet({
     required this.id,
     required this.ownerId,
     required this.name,
-    required this.photoUrl,
+    this.photoUrl,
     this.breed,
     this.temperament,
     this.weight,
     this.birthday,
   });
 
-  // Factory method to create a Pet instance from Firestore document
+  /// Robust factory from Firestore
   factory Pet.fromFirestore(DocumentSnapshot doc) {
-    final data = doc.data() as Map<String, dynamic>;
+    final data = (doc.data() as Map<String, dynamic>? ?? {});
     return Pet(
       id: doc.id,
-      ownerId: data['ownerId'] ?? '',
-      name: data['name'] ?? '',
-      photoUrl: data['photoUrl'] ?? '',
-      breed: data['breed'],
-      temperament: data['temperament'],
-      weight: data['weight'] != null ? (data['weight'] as num).toDouble() : null,
-      birthday: data['birthday'] != null
+      ownerId: (data['ownerId'] ?? '') as String,
+      name: (data['name'] ?? '') as String,
+      photoUrl: data['photoUrl'] as String?,
+      breed: data['breed'] as String?,
+      temperament: data['temperament'] as String?,
+      weight: (data['weight'] is num) ? (data['weight'] as num).toDouble() : null,
+      birthday: (data['birthday'] is Timestamp)
           ? (data['birthday'] as Timestamp).toDate()
           : null,
     );
   }
 
-  // Convert Pet instance to Firestore-friendly map
+  /// Firestore map: OMIT optional nulls so rules don’t see null values
   Map<String, dynamic> toMap() {
-    return {
+    final map = <String, dynamic>{
       'ownerId': ownerId,
       'name': name,
-      'photoUrl': photoUrl,
-      'breed': breed,
-      'temperament': temperament,
-      'weight': weight,
-      'birthday': birthday != null ? Timestamp.fromDate(birthday!) : null,
     };
+    if (photoUrl != null) map['photoUrl'] = photoUrl;
+    if (breed != null) map['breed'] = breed;
+    if (temperament != null) map['temperament'] = temperament;
+    if (weight != null) map['weight'] = weight;
+    if (birthday != null) map['birthday'] = Timestamp.fromDate(birthday!);
+    return map;
+  }
+
+  Pet copyWith({
+    String? id,
+    String? ownerId,
+    String? name,
+    String? photoUrl,
+    String? breed,
+    String? temperament,
+    double? weight,
+    DateTime? birthday,
+  }) {
+    return Pet(
+      id: id ?? this.id,
+      ownerId: ownerId ?? this.ownerId,
+      name: name ?? this.name,
+      photoUrl: photoUrl ?? this.photoUrl,
+      breed: breed ?? this.breed,
+      temperament: temperament ?? this.temperament,
+      weight: weight ?? this.weight,
+      birthday: birthday ?? this.birthday,
+    );
   }
 }

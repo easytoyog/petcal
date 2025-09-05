@@ -18,32 +18,37 @@ import 'package:google_mobile_ads/google_mobile_ads.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:inthepark/screens/forgot_password_screen.dart';
 import 'package:inthepark/screens/wait_screen.dart';
+import 'package:flutter/foundation.dart' show kDebugMode, kReleaseMode;
+
+bool _appCheckActivated = false;
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   try {
-    print("🟡 Loading .env");
     await dotenv.load(fileName: '.env');
 
-    print("🟡 Initializing Firebase");
     await Firebase.initializeApp();
 
-    print("🟢 Firebase initialized");
+    // ✅ Move App Check here
+    if (!_appCheckActivated) {
+      await FirebaseAppCheck.instance.activate(
+        androidProvider: AndroidProvider.debug, // force debug provider for this test
+      );
+     // await FirebaseAppCheck.instance.activate(
+     //   androidProvider: kReleaseMode
+     //       ? AndroidProvider.playIntegrity   // real device
+     //       : AndroidProvider.debug,          // emulator/dev
+     //    appleProvider: AppleProvider.appAttest, // if you ship iOS
+     // );
+      _appCheckActivated = true;
+    }
 
-    FirebaseMessaging messaging = FirebaseMessaging.instance;
+    // Other Firebase stuff AFTER App Check
+    final messaging = FirebaseMessaging.instance;
     await messaging.requestPermission();
-    print("🟢 Firebase messaging initialized");
-
-    await FirebaseAppCheck.instance.activate(
-      androidProvider: AndroidProvider.playIntegrity, // PROD ONLY
-      appleProvider: AppleProvider.debug,
-    );
-
-    print("🟢 AppCheck initialized");
 
     await MobileAds.instance.initialize();
-    print("🟢 Mobile Ads initialized");
   } catch (e, stack) {
     print("🔥 Firebase init failed: $e");
     print(stack);

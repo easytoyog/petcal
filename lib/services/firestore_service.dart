@@ -24,7 +24,11 @@ class FirestoreService {
 
   /// Add (or update) a pet document
   Future<void> addPet(Pet pet) async {
-    await _firestore.collection('pets').doc(pet.id).set(pet.toMap());
+    await _firestore.collection('pets').doc(pet.id).set({
+      ...pet.toMap(),
+      'createdAt': FieldValue.serverTimestamp(),
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
   }
 
   /// Delete a pet document
@@ -64,7 +68,11 @@ class FirestoreService {
   }
 
   Future<void> updatePet(Pet pet) async {
-    await _firestore.collection('pets').doc(pet.id).update(pet.toMap());
+    await _firestore.collection('pets').doc(pet.id).update({
+    ...pet.toMap(),
+    'updatedAt': FieldValue.serverTimestamp(),
+  });
+
   }
 
   Future<void> addEventToPark(String parkId, ParkEvent event) async {

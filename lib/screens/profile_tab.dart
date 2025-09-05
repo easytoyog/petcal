@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+
 import 'package:inthepark/services/firestore_service.dart';
 import 'package:inthepark/models/owner_model.dart';
 import 'package:inthepark/models/pet_model.dart';
@@ -18,20 +19,23 @@ class ProfileTab extends StatefulWidget {
 class _ProfileTabState extends State<ProfileTab> {
   final _firestoreService = FirestoreService();
 
-  // Add the missing controllers
-  late final TextEditingController firstNameController;
-  late final TextEditingController lastNameController;
-  late final TextEditingController phoneController;
-  late final TextEditingController emailController;
-  late final TextEditingController streetController;
-  late final TextEditingController cityController;
-  late final TextEditingController stateController;
-  late final TextEditingController countryController;
-  late final TextEditingController postalCodeController;
+  // Controllers (initialized immediately to avoid late-init issues)
+  final firstNameController = TextEditingController();
+  final lastNameController = TextEditingController();
+  final phoneController = TextEditingController();
+  final emailController = TextEditingController();
+  final streetController = TextEditingController();
+  final cityController = TextEditingController();
+  final stateController = TextEditingController();
+  final countryController = TextEditingController();
+  final postalCodeController = TextEditingController();
 
   bool _isLoading = true;
   Owner? _owner;
   List<Pet> _pets = [];
+
+  // For sheet upload spinners (add/edit pet)
+  bool _sheetUploading = false;
 
   @override
   void initState() {
@@ -41,7 +45,6 @@ class _ProfileTabState extends State<ProfileTab> {
 
   @override
   void dispose() {
-    // Don't forget to dispose controllers
     firstNameController.dispose();
     lastNameController.dispose();
     phoneController.dispose();
@@ -54,6 +57,48 @@ class _ProfileTabState extends State<ProfileTab> {
     super.dispose();
   }
 
+  // ---------- UI helpers ----------
+
+  InputDecoration _outlinedDecoration(String hint) {
+    return InputDecoration(
+      hintText: hint,
+      isDense: true,
+      contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+      border: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(14),
+      ),
+      enabledBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(14),
+        borderSide: BorderSide(
+          color: Colors.black.withOpacity(0.15),
+          width: 1,
+        ),
+      ),
+      focusedBorder: const OutlineInputBorder(
+        borderRadius: BorderRadius.all(Radius.circular(14)),
+        borderSide: BorderSide(color: Colors.teal, width: 2),
+      ),
+    );
+  }
+
+  BoxDecoration _glassCardDecoration({bool lightOnGreen = true}) {
+    final base = lightOnGreen ? Colors.white : Colors.black;
+    return BoxDecoration(
+      color: lightOnGreen ? Colors.white.withOpacity(0.9) : Colors.white,
+      borderRadius: BorderRadius.circular(18),
+      border: Border.all(color: base.withOpacity(0.10)),
+      boxShadow: [
+        BoxShadow(
+          color: Colors.black.withOpacity(0.12),
+          blurRadius: 18,
+          offset: const Offset(0, 10),
+        ),
+      ],
+    );
+  }
+
+  // ---------- Data ----------
+
   Future<void> _loadOwnerAndPets() async {
     setState(() => _isLoading = true);
     try {
@@ -61,38 +106,93 @@ class _ProfileTabState extends State<ProfileTab> {
       if (owner == null) {
         if (mounted) {
           Navigator.of(context).pushReplacement(
-            MaterialPageRoute(builder: (_) => OwnerDetailsScreen()),
+            MaterialPageRoute(builder: (_) => const OwnerDetailsScreen()),
           );
         }
         return;
       }
+
       final pets = await _firestoreService.getPetsForOwner(owner.uid);
+
+      // Fill controllers
+      firstNameController.text = owner.firstName;
+      lastNameController.text = owner.lastName;
+      phoneController.text = owner.phone;
+      emailController.text = owner.email;
+      streetController.text = owner.address.street ?? '';
+      cityController.text = owner.address.city ?? '';
+      stateController.text = owner.address.state ?? '';
+      countryController.text = owner.address.country ?? '';
+      postalCodeController.text = owner.address.postalCode ?? '';
+
       setState(() {
         _owner = owner;
         _pets = pets;
-        // Initialize controllers with current owner data
-        firstNameController =
-            TextEditingController(text: _owner?.firstName ?? '');
-        lastNameController =
-            TextEditingController(text: _owner?.lastName ?? '');
-        phoneController = TextEditingController(text: _owner?.phone ?? '');
-        emailController = TextEditingController(text: _owner?.email ?? '');
-        streetController =
-            TextEditingController(text: _owner?.address.street ?? '');
-        cityController =
-            TextEditingController(text: _owner?.address.city ?? '');
-        stateController =
-            TextEditingController(text: _owner?.address.state ?? '');
-        countryController =
-            TextEditingController(text: _owner?.address.country ?? '');
-        postalCodeController =
-            TextEditingController(text: _owner?.address.postalCode ?? '');
       });
     } catch (e) {
-      print("Error loading profile data: $e");
+      debugPrint("Error loading profile data: $e");
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
     }
-    setState(() => _isLoading = false);
   }
+
+  Future<void> _saveUpdatedOwner({
+    required String firstName,
+    required String lastName,
+    required String phone,
+  }) async {
+    if (_owner == null) return;
+
+    final updatedAddress = {
+      'street': streetController.text.trim(),
+      'city': cityController.text.trim(),
+      'state': stateController.text.trim(),
+      'country': countryController.text.trim(),
+      'postalCode': postalCodeController.text.trim(),
+    };
+
+    await FirebaseFirestore.instance.collection('owners').doc(_owner!.uid).set({
+      'firstName': firstName,
+      'lastName': lastName,
+      'phone': phone,
+      'address': updatedAddress,
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+
+    final updated = Owner(
+      uid: _owner!.uid,
+      email: _owner!.email,
+      locationType: _owner!.locationType,
+      firstName: firstName,
+      lastName: lastName,
+      phone: phone,
+      pets: _owner!.pets,
+      address: Address(
+        street: streetController.text.trim(),
+        city: cityController.text.trim(),
+        state: stateController.text.trim(),
+        country: countryController.text.trim(),
+        postalCode: postalCodeController.text.trim(),
+      ),
+    );
+
+    try {
+      await _firestoreService.updateOwner(updated);
+      if (!mounted) return;
+      setState(() => _owner = updated);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Profile updated successfully!")),
+      );
+    } catch (e) {
+      debugPrint("Error updating owner: $e");
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Error updating profile: $e")),
+      );
+    }
+  }
+
+  // ---------- Feedback ----------
 
   void _showFeedbackDialog() {
     final feedbackController = TextEditingController();
@@ -129,23 +229,7 @@ class _ProfileTabState extends State<ProfileTab> {
                     maxLines: null,
                     expands: true,
                     autofocus: true,
-                    decoration: InputDecoration(
-                      hintText: "Enter your feedback here...",
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(8.0),
-                        borderSide: const BorderSide(
-                          color: Colors.teal,
-                          width: 2.0,
-                        ),
-                      ),
-                      focusedBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(8.0),
-                        borderSide: const BorderSide(
-                          color: Colors.teal,
-                          width: 2.0,
-                        ),
-                      ),
-                    ),
+                    decoration: _outlinedDecoration("Enter your feedback here..."),
                   ),
                 ),
                 const SizedBox(height: 24),
@@ -153,17 +237,15 @@ class _ProfileTabState extends State<ProfileTab> {
                   onPressed: () async {
                     final feedback = feedbackController.text.trim();
                     if (feedback.isEmpty) return;
-                    await FirebaseFirestore.instance
-                        .collection('feedback')
-                        .add({
+                    await FirebaseFirestore.instance.collection('feedback').add({
                       'feedback': feedback,
                       'userId': FirebaseAuth.instance.currentUser?.uid,
                       'timestamp': FieldValue.serverTimestamp(),
                     });
+                    if (!mounted) return;
                     Navigator.of(ctx).pop();
                     ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                          content: Text("Thank you for your feedback!")),
+                      const SnackBar(content: Text("Thank you for your feedback!")),
                     );
                   },
                   style: ElevatedButton.styleFrom(
@@ -181,11 +263,554 @@ class _ProfileTabState extends State<ProfileTab> {
     );
   }
 
-  /// Navigate to EditProfileScreen and handle the result
+  // ---------- Add / Edit Pet Sheets (modern UI + avatar loader) ----------
+
+  Future<void> _showAddPetDialog() async {
+    if (_owner == null) return;
+
+    final newPetId = FirebaseFirestore.instance.collection('pets').doc().id;
+    final nameController = TextEditingController();
+    final breedController = TextEditingController();
+    String? photoUrl; // stays null until user uploads
+    _sheetUploading = false;
+    bool triedSave = false; // show error only after first save attempt
+
+    await showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) {
+        return _ModernSheet(
+          child: StatefulBuilder(
+            builder: (context, setSheetState) {
+              Future<void> pickImage() async {
+                setSheetState(() => _sheetUploading = true);
+                final uploaded = await ImageUploadUtil.pickAndUploadPetPhoto(newPetId);
+                setSheetState(() {
+                  photoUrl = uploaded;
+                  _sheetUploading = false;
+                });
+              }
+
+              final name = nameController.text.trim();
+              final nameEmpty = name.isEmpty;
+
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const _SheetHeader(title: "Add Pet"),
+                  const SizedBox(height: 12),
+
+                  _AvatarPicker(
+                    imageUrl: photoUrl,
+                    isUploading: _sheetUploading,
+                    onTap: pickImage,
+                  ),
+                  const SizedBox(height: 16),
+
+                  TextField(
+                    controller: nameController,
+                    decoration: _outlinedDecoration("Pet name").copyWith(
+                      errorText: (triedSave && nameEmpty) ? "Pet name is required" : null,
+                    ),
+                    onChanged: (_) => setSheetState(() {}),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: breedController,
+                    decoration: _outlinedDecoration("Pet breed (optional)"),
+                  ),
+                  const SizedBox(height: 18),
+
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton(
+                          onPressed: () => Navigator.pop(context),
+                          style: OutlinedButton.styleFrom(
+                            foregroundColor: Colors.black87,
+                            side: const BorderSide(color: Colors.black26),
+                            padding: const EdgeInsets.symmetric(vertical: 14),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                          ),
+                          child: const Text("Cancel"),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: ElevatedButton(
+                          onPressed: (_sheetUploading || nameEmpty)
+                              ? null
+                              : () async {
+                                  Navigator.of(context).pop();
+                                  await _addPet(
+                                    petId: newPetId,
+                                    name: name,
+                                    breed: breedController.text.trim(),
+                                    photoUrl: photoUrl, // nullable; defaulted inside
+                                  );
+                                },
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.tealAccent,
+                            foregroundColor: Colors.black,
+                            padding: const EdgeInsets.symmetric(vertical: 14),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                          ),
+                          child: const Text("Save Pet"),
+                        ),
+                      ),
+                    ],
+                  ),
+
+                  if (!_sheetUploading && nameEmpty)
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: Padding(
+                        padding: const EdgeInsets.only(top: 6),
+                        child: Builder(
+                          builder: (ctx) {
+                            if (!triedSave) {
+                              Future.microtask(() {
+                                setSheetState(() => triedSave = true);
+                              });
+                            }
+                            return const SizedBox.shrink();
+                          },
+                        ),
+                      ),
+                    ),
+
+                  SizedBox(height: MediaQuery.of(context).viewInsets.bottom + 6),
+                ],
+              );
+            },
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _showEditPetSheet(Pet pet) async {
+    final nameController = TextEditingController(text: pet.name);
+    final breedController = TextEditingController(text: pet.breed ?? "");
+    String? photoUrl = pet.photoUrl; // start with current
+    _sheetUploading = false;
+    bool triedSave = false;
+
+    await showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) {
+        return _ModernSheet(
+          child: StatefulBuilder(
+            builder: (context, setSheetState) {
+              Future<void> pickImage() async {
+                setSheetState(() => _sheetUploading = true);
+                final uploaded = await ImageUploadUtil.pickAndUploadPetPhoto(pet.id);
+                setSheetState(() {
+                  if (uploaded != null) photoUrl = uploaded;
+                  _sheetUploading = false;
+                });
+              }
+
+              final name = nameController.text.trim();
+              final nameEmpty = name.isEmpty;
+
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const _SheetHeader(title: "Edit Pet"),
+                  const SizedBox(height: 12),
+
+                  _AvatarPicker(
+                    imageUrl: photoUrl,
+                    isUploading: _sheetUploading,
+                    onTap: pickImage,
+                  ),
+                  const SizedBox(height: 16),
+
+                  TextField(
+                    controller: nameController,
+                    decoration: _outlinedDecoration("Pet name").copyWith(
+                      errorText: (triedSave && nameEmpty) ? "Pet name is required" : null,
+                    ),
+                    onChanged: (_) => setSheetState(() {}),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: breedController,
+                    decoration: _outlinedDecoration("Pet breed (optional)"),
+                  ),
+                  const SizedBox(height: 18),
+
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton(
+                          onPressed: () => Navigator.pop(context),
+                          style: OutlinedButton.styleFrom(
+                            foregroundColor: Colors.black87,
+                            side: const BorderSide(color: Colors.black26),
+                            padding: const EdgeInsets.symmetric(vertical: 14),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                          ),
+                          child: const Text("Cancel"),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: ElevatedButton(
+                          onPressed: (_sheetUploading || nameEmpty)
+                              ? null
+                              : () async {
+                                  Navigator.of(context).pop();
+                                  await _editPet(
+                                    oldPet: pet,
+                                    newName: name,
+                                    newBreed: breedController.text.trim(),
+                                    newPhotoUrl: photoUrl, // nullable; handled inside
+                                  );
+                                },
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.tealAccent,
+                            foregroundColor: Colors.black,
+                            padding: const EdgeInsets.symmetric(vertical: 14),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                          ),
+                          child: const Text("Save Changes"),
+                        ),
+                      ),
+                    ],
+                  ),
+
+                  if (!_sheetUploading && nameEmpty)
+                    Align(
+                      alignment: Alignment.centerLeft,
+                      child: Padding(
+                        padding: const EdgeInsets.only(top: 6),
+                        child: Builder(
+                          builder: (ctx) {
+                            if (!triedSave) {
+                              Future.microtask(() {
+                                setSheetState(() => triedSave = true);
+                              });
+                            }
+                            return const SizedBox.shrink();
+                          },
+                        ),
+                      ),
+                    ),
+
+                  SizedBox(height: MediaQuery.of(context).viewInsets.bottom + 6),
+                ],
+              );
+            },
+          ),
+        );
+      },
+    );
+  }
+
+  // ---------- Pet data ops ----------
+
+  Future<void> _addPet({
+    required String petId,
+    required String name,
+    required String breed,
+    String? photoUrl, // nullable incoming
+  }) async {
+    if (_owner == null) return;
+
+    final pet = Pet(
+      id: petId,
+      ownerId: _owner!.uid,
+      name: name.isEmpty ? "Unnamed Pet" : name,
+      photoUrl: (photoUrl == null || photoUrl.isEmpty)
+          ? "https://via.placeholder.com/150"
+          : photoUrl,
+      breed: breed.isEmpty ? null : breed,
+      temperament: null,
+      weight: null,
+      birthday: null,
+    );
+
+    try {
+      await _firestoreService.addPet(pet);
+      if (!mounted) return;
+      setState(() => _pets.add(pet));
+    } catch (e) {
+      debugPrint("Error adding pet: $e");
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Error adding pet: $e")),
+      );
+    }
+  }
+
+  Future<void> _editPet({
+    required Pet oldPet,
+    required String newName,
+    required String newBreed,
+    String? newPhotoUrl, // nullable – keep old if null
+  }) async {
+    final updatedPet = Pet(
+      id: oldPet.id,
+      ownerId: oldPet.ownerId,
+      name: newName.isEmpty ? "Unnamed Pet" : newName,
+      photoUrl: (newPhotoUrl == null || newPhotoUrl.isEmpty)
+          ? oldPet.photoUrl
+          : newPhotoUrl,
+      breed: newBreed.isEmpty ? null : newBreed,
+      temperament: oldPet.temperament,
+      weight: oldPet.weight,
+      birthday: oldPet.birthday,
+    );
+    try {
+      await _firestoreService.updatePet(updatedPet);
+      if (!mounted) return;
+      setState(() {
+        final idx = _pets.indexWhere((p) => p.id == oldPet.id);
+        if (idx != -1) _pets[idx] = updatedPet;
+      });
+    } catch (e) {
+      debugPrint("Error editing pet: $e");
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Error editing pet: $e")),
+      );
+    }
+  }
+
+  Future<void> _removePet(String petId) async {
+    try {
+      await _firestoreService.deletePet(petId);
+      if (!mounted) return;
+      setState(() => _pets.removeWhere((p) => p.id == petId));
+    } catch (e) {
+      debugPrint("Error removing pet: $e");
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Error removing pet: $e")),
+      );
+    }
+  }
+
+  Future<void> _logout() async {
+    await FirebaseAuth.instance.signOut();
+    if (!mounted) return;
+    Navigator.of(context).pushReplacementNamed('/login');
+  }
+
+  // ---------- Build ----------
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        leading: Navigator.of(context).canPop()
+            ? IconButton(
+                icon: const Icon(Icons.arrow_back),
+                onPressed: () => Navigator.of(context).pop(),
+              )
+            : null,
+        title: const Text("Profile"),
+        backgroundColor: const Color(0xFF567D46),
+        elevation: 2,
+      ),
+      body: Stack(
+        children: [
+          Container(
+            decoration: const BoxDecoration(
+              gradient: LinearGradient(
+                colors: [Color(0xFF567D46), Color(0xFF365A38)],
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+              ),
+            ),
+          ),
+          if (_isLoading)
+            const Center(child: CircularProgressIndicator())
+          else if (_owner == null)
+            const Center(child: CircularProgressIndicator())
+          else
+            SafeArea(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(16.0),
+                child: Column(
+                  children: [
+                    // Owner Info Card (glassy)
+                    Container(
+                      decoration: _glassCardDecoration(),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16.0,
+                        vertical: 14.0,
+                      ),
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.center,
+                        children: [
+                          const CircleAvatar(
+                            radius: 32,
+                            backgroundColor: Colors.black12,
+                            child: Icon(Icons.person,
+                                size: 40, color: Colors.black54),
+                          ),
+                          const SizedBox(width: 16),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  "${_owner!.firstName} ${_owner!.lastName}",
+                                  style: const TextStyle(
+                                    fontSize: 20,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                                const SizedBox(height: 4),
+                                Text("Phone: ${_owner!.phone}"),
+                                Text("Email: ${_owner!.email}"),
+                              ],
+                            ),
+                          ),
+                          IconButton(
+                            onPressed: _navigateToEditProfile,
+                            icon: const Icon(Icons.edit, color: Colors.black54),
+                            tooltip: "Edit Profile",
+                          ),
+                        ],
+                      ),
+                    ),
+
+                    const SizedBox(height: 16),
+
+                    // Pets header + add
+                    Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        const Text(
+                          "My Pets",
+                          style: TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.white,
+                          ),
+                        ),
+                        ElevatedButton(
+                          onPressed: _showAddPetDialog,
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.tealAccent,
+                            foregroundColor: Colors.black,
+                          ),
+                          child: const Text("Add Pet"),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+
+                    if (_pets.isEmpty)
+                      const Text(
+                        "No pets found. Add one above!",
+                        style: TextStyle(color: Colors.white70),
+                      )
+                    else
+                      Column(
+                        children: _pets.map((pet) {
+                          // Safe check for a non-empty URL
+                          final photo = pet.photoUrl ?? '';                  // <-- safe coalesce
+                          final hasPhoto = photo.trim().isNotEmpty;          // no null error
+                          final ImageProvider? petImage = hasPhoto ? NetworkImage(photo) : null;
+
+                          return Container(
+                            decoration: _glassCardDecoration(),
+                            margin: const EdgeInsets.symmetric(vertical: 8),
+                            child: ListTile(
+                              contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                              leading: CircleAvatar(
+                                radius: 24,
+                                backgroundColor: Colors.black12,
+                                backgroundImage: petImage,
+                                child: petImage == null
+                                    ? const Icon(Icons.pets, color: Colors.black45)
+                                    : null,
+                              ),
+                              title: Text(pet.name),
+                              subtitle: Text(pet.breed ?? "No breed info"),
+                              trailing: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  IconButton(
+                                    icon: const Icon(Icons.edit, color: Colors.blueGrey),
+                                    onPressed: () => _showEditPetSheet(pet),
+                                  ),
+                                  IconButton(
+                                    icon: const Icon(Icons.delete, color: Colors.red),
+                                    onPressed: () => _removePet(pet.id),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          );
+                        }).toList(),
+                      ),
+
+
+                    const SizedBox(height: 32),
+                    ElevatedButton.icon(
+                      onPressed: _showFeedbackDialog,
+                      icon: const Icon(Icons.feedback),
+                      label: const Text("Send Us Your Feedback!"),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.tealAccent,
+                        foregroundColor: Colors.black,
+                        minimumSize: const Size.fromHeight(48),
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 8.0),
+                      child: Center(
+                        child: SizedBox(
+                          width: 200,
+                          child: ElevatedButton(
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.black,
+                              foregroundColor: Colors.white,
+                              padding:
+                                  const EdgeInsets.symmetric(vertical: 14.0),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                            ),
+                            onPressed: _logout,
+                            child: const Text("Log Out"),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  // ---------- Navigation to profile editor ----------
+
   void _navigateToEditProfile() async {
     if (_owner == null) return;
 
-    // ✅ Just update the existing controllers' text
+    // Ensure controllers have latest values
     firstNameController.text = _owner!.firstName;
     lastNameController.text = _owner!.lastName;
     phoneController.text = _owner!.phone;
@@ -221,512 +846,150 @@ class _ProfileTabState extends State<ProfileTab> {
       );
     }
   }
+}
 
-  /// Actually update the owner in Firestore
-  Future<void> _saveUpdatedOwner({
-    required String firstName,
-    required String lastName,
-    required String phone,
-  }) async {
-    if (_owner == null) return;
+// ===================== Reusable Sheet Pieces =====================
 
-    final updatedAddress = {
-      'street': streetController.text.trim(),
-      'city': cityController.text.trim(),
-      'state': stateController.text.trim(),
-      'country': countryController.text.trim(),
-      'postalCode': postalCodeController.text.trim(),
-    };
+class _ModernSheet extends StatelessWidget {
+  const _ModernSheet({required this.child});
 
-    await FirebaseFirestore.instance.collection('owners').doc(_owner!.uid).set({
-      'firstName': firstNameController.text.trim(),
-      'lastName': lastNameController.text.trim(),
-      'phone': phoneController.text.trim(),
-      'address': updatedAddress,
-      // ...other fields as needed...
-    }, SetOptions(merge: true));
-
-    final updated = Owner(
-      uid: _owner!.uid,
-      email: _owner!.email,
-      locationType: _owner!.locationType,
-      firstName: firstName,
-      lastName: lastName,
-      phone: phone,
-      pets: _owner!.pets,
-      address: Address(
-        street: streetController.text.trim(),
-        city: cityController.text.trim(),
-        state: stateController.text.trim(),
-        country: countryController.text.trim(),
-        postalCode: postalCodeController.text.trim(),
-      ),
-    );
-
-    try {
-      await _firestoreService.updateOwner(updated);
-      setState(() {
-        _owner = updated;
-      });
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Profile updated successfully!")),
-      );
-    } catch (e) {
-      print("Error updating owner: $e");
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Error updating profile: $e")),
-      );
-    }
-  }
-
-  /// =========== PET LOGIC ===========
-
-  void _showAddPetDialog() {
-    if (_owner == null) return;
-    final newPetId = FirebaseFirestore.instance.collection('pets').doc().id;
-
-    final nameController = TextEditingController();
-    final breedController = TextEditingController();
-    String photoUrl = "https://via.placeholder.com/150";
-
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16.0)),
-      ),
-      builder: (ctx) {
-        return DraggableScrollableSheet(
-          expand: false,
-          initialChildSize: 0.7,
-          maxChildSize: 1.0,
-          builder: (_, scrollController) {
-            return SingleChildScrollView(
-              controller: scrollController,
-              child: Padding(
-                padding: const EdgeInsets.all(16.0),
-                child: Column(
-                  children: [
-                    const Text(
-                      "Add Pet",
-                      style:
-                          TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-                    ),
-                    const SizedBox(height: 16),
-                    TextField(
-                      controller: nameController,
-                      decoration: const InputDecoration(labelText: "Pet Name"),
-                    ),
-                    TextField(
-                      controller: breedController,
-                      decoration: const InputDecoration(
-                          labelText: "Pet Breed (optional)"),
-                    ),
-                    const SizedBox(height: 12),
-                    CircleAvatar(
-                      radius: 40,
-                      backgroundImage: NetworkImage(photoUrl),
-                    ),
-                    const SizedBox(height: 8),
-                    ElevatedButton.icon(
-                      icon: const Icon(Icons.image),
-                      label: const Text("Pick Image"),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.tealAccent,
-                        foregroundColor: Colors.black,
-                      ),
-                      onPressed: () async {
-                        final uploadedUrl =
-                            await ImageUploadUtil.pickAndUploadPetPhoto(
-                                newPetId);
-                        if (uploadedUrl != null) {
-                          setState(() {
-                            photoUrl = uploadedUrl;
-                          });
-                        }
-                      },
-                    ),
-                    const SizedBox(height: 20),
-                    ElevatedButton(
-                      onPressed: () async {
-                        Navigator.of(ctx).pop();
-                        await _addPet(
-                          petId: newPetId,
-                          name: nameController.text.trim(),
-                          breed: breedController.text.trim(),
-                          photoUrl: photoUrl,
-                        );
-                      },
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.tealAccent,
-                        foregroundColor: Colors.black,
-                      ),
-                      child: const Text("Save Pet"),
-                    ),
-                    const SizedBox(height: 40),
-                  ],
-                ),
-              ),
-            );
-          },
-        );
-      },
-    );
-  }
-
-  Future<void> _addPet({
-    required String petId,
-    required String name,
-    required String breed,
-    required String photoUrl,
-  }) async {
-    if (_owner == null) return;
-    final pet = Pet(
-      id: petId,
-      ownerId: _owner!.uid,
-      name: name.isEmpty ? "Unnamed Pet" : name,
-      photoUrl: photoUrl,
-      breed: breed.isEmpty ? null : breed,
-      temperament: null,
-      weight: null,
-      birthday: null,
-    );
-    try {
-      await _firestoreService.addPet(pet);
-      setState(() {
-        _pets.add(pet);
-      });
-    } catch (e) {
-      print("Error adding pet: $e");
-    }
-  }
-
-  void _showEditPetSheet(Pet pet) {
-    final nameController = TextEditingController(text: pet.name);
-    final breedController = TextEditingController(text: pet.breed ?? "");
-    String photoUrl = pet.photoUrl;
-
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16.0)),
-      ),
-      builder: (ctx) {
-        return StatefulBuilder(
-          builder: (BuildContext context, StateSetter setModalState) {
-            return DraggableScrollableSheet(
-              expand: false,
-              initialChildSize: 0.7,
-              maxChildSize: 1.0,
-              builder: (_, scrollController) {
-                return SingleChildScrollView(
-                  controller: scrollController,
-                  child: Padding(
-                    padding: const EdgeInsets.all(16.0),
-                    child: Column(
-                      children: [
-                        const Text(
-                          "Edit Pet",
-                          style: TextStyle(
-                              fontSize: 20, fontWeight: FontWeight.bold),
-                        ),
-                        const SizedBox(height: 16),
-                        TextField(
-                          controller: nameController,
-                          decoration:
-                              const InputDecoration(labelText: "Pet Name"),
-                        ),
-                        TextField(
-                          controller: breedController,
-                          decoration: const InputDecoration(
-                              labelText: "Pet Breed (optional)"),
-                        ),
-                        const SizedBox(height: 12),
-                        CircleAvatar(
-                          radius: 40,
-                          backgroundImage: NetworkImage(photoUrl),
-                        ),
-                        const SizedBox(height: 8),
-                        ElevatedButton.icon(
-                          icon: const Icon(Icons.image),
-                          label: const Text("Change Image"),
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: Colors.tealAccent,
-                            foregroundColor: Colors.black,
-                          ),
-                          onPressed: () async {
-                            final uploadedUrl =
-                                await ImageUploadUtil.pickAndUploadPetPhoto(
-                                    pet.id);
-                            if (uploadedUrl != null) {
-                              setModalState(() {
-                                photoUrl = uploadedUrl;
-                              });
-                            }
-                          },
-                        ),
-                        const SizedBox(height: 20),
-                        ElevatedButton(
-                          onPressed: () async {
-                            Navigator.of(ctx).pop();
-                            await _editPet(
-                              oldPet: pet,
-                              newName: nameController.text.trim(),
-                              newBreed: breedController.text.trim(),
-                              newPhotoUrl: photoUrl,
-                            );
-                          },
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: Colors.tealAccent,
-                            foregroundColor: Colors.black,
-                          ),
-                          child: const Text("Save Changes"),
-                        ),
-                        const SizedBox(height: 40),
-                      ],
-                    ),
-                  ),
-                );
-              },
-            );
-          },
-        );
-      },
-    );
-  }
-
-  Future<void> _editPet({
-    required Pet oldPet,
-    required String newName,
-    required String newBreed,
-    required String newPhotoUrl,
-  }) async {
-    final updatedPet = Pet(
-      id: oldPet.id,
-      ownerId: oldPet.ownerId,
-      name: newName.isEmpty ? "Unnamed Pet" : newName,
-      photoUrl: newPhotoUrl,
-      breed: newBreed.isEmpty ? null : newBreed,
-      temperament: oldPet.temperament,
-      weight: oldPet.weight,
-      birthday: oldPet.birthday,
-    );
-    try {
-      await _firestoreService.updatePet(updatedPet);
-      setState(() {
-        final idx = _pets.indexWhere((p) => p.id == oldPet.id);
-        if (idx != -1) {
-          _pets[idx] = updatedPet;
-        }
-      });
-    } catch (e) {
-      print("Error editing pet: $e");
-    }
-  }
-
-  Future<void> _removePet(String petId) async {
-    try {
-      await _firestoreService.deletePet(petId);
-      setState(() {
-        _pets.removeWhere((p) => p.id == petId);
-      });
-    } catch (e) {
-      print("Error removing pet: $e");
-    }
-  }
-
-  Future<void> _logout() async {
-    await FirebaseAuth.instance.signOut();
-    if (!mounted) return;
-    Navigator.of(context).pushReplacementNamed('/login');
-  }
+  final Widget child;
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back),
-          onPressed: () => Navigator.of(context).pop(),
+    return DraggableScrollableSheet(
+      expand: false,
+      initialChildSize: 0.7,
+      maxChildSize: 0.95,
+      minChildSize: 0.5,
+      builder: (_, controller) {
+        return Container(
+          decoration: const BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+          ),
+          padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
+          child: SingleChildScrollView(
+            controller: controller,
+            child: child,
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _SheetHeader extends StatelessWidget {
+  const _SheetHeader({required this.title});
+
+  final String title;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        Container(
+          width: 44,
+          height: 5,
+          decoration: BoxDecoration(
+            color: Colors.black.withOpacity(0.15),
+            borderRadius: BorderRadius.circular(999),
+          ),
         ),
-        title: const Text("Profile"),
-        backgroundColor: const Color(0xFF567D46),
-      ),
-      body: Stack(
+        const SizedBox(height: 12),
+        Text(
+          title,
+          style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+        ),
+      ],
+    );
+  }
+}
+
+class _AvatarPicker extends StatelessWidget {
+  const _AvatarPicker({
+    required this.imageUrl,
+    required this.isUploading,
+    required this.onTap,
+  });
+
+  final String? imageUrl;
+  final bool isUploading;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Stack(
+        alignment: Alignment.center,
         children: [
-          Container(
-            decoration: const BoxDecoration(
-              gradient: LinearGradient(
-                colors: [Color(0xFF567D46), Color(0xFF365A38)],
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
+          AnimatedContainer(
+            duration: const Duration(milliseconds: 220),
+            curve: Curves.easeOut,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              border: Border.all(
+                color: isUploading ? Colors.teal : Colors.black12,
+                width: isUploading ? 3 : 1.5,
+              ),
+              boxShadow: [
+                if (!isUploading)
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.08),
+                    blurRadius: 10,
+                    offset: const Offset(0, 6),
+                  ),
+              ],
+            ),
+            child: CircleAvatar(
+              radius: 48,
+              backgroundColor: Colors.black12,
+              backgroundImage:
+                  (imageUrl != null && imageUrl!.isNotEmpty && !isUploading)
+                      ? NetworkImage(imageUrl!)
+                      : null,
+              child: (imageUrl == null || imageUrl!.isEmpty || isUploading)
+                  ? const Icon(Icons.pets, size: 34, color: Colors.black45)
+                  : null,
+            ),
+          ),
+          if (isUploading)
+            Positioned.fill(
+              child: Container(
+                decoration: BoxDecoration(
+                  color: Colors.black.withOpacity(0.22),
+                  shape: BoxShape.circle,
+                ),
+                child: const Center(
+                  child: SizedBox(
+                    width: 30,
+                    height: 30,
+                    child: CircularProgressIndicator(strokeWidth: 3),
+                  ),
+                ),
+              ),
+            ),
+          Positioned.fill(
+            child: Material(
+              color: Colors.transparent,
+              child: InkWell(
+                customBorder: const CircleBorder(),
+                onTap: onTap,
               ),
             ),
           ),
-          _isLoading
-              ? const Center(child: CircularProgressIndicator())
-              : _owner == null
-                  ? const Center(child: CircularProgressIndicator())
-                  : SafeArea(
-                      child: SingleChildScrollView(
-                        padding: const EdgeInsets.all(16.0),
-                        child: Column(
-                          children: [
-                            // Owner Info Card
-                            Card(
-                              color: Colors.white.withOpacity(0.9),
-                              margin: const EdgeInsets.only(bottom: 16.0),
-                              shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(12)),
-                              child: Padding(
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 16.0, vertical: 12.0),
-                                child: Row(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    const CircleAvatar(
-                                      radius: 32,
-                                      backgroundColor: Colors.black12,
-                                      child: Icon(Icons.person,
-                                          size: 40, color: Colors.black54),
-                                    ),
-                                    const SizedBox(width: 16),
-                                    Expanded(
-                                      child: Column(
-                                        crossAxisAlignment:
-                                            CrossAxisAlignment.start,
-                                        children: [
-                                          Text(
-                                            "${_owner!.firstName} ${_owner!.lastName}",
-                                            style: const TextStyle(
-                                                fontSize: 20,
-                                                fontWeight: FontWeight.bold),
-                                          ),
-                                          const SizedBox(height: 4),
-                                          Text("Phone: ${_owner!.phone}"),
-                                          Text("Email: ${_owner!.email}"),
-                                          const SizedBox(height: 4),
-                                        ],
-                                      ),
-                                    ),
-                                    IconButton(
-                                      onPressed: _navigateToEditProfile,
-                                      icon: const Icon(Icons.edit,
-                                          color: Colors.black54),
-                                      tooltip: "Edit Profile",
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ),
-
-                            // Pets Header
-                            Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                              children: [
-                                const Text(
-                                  "My Pets",
-                                  style: TextStyle(
-                                      fontSize: 18,
-                                      fontWeight: FontWeight.bold,
-                                      color: Colors.white),
-                                ),
-                                ElevatedButton(
-                                  onPressed: _showAddPetDialog,
-                                  style: ElevatedButton.styleFrom(
-                                    backgroundColor: Colors.tealAccent,
-                                    foregroundColor: Colors.black,
-                                  ),
-                                  child: const Text("Add Pet"),
-                                ),
-                              ],
-                            ),
-                            const SizedBox(height: 8),
-
-                            if (_pets.isEmpty)
-                              const Text(
-                                "No pets found. Add one above!",
-                                style: TextStyle(color: Colors.white70),
-                              )
-                            else
-                              Column(
-                                children: _pets.map((pet) {
-                                  return Card(
-                                    color: Colors.white.withOpacity(0.9),
-                                    margin:
-                                        const EdgeInsets.symmetric(vertical: 8),
-                                    shape: RoundedRectangleBorder(
-                                        borderRadius:
-                                            BorderRadius.circular(12)),
-                                    child: ListTile(
-                                      leading: CircleAvatar(
-                                        backgroundImage:
-                                            NetworkImage(pet.photoUrl),
-                                        radius: 24,
-                                      ),
-                                      title: Text(pet.name),
-                                      subtitle:
-                                          Text(pet.breed ?? "No breed info"),
-                                      trailing: Row(
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          IconButton(
-                                            icon: const Icon(Icons.edit,
-                                                color: Colors.blueGrey),
-                                            onPressed: () =>
-                                                _showEditPetSheet(pet),
-                                          ),
-                                          IconButton(
-                                            icon: const Icon(Icons.delete,
-                                                color: Colors.red),
-                                            onPressed: () => _removePet(pet.id),
-                                          ),
-                                        ],
-                                      ),
-                                    ),
-                                  );
-                                }).toList(),
-                              ),
-
-                            const SizedBox(height: 32),
-                            ElevatedButton.icon(
-                              onPressed: _showFeedbackDialog,
-                              icon: const Icon(Icons.feedback),
-                              label: const Text("Send Us Your Feedback!"),
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: Colors.tealAccent,
-                                foregroundColor: Colors.black,
-                                minimumSize: const Size.fromHeight(48),
-                              ),
-                            ),
-                            const SizedBox(height: 20),
-                            Padding(
-                              padding:
-                                  const EdgeInsets.symmetric(vertical: 8.0),
-                              child: Center(
-                                child: SizedBox(
-                                  width: 200,
-                                  child: ElevatedButton(
-                                    style: ElevatedButton.styleFrom(
-                                      backgroundColor: Colors.black,
-                                      foregroundColor: Colors.white,
-                                      padding: const EdgeInsets.symmetric(
-                                          vertical: 14.0),
-                                      shape: RoundedRectangleBorder(
-                                        borderRadius: BorderRadius.circular(12),
-                                      ),
-                                    ),
-                                    onPressed: _logout,
-                                    child: const Text("Log Out"),
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
+          Positioned(
+            right: -2,
+            bottom: -2,
+            child: Container(
+              padding: const EdgeInsets.all(6),
+              decoration: const BoxDecoration(
+                color: Colors.tealAccent,
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(Icons.camera_alt, size: 16, color: Colors.black),
+            ),
+          ),
         ],
       ),
     );

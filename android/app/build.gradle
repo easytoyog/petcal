@@ -83,6 +83,8 @@ dependencies {
     // implementation 'com.google.firebase:firebase-messaging'
     implementation 'com.google.android.gms:play-services-ads:22.6.0'
 
+    debugImplementation 'com.google.firebase:firebase-appcheck-debug'           // for DEV
+    releaseImplementation 'com.google.firebase:firebase-appcheck-playintegrity' // for PROD
 }
 
 flutter {
