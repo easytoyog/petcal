@@ -20,6 +20,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
   late final Stream<QuerySnapshot<Map<String, dynamic>>> _chatStream;
   final String? _currentUid = FirebaseAuth.instance.currentUser?.uid;
 
+  /// senderId -> profile (includes displayName, fallback photo, and primary pet photo)
   final Map<String, _PublicProfile> _profiles = <String, _PublicProfile>{};
   String _parkName = 'Chatroom';
 
@@ -59,6 +60,9 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
     } catch (_) {}
   }
 
+  /// Warms cache for any senderIds we haven't seen:
+  /// - public_profiles (displayName, fallback photo)
+  /// - pets (pick primary via isMain==true; else first)
   Future<void> _warmProfileCache(
       List<QueryDocumentSnapshot<Map<String, dynamic>>> docs) async {
     final missing = <String>{};
@@ -73,21 +77,69 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
     final ids = missing.toList();
     for (var i = 0; i < ids.length; i += 10) {
       final batch = ids.sublist(i, i + 10 > ids.length ? ids.length : i + 10);
-      final snap = await FirebaseFirestore.instance
+
+      // 1) public profiles
+      final profileSnap = await FirebaseFirestore.instance
           .collection('public_profiles')
           .where(FieldPath.documentId, whereIn: batch)
           .get();
 
-      for (final p in snap.docs) {
+      // Pre-fill with empty so we don’t re-query same ids on next frame
+      for (final id in batch) {
+        _profiles.putIfAbsent(id, () => const _PublicProfile.empty());
+      }
+
+      for (final p in profileSnap.docs) {
         final d = p.data() as Map<String, dynamic>;
-        _profiles[p.id] = _PublicProfile(
-          displayName: (d['displayName'] ?? '') as String,
-          photoUrl: (d['photoUrl'] ?? '') as String,
+        final displayName = (d['displayName'] ?? '') as String? ?? '';
+        final photoUrl = (d['photoUrl'] ?? '') as String? ?? '';
+        final existing = _profiles[p.id] ?? const _PublicProfile.empty();
+        _profiles[p.id] = existing.copyWith(
+          displayName: displayName,
+          profilePhotoUrl: photoUrl,
         );
       }
 
-      for (final id in batch) {
-        _profiles.putIfAbsent(id, () => const _PublicProfile.empty());
+      // 2) pets for those owners (batch query)
+      final petsSnap = await FirebaseFirestore.instance
+          .collection('pets')
+          .where('ownerId', whereIn: batch)
+          .get();
+
+      // Group pets by ownerId
+      final Map<String, List<QueryDocumentSnapshot>> petsByOwner = {};
+      for (final petDoc in petsSnap.docs) {
+        final data = petDoc.data() as Map<String, dynamic>;
+        final ownerId = (data['ownerId'] ?? '') as String;
+        (petsByOwner[ownerId] ??= []).add(petDoc);
+      }
+
+      // Choose "primary": prefer isMain==true; else first in list
+      for (final ownerId in batch) {
+        final petDocs = petsByOwner[ownerId] ?? const <QueryDocumentSnapshot>[];
+        String primaryPhoto = '';
+
+        if (petDocs.isNotEmpty) {
+          // Prefer isMain==true
+          QueryDocumentSnapshot? mainPetDoc;
+          for (final d in petDocs) {
+            final mp = (d.data() as Map<String, dynamic>);
+            if (mp['isMain'] == true) {
+              mainPetDoc = d;
+              break;
+            }
+          }
+          final chosen = mainPetDoc ?? petDocs.first;
+          final chosenData = (chosen.data() as Map<String, dynamic>);
+          final pUrl = (chosenData['photoUrl'] ?? '') as String?;
+          if (pUrl != null && pUrl.trim().isNotEmpty) {
+            primaryPhoto = pUrl.trim();
+          }
+        }
+
+        // write back into cache (don’t wipe display/profile photo if already set)
+        final existing = _profiles[ownerId] ?? const _PublicProfile.empty();
+        _profiles[ownerId] = existing.copyWith(primaryPetPhotoUrl: primaryPhoto);
       }
     }
 
@@ -141,7 +193,11 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
     final profile = _profiles[senderId] ?? const _PublicProfile.empty();
     final name =
         profile.displayName.isNotEmpty ? profile.displayName : 'Someone';
-    final avatar = profile.photoUrl;
+
+    // Avatar priority: primaryPetPhoto -> profilePhoto -> fallback icon
+    final avatarUrl = profile.primaryPetPhotoUrl.isNotEmpty
+        ? profile.primaryPetPhotoUrl
+        : (profile.profilePhotoUrl.isNotEmpty ? profile.profilePhotoUrl : '');
 
     final timeString =
         createdAt == null ? '' : DateFormat('MMM d, h:mm a').format(createdAt);
@@ -150,8 +206,8 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
 
     final avatarWidget = CircleAvatar(
       radius: 18,
-      backgroundImage: avatar.isNotEmpty ? NetworkImage(avatar) : null,
-      child: avatar.isEmpty ? const Icon(Icons.pets, size: 18) : null,
+      backgroundImage: avatarUrl.isNotEmpty ? NetworkImage(avatarUrl) : null,
+      child: avatarUrl.isEmpty ? const Icon(Icons.pets, size: 18) : null,
     );
 
     final bubble = Container(
@@ -201,7 +257,6 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
       ),
       resizeToAvoidBottomInset: true,
       body: SafeArea(
-        // top/bottom safe area so nothing gets under status/nav bars
         child: Column(
           children: [
             // Messages
@@ -218,6 +273,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
 
                   final docs = snapshot.data!.docs;
 
+                  // Warm both profile + primary pet caches in batches
                   _warmProfileCache(docs);
 
                   if (docs.isEmpty) {
@@ -233,9 +289,10 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
               ),
             ),
 
-            // Composer (kept above nav bar & above keyboard)
+            // Composer
             Padding(
-              padding: EdgeInsets.fromLTRB(8, 0, 8, (bottomSafe > 0 ? bottomSafe : 8)),
+              padding: EdgeInsets.fromLTRB(
+                  8, 0, 8, (bottomSafe > 0 ? bottomSafe : 8)),
               child: Container(
                 padding:
                     const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
@@ -272,7 +329,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
               ),
             ),
 
-            // Ad (also inside SafeArea so it won’t be cut off)
+            // Ad
             const AdBanner(),
           ],
         ),
@@ -281,11 +338,32 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
   }
 }
 
+/// Profile cache entry
 class _PublicProfile {
   final String displayName;
-  final String photoUrl;
-  const _PublicProfile({required this.displayName, required this.photoUrl});
+  final String profilePhotoUrl;     // from public_profiles.photoUrl
+  final String primaryPetPhotoUrl;  // chosen pet photo (isMain -> first)
+
+  const _PublicProfile({
+    required this.displayName,
+    required this.profilePhotoUrl,
+    required this.primaryPetPhotoUrl,
+  });
+
   const _PublicProfile.empty()
       : displayName = '',
-        photoUrl = '';
+        profilePhotoUrl = '',
+        primaryPetPhotoUrl = '';
+
+  _PublicProfile copyWith({
+    String? displayName,
+    String? profilePhotoUrl,
+    String? primaryPetPhotoUrl,
+  }) {
+    return _PublicProfile(
+      displayName: displayName ?? this.displayName,
+      profilePhotoUrl: profilePhotoUrl ?? this.profilePhotoUrl,
+      primaryPetPhotoUrl: primaryPetPhotoUrl ?? this.primaryPetPhotoUrl,
+    );
+    }
 }

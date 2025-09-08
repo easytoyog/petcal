@@ -42,11 +42,13 @@ class _ParksTabState extends State<ParksTab> {
   final Map<String, List<String>> _parkServices = {}; // parkId -> services[]
   final Set<String> _checkedInParkIds = {}; // where current user is checked-in
 
+  // Meta hydration memo
+  final Set<String> _hydratedMeta = {}; // parkIds whose meta we've fetched
+
   // ---------- Helpers ----------
   String _parkIdOf(Park p) => generateParkID(p.latitude, p.longitude, p.name);
 
-  Future<void> _ensureParkDoc(Park p) async {
-    final parkId = _parkIdOf(p);
+  Future<void> _ensureParkDoc(String parkId, Park p) async {
     final ref = FirebaseFirestore.instance.collection('parks').doc(parkId);
     final snap = await ref.get();
     if (!snap.exists) {
@@ -56,7 +58,6 @@ class _ParksTabState extends State<ParksTab> {
         'latitude': p.latitude,
         'longitude': p.longitude,
         'createdAt': FieldValue.serverTimestamp(),
-        // do NOT write userCount/services here (rules will reject)
       });
     }
   }
@@ -68,9 +69,11 @@ class _ParksTabState extends State<ParksTab> {
   }
 
   Future<void> _bootstrap() async {
+    // Kick off in parallel for better perceived speed.
     await Future.wait([
       _fetchFavoriteParks(),
       _refreshCheckedInSet(),
+      _fetchNearbyParksFast(), // fast path uses cached/last known location if available
     ]);
   }
 
@@ -97,6 +100,7 @@ class _ParksTabState extends State<ParksTab> {
             .get();
         parks.addAll(qs.docs.map((d) => Park.fromFirestore(d)));
         _hydrateMetaFromDocs(qs.docs);
+        _hydratedMeta.addAll(qs.docs.map((d) => d.id));
       }
 
       if (!mounted) return;
@@ -104,39 +108,57 @@ class _ParksTabState extends State<ParksTab> {
         _favoriteParks = parks;
       });
 
-      if (parks.isEmpty) {
-        // No favorites — pre-fill nearby for UX
-        _fetchNearbyParks();
-      }
-    } catch (e) {
-      // debugPrint("Error fetching favorite parks: $e");
+      // If no favorites, nearby fast-path may still fill the UI.
+    } catch (_) {
+      // ignore
     }
   }
 
-  // ---------- Nearby ----------
+  // ---------- Nearby (FAST first, then precise) ----------
+  Future<void> _fetchNearbyParksFast() async {
+    // Try cached/last-known location for instant results.
+    final cached = await _locationService.getUserLocationOrCached();
+    if (cached == null) return; // no cached fix -> leave CTA flow as-is
+
+    await _fetchNearbyParksAt(cached.latitude, cached.longitude);
+  }
+
   Future<void> _fetchNearbyParks() async {
     setState(() => _isSearching = true);
     try {
+      // Precise GPS if user taps CTA.
       final l = await loc.Location().getLocation();
-      final parks = await _locationService.findNearbyParks(
-        l.latitude!,
-        l.longitude!,
-      );
+      await _fetchNearbyParksAt(l.latitude!, l.longitude!);
+    } catch (_) {
+      // ignore
+    } finally {
+      if (mounted) setState(() => _isSearching = false);
+    }
+  }
 
-      // Ensure docs exist (safe, idempotent)
-      await Future.wait(parks.map(_ensureParkDoc));
+  Future<void> _fetchNearbyParksAt(double lat, double lng) async {
+    setState(() {
+      _isSearching = true;
+    });
 
-      // Hydrate meta for all these parks
+    try {
+      final parks = await _locationService.findNearbyParks(lat, lng);
+
+      // Hydrate meta for any parks we haven't hydrated yet (batched).
       final ids = parks.map(_parkIdOf).toList();
-      await _hydrateMetaForIds(ids);
+      final toHydrate = ids.where((id) => !_hydratedMeta.contains(id)).toList();
+      if (toHydrate.isNotEmpty) {
+        await _hydrateMetaForIds(toHydrate);
+        _hydratedMeta.addAll(toHydrate);
+      }
 
       if (!mounted) return;
       setState(() {
         _nearbyParks = parks;
         _hasFetchedNearby = true;
       });
-    } catch (e) {
-      // debugPrint("Error fetching nearby parks: $e");
+    } catch (_) {
+      // ignore
     } finally {
       if (mounted) setState(() => _isSearching = false);
     }
@@ -154,14 +176,17 @@ class _ParksTabState extends State<ParksTab> {
   }
 
   Future<void> _hydrateMetaForIds(List<String> parkIds) async {
+    // Batch whereIn queries of up to 10 IDs.
+    final futures = <Future<void>>[];
     for (var i = 0; i < parkIds.length; i += 10) {
       final chunk = parkIds.sublist(i, (i + 10).clamp(0, parkIds.length));
-      final qs = await FirebaseFirestore.instance
+      futures.add(FirebaseFirestore.instance
           .collection('parks')
           .where(FieldPath.documentId, whereIn: chunk)
-          .get();
-      _hydrateMetaFromDocs(qs.docs);
+          .get()
+          .then((qs) => _hydrateMetaFromDocs(qs.docs)));
     }
+    await Future.wait(futures);
     if (mounted) setState(() {});
   }
 
@@ -184,13 +209,14 @@ class _ParksTabState extends State<ParksTab> {
     }
   }
 
-  // ---------- Transactions: make negatives impossible ----------
+  // ---------- Transactions ----------
   Future<void> _txCheckOut(String parkId) async {
     final uid = _currentUserId;
     if (uid == null) return;
 
     final db = FirebaseFirestore.instance;
-    final userRef = db.collection('parks')
+    final userRef = db
+        .collection('parks')
         .doc(parkId)
         .collection('active_users')
         .doc(uid);
@@ -207,7 +233,8 @@ class _ParksTabState extends State<ParksTab> {
     if (uid == null) return;
 
     final db = FirebaseFirestore.instance;
-    final userRef = db.collection('parks')
+    final userRef = db
+        .collection('parks')
         .doc(parkId)
         .collection('active_users')
         .doc(uid);
@@ -228,7 +255,6 @@ class _ParksTabState extends State<ParksTab> {
     if (uid == null) return;
 
     try {
-      // requires the collection-group index on active_users.uid (you created this earlier)
       final snaps = await FirebaseFirestore.instance
           .collectionGroup('active_users')
           .where('uid', isEqualTo: uid)
@@ -239,7 +265,6 @@ class _ParksTabState extends State<ParksTab> {
         wb.delete(d.reference);
         final parkRef = d.reference.parent.parent;
         if (parkRef != null) {
-          // keep your local optimistic counters; don't write Firestore userCount
           _checkedInParkIds.remove(parkRef.id);
           _activeUserCounts.update(
             parkRef.id,
@@ -254,8 +279,7 @@ class _ParksTabState extends State<ParksTab> {
     }
   }
 
-
-  // ---------- Active pets dialog (optimized) ----------
+  // ---------- Active pets dialog (unchanged behavior; on-demand loads) ----------
   Future<void> _showActiveUsersDialog(String parkId) async {
     final currentUser = FirebaseAuth.instance.currentUser;
     if (currentUser == null) return;
@@ -320,7 +344,6 @@ class _ParksTabState extends State<ParksTab> {
           currentUserId: currentUser.uid,
           onFavoriteToggle: (ownerId, petId) async {
             if (favoritePetIds.contains(petId)) {
-              // Unfriend/unfavorite
               await FirebaseFirestore.instance
                   .collection('friends')
                   .doc(currentUser.uid)
@@ -340,7 +363,6 @@ class _ParksTabState extends State<ParksTab> {
                 );
               }
             } else {
-              // Friend/favorite
               final ownerDoc = await FirebaseFirestore.instance
                   .collection('owners')
                   .doc(ownerId)
@@ -349,8 +371,7 @@ class _ParksTabState extends State<ParksTab> {
               if (ownerDoc.exists) {
                 final data = ownerDoc.data() as Map<String, dynamic>;
                 ownerName =
-                    "${data['firstName'] ?? ''} ${data['lastName'] ?? ''}"
-                        .trim();
+                    "${data['firstName'] ?? ''} ${data['lastName'] ?? ''}".trim();
               }
               if (ownerName.isEmpty) ownerName = ownerId;
 
@@ -389,7 +410,9 @@ class _ParksTabState extends State<ParksTab> {
   // ---------- Like / unlike ----------
   Future<void> _toggleLike(Park park) async {
     final parkId = _parkIdOf(park);
-    await _ensureParkDoc(park);
+    // Defer ensure to mutation points instead of doing it for every nearby park.
+    await _ensureParkDoc(parkId, park);
+
     if (_favoriteParkIds.contains(parkId)) {
       await _fs.unlikePark(parkId);
       _favoriteParkIds.remove(parkId);
@@ -404,17 +427,19 @@ class _ParksTabState extends State<ParksTab> {
     if (mounted) setState(() {});
   }
 
-  // ---------- Check-in / out (uses transactions) ----------
+  // ---------- Check-in / out ----------
   Future<void> _toggleCheckIn(Park park) async {
     if (_currentUserId == null) return;
     final parkId = _parkIdOf(park);
     setState(() => _mutatingParkId = parkId);
 
     try {
+      // Ensure park doc exists only when we actually need to write under it.
+      await _ensureParkDoc(parkId, park);
+
       final isCheckedIn = _checkedInParkIds.contains(parkId);
 
       if (isCheckedIn) {
-        // Out (transactional)
         await _txCheckOut(parkId);
         _checkedInParkIds.remove(parkId);
         _activeUserCounts.update(
@@ -428,10 +453,7 @@ class _ParksTabState extends State<ParksTab> {
           );
         }
       } else {
-        // First clear any other check-ins (transactional per park)
         await _checkOutFromAllParks();
-
-        // In (transactional)
         await _txCheckIn(parkId);
 
         _checkedInParkIds
@@ -469,7 +491,8 @@ class _ParksTabState extends State<ParksTab> {
       margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       child: InkWell(
         onTap: () async {
-          await _ensureParkDoc(park);
+          // Ensure park doc only on interaction
+          await _ensureParkDoc(parkId, park);
           _showActiveUsersDialog(parkId);
         },
         child: Padding(
@@ -608,8 +631,8 @@ class _ParksTabState extends State<ParksTab> {
                         TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
               ),
 
-              // CTA to fetch nearby
-              if (!_hasFetchedNearby && !_isSearching)
+              // CTA to fetch nearby (only shows if we didn’t have a cached fix)
+              if (!_hasFetchedNearby && !_isSearching && _nearbyParks.isEmpty)
                 Padding(
                   padding:
                       const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
@@ -625,7 +648,7 @@ class _ParksTabState extends State<ParksTab> {
                   child: Center(child: CircularProgressIndicator()),
                 ),
 
-              // Nearby list
+              // Nearby list (from cached or precise location)
               ..._nearbyParks.map((p) => _buildParkCard(p, isFavorite: false)),
             ],
           ),

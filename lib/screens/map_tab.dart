@@ -78,11 +78,7 @@ class _MapTabState extends State<MapTab>
     _isSearching = true;
     _fetchFavorites();
     _locationService.enableBackgroundLocation();
-
-    // Fast path: show map with saved/cached location
     _loadSavedLocationAndSetMap();
-
-    // Defer heavier work for better perceived load time
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _initLocationFlow();
     });
@@ -442,8 +438,7 @@ class _MapTabState extends State<MapTab>
     if (isCheckedIn) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-            content: Text("You are already checked in to this park.")),
+        const SnackBar(content: Text("You are already checked in to this park.")),
       );
       return;
     }
@@ -458,12 +453,10 @@ class _MapTabState extends State<MapTab>
           builder: (context, setStateDialog) {
             return AlertDialog(
               title: const Text("Check In"),
-              content:
-                  Text("You are at ${park.name}. Do you want to check in?"),
+              content: Text("You are at ${park.name}. Do you want to check in?"),
               actions: [
                 TextButton(
-                  onPressed:
-                      isProcessing ? null : () => Navigator.of(context).pop(),
+                  onPressed: isProcessing ? null : () => Navigator.of(context).pop(),
                   child: const Text("No"),
                 ),
                 ElevatedButton(
@@ -514,6 +507,7 @@ class _MapTabState extends State<MapTab>
     return out;
   }
 
+  // --------- FULL-SCREEN POPUP (unchanged logic, only UI container & button sizes) ---------
   Future<void> _showUsersInPark(String parkId, String parkName,
       double parkLatitude, double parkLongitude) async {
     final currentUser = FirebaseAuth.instance.currentUser;
@@ -571,7 +565,7 @@ class _MapTabState extends State<MapTab>
       final usersSnapshot = await parkRef.collection('active_users').get();
       final userIds = usersSnapshot.docs.map((doc) => doc.id).toList();
 
-      // ⬇️ NEW: batch load public profiles for display names / avatars
+      // ⬇️ batch load public profiles
       final profiles = await _loadPublicProfiles(userIds.toSet());
 
       final List<Map<String, dynamic>> userList = [];
@@ -622,442 +616,430 @@ class _MapTabState extends State<MapTab>
       }
 
       if (!mounted) return;
-      Navigator.of(context, rootNavigator: true).pop(); // close loading
+      Navigator.of(context, rootNavigator: true).pop(); // close loading spinner
 
+      // ---- FULL SCREEN DIALOG (Scaffold inside showDialog) ----
       showDialog(
         context: context,
+        barrierDismissible: false,
         builder: (context) {
-          return AlertDialog(
-            insetPadding:
-                const EdgeInsets.symmetric(horizontal: 10, vertical: 24),
-            title: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(parkName),
-                const SizedBox(height: 8),
-                Row(
-                  children: [
-                    ...services.map((service) => Padding(
-                          padding: const EdgeInsets.only(right: 8.0),
-                          child: Chip(
-                            avatar: Icon(
-                              service == "Off-leash Dog Park"
-                                  ? Icons.pets
-                                  : service == "Off-leash Trail"
-                                      ? Icons.terrain
-                                      : service == "Off-leash Beach"
-                                          ? Icons.beach_access
-                                          : Icons.park,
-                              size: 18,
-                              color: Colors.green,
-                            ),
-                            label: Text(service,
-                                style: const TextStyle(fontSize: 12)),
-                            backgroundColor: Colors.green[50],
-                          ),
-                        )),
-                    // Add service button (auto-selects first available)
-                    GestureDetector(
-                      onTap: () async {
-                        final all = const [
-                          "Off-leash Trail",
-                          "Off-leash Dog Park",
-                          "Off-leash Beach"
-                        ];
-                        final options =
-                            all.where((s) => !services.contains(s)).toList();
-
-                        if (options.isEmpty) {
+          return StatefulBuilder(builder: (context, setStateDialog) {
+            return Scaffold(
+              appBar: AppBar(
+                backgroundColor: const Color(0xFF567D46),
+                title: Text(parkName),
+                leading: IconButton(
+                  icon: const Icon(Icons.close),
+                  onPressed: () => Navigator.of(context).pop(),
+                ),
+                actions: [
+                  IconButton(
+                    tooltip: isLiked ? 'Liked' : 'Like Park',
+                    onPressed: () async {
+                      try {
+                        if (isLiked) {
+                          await fs.unlikePark(parkId);
                           if (context.mounted) {
                             ScaffoldMessenger.of(context).showSnackBar(
                               const SnackBar(
-                                  content:
-                                      Text("All services are already added.")),
+                                  content: Text("Removed park from liked parks")),
                             );
                           }
-                          return;
-                        }
-
-                        final newService = await showDialog<String>(
-                          context: context,
-                          builder: (ctx) {
-                            String? selected = options.first; // prefill
-                            return StatefulBuilder(
-                              builder: (ctx, setState) {
-                                return AlertDialog(
-                                  title: const Text("Add Service"),
-                                  content: DropdownButtonFormField<String>(
-                                    value: selected,
-                                    items: options
-                                        .map((s) => DropdownMenuItem(
-                                              value: s,
-                                              child: Text(s),
-                                            ))
-                                        .toList(),
-                                    onChanged: (val) =>
-                                        setState(() => selected = val),
-                                  ),
-                                  actions: [
-                                    TextButton(
-                                      onPressed: () => Navigator.of(ctx).pop(),
-                                      child: const Text("Cancel"),
-                                    ),
-                                    ElevatedButton(
-                                      onPressed: () =>
-                                          Navigator.of(ctx).pop(selected),
-                                      child: const Text("Add"),
-                                    ),
-                                  ],
-                                );
-                              },
-                            );
-                          },
-                        );
-
-                        if (newService != null &&
-                            newService.isNotEmpty &&
-                            !services.contains(newService)) {
-                          services.add(newService);
-                          await FirebaseFirestore.instance
-                              .collection('parks')
-                              .doc(parkId)
-                              .update({
-                            'services': services,
-                            'updatedAt': FieldValue.serverTimestamp(),
-                          });
-
-                          // Update local cache so filters reflect immediately
-                          _parkServicesById[parkId] =
-                              List<String>.from(services);
-
-                          // Refresh dialog UI
+                        } else {
+                          await fs.likePark(parkId);
                           if (context.mounted) {
-                            Navigator.of(context, rootNavigator: true).pop();
-                            _showUsersInPark(
-                                parkId, parkName, parkLatitude, parkLongitude);
-                          }
-
-                          if (_selectedFilters.isNotEmpty) {
-                            _applyFilters();
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(content: Text("Park liked!")),
+                            );
                           }
                         }
-                      },
-                      child: Container(
-                        margin: const EdgeInsets.only(left: 4),
-                        decoration: BoxDecoration(
-                          color: Colors.green,
-                          borderRadius: BorderRadius.circular(16),
-                        ),
-                        padding: const EdgeInsets.all(4),
-                        child: const Icon(Icons.add,
-                            color: Colors.white, size: 18),
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-            content: SizedBox(
-              width: 420,
-              height: 500,
-              child: Column(
-                children: [
-                  Expanded(
-                    child: StatefulBuilder(
-                      builder: (context, setStateDialog) {
-                        return ListView.separated(
-                          itemCount: userList.length,
-                          separatorBuilder: (_, __) =>
-                              const SizedBox(height: 6),
-                          itemBuilder: (ctx, i) {
-                            final petData = userList[i];
-                            final ownerId = petData['ownerId'] as String? ?? '';
-                            final petId = petData['petId'] as String? ?? '';
-                            final petName = petData['petName'] as String? ?? '';
-                            final petPhoto =
-                                petData['petPhotoUrl'] as String? ?? '';
-                            final checkIn =
-                                petData['checkInTime'] as String? ?? '';
-                            final ownerName =
-                                (petData['ownerName'] as String? ?? '').trim();
-                            final mine = (ownerId == currentUser.uid);
-
-                            return ListTile(
-                              leading: (petPhoto.isNotEmpty)
-                                  ? CircleAvatar(
-                                      backgroundImage: NetworkImage(petPhoto))
-                                  : const CircleAvatar(
-                                      backgroundColor: Colors.brown,
-                                      child:
-                                          Icon(Icons.pets, color: Colors.white),
-                                    ),
-                              title: Text(petName),
-                              subtitle: Text(
-                                [
-                                  if (ownerName.isNotEmpty && !mine) ownerName,
-                                  mine ? "Your pet" : null,
-                                  if (checkIn.isNotEmpty) "– Checked in at $checkIn",
-                                ].whereType<String>().join(' '),
-                              ),
-                              trailing: mine
-                                  ? null
-                                  : IconButton(
-                                      icon: Icon(
-                                        _favoritePetIds.contains(petId)
-                                            ? Icons.favorite
-                                            : Icons.favorite_border,
-                                        color: Colors.red,
-                                      ),
-                                      onPressed: () async {
-                                        final currentUser =
-                                            FirebaseAuth.instance.currentUser;
-                                        if (currentUser == null) return;
-
-                                        if (_favoritePetIds.contains(petId)) {
-                                          await FirebaseFirestore.instance
-                                              .collection('friends')
-                                              .doc(currentUser.uid)
-                                              .collection('userFriends')
-                                              .doc(ownerId)
-                                              .delete();
-                                          await FirebaseFirestore.instance
-                                              .collection('favorites')
-                                              .doc(currentUser.uid)
-                                              .collection('pets')
-                                              .doc(petId)
-                                              .delete();
-                                          if (mounted) {
-                                            setState(() {
-                                              _favoritePetIds.remove(petId);
-                                            });
-                                            setStateDialog(() {});
-                                          }
-                                          if (context.mounted) {
-                                            ScaffoldMessenger.of(context)
-                                                .showSnackBar(const SnackBar(
-                                                    content: Text(
-                                                        "Friend removed.")));
-                                          }
-                                          _fetchFavorites();
-                                        } else {
-                                          // Use public_profiles mirror for display name
-                                          String ownerDisplay =
-                                              ownerName.isNotEmpty
-                                                  ? ownerName
-                                                  : (await FirebaseFirestore
-                                                          .instance
-                                                          .collection(
-                                                              'public_profiles')
-                                                          .doc(ownerId)
-                                                          .get())
-                                                      .data()
-                                                      ?.let((d) =>
-                                                          (d['displayName'] ??
-                                                                  '')
-                                                              .toString()
-                                                              .trim()) ??
-                                                      ownerId;
-
-                                          await FirebaseFirestore.instance
-                                              .collection('friends')
-                                              .doc(currentUser.uid)
-                                              .collection('userFriends')
-                                              .doc(ownerId)
-                                              .set({
-                                            'friendId': ownerId,
-                                            'ownerName': ownerDisplay,
-                                            'addedAt':
-                                                FieldValue.serverTimestamp(),
-                                          });
-                                          await FirebaseFirestore.instance
-                                              .collection('favorites')
-                                              .doc(currentUser.uid)
-                                              .collection('pets')
-                                              .doc(petId)
-                                              .set({
-                                            'petId': petId,
-                                            'addedAt':
-                                                FieldValue.serverTimestamp(),
-                                          });
-                                          if (mounted) {
-                                            setState(() {
-                                              _favoritePetIds.add(petId);
-                                            });
-                                            setStateDialog(() {});
-                                          }
-                                          if (context.mounted) {
-                                            ScaffoldMessenger.of(context)
-                                                .showSnackBar(const SnackBar(
-                                                    content:
-                                                        Text("Friend added!")));
-                                          }
-                                          _fetchFavorites();
-                                        }
-                                      },
-                                    ),
-                            );
-                          },
-                        );
-                      },
-                    ),
-                  ),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                    children: [
-                      StatefulBuilder(
-                        builder: (context, setStateDialog) {
-                          final isProcessing = ValueNotifier<bool>(false);
-                          return ValueListenableBuilder<bool>(
-                            valueListenable: isProcessing,
-                            builder: (context, processing, _) {
-                              return ElevatedButton(
-                                style: ElevatedButton.styleFrom(
-                                  backgroundColor:
-                                      isCheckedIn ? Colors.red : Colors.green,
-                                ),
-                                onPressed: processing
-                                    ? null
-                                    : () async {
-                                        isProcessing.value = true;
-                                        if (isCheckedIn) {
-                                          await activeDocRef.delete();
-                                          if (context.mounted) {
-                                            ScaffoldMessenger.of(context)
-                                                .showSnackBar(const SnackBar(
-                                                    content: Text(
-                                                        "Checked out of park")));
-                                          }
-                                        } else {
-                                          await _locationService
-                                              .uploadUserToActiveUsersTable(
-                                            parkLatitude,
-                                            parkLongitude,
-                                            parkName,
-                                          );
-                                          if (context.mounted) {
-                                            ScaffoldMessenger.of(context)
-                                                .showSnackBar(const SnackBar(
-                                                    content: Text(
-                                                        "Checked in to park")));
-                                          }
-                                        }
-                                        isProcessing.value = false;
-                                        if (mounted) {
-                                          Navigator.of(context,
-                                                  rootNavigator: true)
-                                              .pop();
-                                        }
-                                      },
-                                child: processing
-                                    ? const SizedBox(
-                                        width: 18,
-                                        height: 18,
-                                        child: CircularProgressIndicator(
-                                            strokeWidth: 2),
-                                      )
-                                    : Text(
-                                        isCheckedIn ? "Check Out" : "Check In"),
-                              );
-                            },
+                        setStateDialog(() => isLiked = !isLiked);
+                      } catch (e) {
+                        if (context.mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(content: Text("Error updating like: $e")),
                           );
-                        },
-                      ),
-                      ElevatedButton(
-                        onPressed: () {
-                          Navigator.of(context, rootNavigator: true).pop();
-                          Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                              builder: (_) => ChatRoomScreen(parkId: parkId),
-                            ),
-                          );
-                        },
-                        child: const Text("Park Chat"),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 8),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                    children: [
-                      ElevatedButton(
-                        onPressed: () {
-                          Navigator.of(context, rootNavigator: true).pop();
-                          widget.onShowEvents(parkId);
-                        },
-                        child: const Text("Show Events"),
-                      ),
-                      ElevatedButton(
-                        onPressed: () {
-                          Navigator.of(context, rootNavigator: true).pop();
-                          _addEvent(parkId, parkLatitude, parkLongitude);
-                        },
-                        child: const Text("Add Event"),
-                      ),
-                    ],
+                        }
+                      }
+                    },
+                    icon: Icon(
+                      isLiked ? Icons.thumb_up : Icons.thumb_up_outlined,
+                    ),
                   ),
                 ],
               ),
-            ),
-            actions: [
-              StatefulBuilder(builder: (ctx, setStateLike) {
-                return TextButton.icon(
-                  onPressed: () async {
-                    try {
-                      if (isLiked) {
-                        await fs.unlikePark(parkId);
-                        if (ctx.mounted) {
-                          ScaffoldMessenger.of(ctx).showSnackBar(
-                            const SnackBar(
-                                content: Text("Removed park from liked parks")),
-                          );
-                        }
-                      } else {
-                        await fs.likePark(parkId);
-                        if (ctx.mounted) {
-                          ScaffoldMessenger.of(ctx).showSnackBar(
-                            const SnackBar(content: Text("Park liked!")),
-                          );
-                        }
-                      }
-                      setStateLike(() => isLiked = !isLiked);
-                    } catch (e) {
-                      if (ctx.mounted) {
-                        ScaffoldMessenger.of(ctx).showSnackBar(
-                          SnackBar(content: Text("Error updating like: $e")),
-                        );
-                      }
-                    }
-                  },
-                  icon: Icon(
-                    isLiked ? Icons.thumb_up : Icons.thumb_up_outlined,
-                    size: 16,
-                    color: isLiked ? Colors.green : Colors.grey,
-                  ),
-                  label: Text(
-                    isLiked ? "Liked" : "Like Park",
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: isLiked ? Colors.green : Colors.grey,
+              body: Column(
+                children: [
+                  // Services row (scrollable if long)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        child: Row(
+                          children: [
+                            ...services.map((service) => Padding(
+                                  padding: const EdgeInsets.only(right: 8.0),
+                                  child: Chip(
+                                    avatar: Icon(
+                                      service == "Off-leash Dog Park"
+                                          ? Icons.pets
+                                          : service == "Off-leash Trail"
+                                              ? Icons.terrain
+                                              : service == "Off-leash Beach"
+                                                  ? Icons.beach_access
+                                                  : Icons.park,
+                                      size: 18,
+                                      color: Colors.green,
+                                    ),
+                                    label: Text(service,
+                                        style: const TextStyle(fontSize: 12)),
+                                    backgroundColor: Colors.green[50],
+                                  ),
+                                )),
+                            // Add service (+) button
+                            GestureDetector(
+                              onTap: () async {
+                                final all = const [
+                                  "Off-leash Trail",
+                                  "Off-leash Dog Park",
+                                  "Off-leash Beach"
+                                ];
+                                final options =
+                                    all.where((s) => !services.contains(s)).toList();
+
+                                if (options.isEmpty) {
+                                  if (context.mounted) {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      const SnackBar(
+                                          content:
+                                              Text("All services are already added.")),
+                                    );
+                                  }
+                                  return;
+                                }
+
+                                final newService = await showDialog<String>(
+                                  context: context,
+                                  builder: (ctx) {
+                                    String? selected = options.first; // prefill
+                                    return StatefulBuilder(
+                                      builder: (ctx, setState) {
+                                        return AlertDialog(
+                                          title: const Text("Add Service"),
+                                          content: DropdownButtonFormField<String>(
+                                            value: selected,
+                                            items: options
+                                                .map((s) => DropdownMenuItem(
+                                                      value: s,
+                                                      child: Text(s),
+                                                    ))
+                                                .toList(),
+                                            onChanged: (val) =>
+                                                setState(() => selected = val),
+                                          ),
+                                          actions: [
+                                            TextButton(
+                                              onPressed: () => Navigator.of(ctx).pop(),
+                                              child: const Text("Cancel"),
+                                            ),
+                                            ElevatedButton(
+                                              onPressed: () =>
+                                                  Navigator.of(ctx).pop(selected),
+                                              child: const Text("Add"),
+                                            ),
+                                          ],
+                                        );
+                                      },
+                                    );
+                                  },
+                                );
+
+                                if (newService != null &&
+                                    newService.isNotEmpty &&
+                                    !services.contains(newService)) {
+                                  services.add(newService);
+                                  await FirebaseFirestore.instance
+                                      .collection('parks')
+                                      .doc(parkId)
+                                      .update({
+                                    'services': services,
+                                    'updatedAt': FieldValue.serverTimestamp(),
+                                  });
+
+                                  // Update local cache so filters reflect immediately
+                                  _parkServicesById[parkId] =
+                                      List<String>.from(services);
+
+                                  // Refresh full-screen UI
+                                  setStateDialog(() {});
+
+                                  if (_selectedFilters.isNotEmpty) {
+                                    _applyFilters();
+                                  }
+                                }
+                              },
+                              child: Container(
+                                margin: const EdgeInsets.only(left: 4),
+                                decoration: BoxDecoration(
+                                  color: Colors.green,
+                                  borderRadius: BorderRadius.circular(16),
+                                ),
+                                padding: const EdgeInsets.all(6),
+                                child: const Icon(Icons.add,
+                                    color: Colors.white, size: 18),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
                     ),
                   ),
-                );
-              }),
-              TextButton(
-                onPressed: () => Navigator.of(context).pop(),
-                child: const Text("Close", style: TextStyle(fontSize: 12)),
+
+                  // Users list
+                  Expanded(
+                    child: ListView.separated(
+                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                      itemCount: userList.length,
+                      separatorBuilder: (_, __) => const SizedBox(height: 6),
+                      itemBuilder: (ctx, i) {
+                        final petData = userList[i];
+                        final ownerId = petData['ownerId'] as String? ?? '';
+                        final petId = petData['petId'] as String? ?? '';
+                        final petName = petData['petName'] as String? ?? '';
+                        final petPhoto = petData['petPhotoUrl'] as String? ?? '';
+                        final checkIn = petData['checkInTime'] as String? ?? '';
+                        final ownerName =
+                            (petData['ownerName'] as String? ?? '').trim();
+                        final mine = (ownerId == currentUser.uid);
+
+                        return ListTile(
+                          leading: (petPhoto.isNotEmpty)
+                              ? CircleAvatar(backgroundImage: NetworkImage(petPhoto))
+                              : const CircleAvatar(
+                                  backgroundColor: Colors.brown,
+                                  child: Icon(Icons.pets, color: Colors.white),
+                                ),
+                          title: Text(petName),
+                          subtitle: Text(
+                            [
+                              if (ownerName.isNotEmpty && !mine) ownerName,
+                              mine ? "Your pet" : null,
+                              if (checkIn.isNotEmpty) "– Checked in at $checkIn",
+                            ].whereType<String>().join(' '),
+                          ),
+                          trailing: mine
+                              ? null
+                              : IconButton(
+                                  icon: Icon(
+                                    _favoritePetIds.contains(petId)
+                                        ? Icons.favorite
+                                        : Icons.favorite_border,
+                                    color: Colors.red,
+                                  ),
+                                  onPressed: () async {
+                                    final currentUser =
+                                        FirebaseAuth.instance.currentUser;
+                                    if (currentUser == null) return;
+
+                                    if (_favoritePetIds.contains(petId)) {
+                                      await FirebaseFirestore.instance
+                                          .collection('friends')
+                                          .doc(currentUser.uid)
+                                          .collection('userFriends')
+                                          .doc(ownerId)
+                                          .delete();
+                                      await FirebaseFirestore.instance
+                                          .collection('favorites')
+                                          .doc(currentUser.uid)
+                                          .collection('pets')
+                                          .doc(petId)
+                                          .delete();
+                                      if (mounted) {
+                                        setState(() {
+                                          _favoritePetIds.remove(petId);
+                                        });
+                                      }
+                                      if (context.mounted) {
+                                        ScaffoldMessenger.of(context).showSnackBar(
+                                          const SnackBar(
+                                              content: Text("Friend removed.")),
+                                        );
+                                      }
+                                      _fetchFavorites();
+                                    } else {
+                                      // Use public_profiles mirror for display name
+                                      String ownerDisplay =
+                                          ownerName.isNotEmpty
+                                              ? ownerName
+                                              : (await FirebaseFirestore.instance
+                                                      .collection('public_profiles')
+                                                      .doc(ownerId)
+                                                      .get())
+                                                  .data()
+                                                  ?.let((d) =>
+                                                      (d['displayName'] ?? '')
+                                                          .toString()
+                                                          .trim()) ??
+                                                  ownerId;
+
+                                      await FirebaseFirestore.instance
+                                          .collection('friends')
+                                          .doc(currentUser.uid)
+                                          .collection('userFriends')
+                                          .doc(ownerId)
+                                          .set({
+                                        'friendId': ownerId,
+                                        'ownerName': ownerDisplay,
+                                        'addedAt':
+                                            FieldValue.serverTimestamp(),
+                                      });
+                                      await FirebaseFirestore.instance
+                                          .collection('favorites')
+                                          .doc(currentUser.uid)
+                                          .collection('pets')
+                                          .doc(petId)
+                                          .set({
+                                        'petId': petId,
+                                        'addedAt':
+                                            FieldValue.serverTimestamp(),
+                                      });
+                                      if (mounted) {
+                                        setState(() {
+                                          _favoritePetIds.add(petId);
+                                        });
+                                      }
+                                      if (context.mounted) {
+                                        ScaffoldMessenger.of(context).showSnackBar(
+                                          const SnackBar(
+                                              content: Text("Friend added!")),
+                                        );
+                                      }
+                                      _fetchFavorites();
+                                    }
+                                  },
+                                ),
+                        );
+                      },
+                    ),
+                  ),
+
+                  // Big buttons (row 1): Check In/Out + Park Chat
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(12, 8, 12, 6),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: _BigActionButton(
+                            label: isCheckedIn ? "Check Out" : "Check In",
+                            backgroundColor:
+                                isCheckedIn ? Colors.red : const Color(0xFF567D46),
+                            onPressed: () async {
+                              // keep identical behavior
+                              final processing = ValueNotifier<bool>(true);
+                              showDialog(
+                                  context: context,
+                                  barrierDismissible: false,
+                                  builder: (_) {
+                                    return const AlertDialog(
+                                      content: SizedBox(
+                                        height: 120,
+                                        child: Center(
+                                            child: CircularProgressIndicator()),
+                                      ),
+                                    );
+                                  });
+                              if (isCheckedIn) {
+                                await activeDocRef.delete();
+                                if (context.mounted) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(
+                                        content: Text("Checked out of park")),
+                                  );
+                                }
+                              } else {
+                                await _locationService
+                                    .uploadUserToActiveUsersTable(
+                                  parkLatitude,
+                                  parkLongitude,
+                                  parkName,
+                                );
+                                if (context.mounted) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(
+                                        content: Text("Checked in to park")),
+                                  );
+                                }
+                              }
+                              processing.value = false;
+                              if (mounted) {
+                                Navigator.of(context, rootNavigator: true).pop();
+                                Navigator.of(context).pop(); // close full-screen
+                              }
+                            },
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: _BigActionButton(
+                            label: "Park Chat",
+                            onPressed: () {
+                              Navigator.of(context).pop();
+                              Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (_) => ChatRoomScreen(parkId: parkId),
+                                ),
+                              );
+                            },
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+
+                  // Big buttons (row 2): Show Events + Add Event
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(12, 0, 12, 16),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: _BigActionButton(
+                            label: "Show Events",
+                            onPressed: () {
+                              Navigator.of(context).pop();
+                              widget.onShowEvents(parkId);
+                            },
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: _BigActionButton(
+                            label: "Add Event",
+                            onPressed: () {
+                              Navigator.of(context).pop();
+                              _addEvent(parkId, parkLatitude, parkLongitude);
+                            },
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
               ),
-            ],
-          );
+            );
+          });
         },
       );
     } catch (e) {
       if (!mounted) return;
       Navigator.of(context, rootNavigator: true).pop();
-      ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("Error loading active users: $e")));
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text("Error loading active users: $e")));
     }
   }
+  // -----------------------------------------------------------------------------------------
 
   Future<void> _handleCheckIn(Park park, double parkLatitude,
       double parkLongitude, BuildContext context) async {
@@ -1439,13 +1421,12 @@ class _MapTabState extends State<MapTab>
                                 );
                               }
 
-                              if (!eventEndDateTime
-                                  .isAfter(eventStartDateTime)) {
+                              if (!eventEndDateTime.isAfter(eventStartDateTime)) {
                                 if (!mounted) return;
                                 ScaffoldMessenger.of(context).showSnackBar(
                                   const SnackBar(
-                                      content: Text(
-                                          "End time must be after start time")),
+                                      content:
+                                          Text("End time must be after start time")),
                                 );
                                 return;
                               }
@@ -1570,7 +1551,6 @@ class _MapTabState extends State<MapTab>
     final currentUser = FirebaseAuth.instance.currentUser;
     if (currentUser == null) return;
     try {
-      // Pull friendly display name from public_profiles mirror
       final ownerDoc = await FirebaseFirestore.instance
           .collection('public_profiles')
           .doc(friendUserId)
@@ -1648,7 +1628,6 @@ class _MapTabState extends State<MapTab>
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    // Removed extra fetching here to avoid duplicate loads.
   }
 
   @override
@@ -1853,6 +1832,34 @@ class _MapTabState extends State<MapTab>
 }
 
 // -------- Helpers --------
+
+class _BigActionButton extends StatelessWidget {
+  final String label;
+  final VoidCallback onPressed;
+  final Color? backgroundColor;
+  const _BigActionButton({
+    Key? key,
+    required this.label,
+    required this.onPressed,
+    this.backgroundColor,
+  }) : super(key: key);
+
+  @override
+  Widget build(BuildContext context) {
+    return ElevatedButton(
+      style: ElevatedButton.styleFrom(
+        backgroundColor: backgroundColor ?? const Color(0xFF567D46),
+        foregroundColor: Colors.white,
+        minimumSize: const Size.fromHeight(56), // bigger tap target
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+        textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+        padding: const EdgeInsets.symmetric(vertical: 16),
+      ),
+      onPressed: onPressed,
+      child: Text(label),
+    );
+  }
+}
 
 extension _ChunkExt<T> on List<T> {
   List<List<T>> chunked(int size) {

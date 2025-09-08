@@ -36,6 +36,9 @@ class _ServiceTabState extends State<ServiceTab> {
   double? userLng;
   bool _isLoading = true;
 
+  // Quick filter: show only ads created by current user
+  bool _showOnlyMine = false;
+
   final _firestore = FirebaseFirestore.instance;
 
   @override
@@ -179,6 +182,7 @@ class _ServiceTabState extends State<ServiceTab> {
                     ),
                   ),
                   actions: [
+                    // Only show edit/delete when user is the creator
                     if (isOwner)
                       IconButton(
                         icon: const Icon(Icons.edit),
@@ -595,6 +599,7 @@ class _ServiceTabState extends State<ServiceTab> {
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
+                      // Only show edit/delete when user is the creator
                       if (isOwner)
                         Row(
                           children: [
@@ -711,10 +716,40 @@ class _ServiceTabState extends State<ServiceTab> {
     );
   }
 
+  void _onTapMyPostsQuickFilter() {
+    final current = FirebaseAuth.instance.currentUser;
+    if (current == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Sign in to view your posts.')),
+      );
+      return;
+    }
+
+    final myCount = _ads.where((a) => a.ownerId == current.uid).length;
+    if (myCount == 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("You haven't created any services yet")),
+      );
+      // Do not toggle on since there are none
+      return;
+    }
+
+    setState(() => _showOnlyMine = !_showOnlyMine);
+  }
+
   @override
   Widget build(BuildContext context) {
-    final filteredAds =
-        _selectedType == 'All' ? _ads : _ads.where((ad) => ad.type == _selectedType).toList();
+    final current = FirebaseAuth.instance.currentUser;
+
+    // Apply type filter first
+    List<ServiceAd> filteredAds = _selectedType == 'All'
+        ? _ads
+        : _ads.where((ad) => ad.type == _selectedType).toList();
+
+    // Then apply "My posts" quick filter if active
+    if (_showOnlyMine && current != null) {
+      filteredAds = filteredAds.where((ad) => ad.ownerId == current.uid).toList();
+    }
 
     return Scaffold(
       body: Column(
@@ -750,7 +785,8 @@ class _ServiceTabState extends State<ServiceTab> {
                       selectedColor: Colors.green[100],
                       labelStyle: TextStyle(
                         color: isSelected ? Colors.green[800] : Colors.black,
-                        fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                        fontWeight:
+                            isSelected ? FontWeight.bold : FontWeight.normal,
                       ),
                     ),
                   );
@@ -758,6 +794,17 @@ class _ServiceTabState extends State<ServiceTab> {
               ),
             ),
           ),
+          // Optional small banner to show quick filter status (purely visual)
+          if (_showOnlyMine)
+            Container(
+              width: double.infinity,
+              color: Colors.green.shade50,
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              child: const Text(
+                'Showing only your services',
+                style: TextStyle(color: Colors.green, fontWeight: FontWeight.w600),
+              ),
+            ),
           Expanded(
             child: _isLoading
                 ? const Center(child: CircularProgressIndicator())
@@ -769,7 +816,9 @@ class _ServiceTabState extends State<ServiceTab> {
                             Icon(Icons.search_off, size: 64, color: Colors.grey[400]),
                             const SizedBox(height: 16),
                             Text(
-                              'No services found${_selectedType != 'All' ? ' for $_selectedType' : ''}',
+                              'No services found'
+                              '${_selectedType != 'All' ? ' for $_selectedType' : ''}'
+                              '${_showOnlyMine ? ' (your posts)' : ''}',
                               style: TextStyle(color: Colors.grey[600], fontSize: 16),
                             ),
                           ],
@@ -778,18 +827,36 @@ class _ServiceTabState extends State<ServiceTab> {
                     : RefreshIndicator(
                         onRefresh: _fetchAds,
                         child: ListView.builder(
-                          padding: const EdgeInsets.only(top: 8, bottom: 80),
+                          padding: const EdgeInsets.only(top: 8, bottom: 120),
                           itemCount: filteredAds.length,
-                          itemBuilder: (context, index) => _buildAdCard(filteredAds[index]),
+                          itemBuilder: (context, index) =>
+                              _buildAdCard(filteredAds[index]),
                         ),
                       ),
           ),
         ],
       ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: () => _openPostScreen(),
-        backgroundColor: Colors.green,
-        child: const Icon(Icons.add),
+      // Two FABs stacked vertically: quick filter above the "+" button
+      floatingActionButton: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // Quick filter: My posts
+          FloatingActionButton.extended(
+            heroTag: 'fab_my_posts',
+            onPressed: _onTapMyPostsQuickFilter,
+            backgroundColor: _showOnlyMine ? const Color(0xFF2E7D32) : const Color(0xFF66BB6A),
+            icon: const Icon(Icons.filter_list, color: Colors.white),
+            label: const Text('My posts', style: TextStyle(color: Colors.white)),
+          ),
+          const SizedBox(height: 12),
+          // Add new post
+          FloatingActionButton(
+            heroTag: 'fab_add',
+            onPressed: () => _openPostScreen(),
+            backgroundColor: Colors.green,
+            child: const Icon(Icons.add),
+          ),
+        ],
       ),
     );
   }
