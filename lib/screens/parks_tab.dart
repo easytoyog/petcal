@@ -56,8 +56,7 @@ class _ParksTabState extends State<ParksTab> {
         'latitude': p.latitude,
         'longitude': p.longitude,
         'createdAt': FieldValue.serverTimestamp(),
-        'userCount': 0,
-        'services': [],
+        // do NOT write userCount/services here (rules will reject)
       });
     }
   }
@@ -187,74 +186,74 @@ class _ParksTabState extends State<ParksTab> {
 
   // ---------- Transactions: make negatives impossible ----------
   Future<void> _txCheckOut(String parkId) async {
+    final uid = _currentUserId;
+    if (uid == null) return;
+
     final db = FirebaseFirestore.instance;
-    final parkRef = db.collection('parks').doc(parkId);
-    final userRef = parkRef.collection('active_users').doc(_currentUserId);
+    final userRef = db.collection('parks')
+        .doc(parkId)
+        .collection('active_users')
+        .doc(uid);
 
     await db.runTransaction((tx) async {
-      final userSnap = await tx.get(userRef);
-      if (!userSnap.exists) return; // nothing to do
-
-      final parkSnap = await tx.get(parkRef);
-      final cur = (parkSnap.data()?['userCount'] ?? 0) as int;
-
+      final snap = await tx.get(userRef);
+      if (!snap.exists) return;
       tx.delete(userRef);
-      final next = cur > 0 ? cur - 1 : 0; // floor at 0
-      tx.update(parkRef, {'userCount': next});
     });
   }
 
   Future<void> _txCheckIn(String parkId) async {
+    final uid = _currentUserId;
+    if (uid == null) return;
+
     final db = FirebaseFirestore.instance;
-    final parkRef = db.collection('parks').doc(parkId);
-    final userRef = parkRef.collection('active_users').doc(_currentUserId);
+    final userRef = db.collection('parks')
+        .doc(parkId)
+        .collection('active_users')
+        .doc(uid);
 
     await db.runTransaction((tx) async {
-      final userSnap = await tx.get(userRef);
-      if (userSnap.exists) return; // already checked in
-
-      final parkSnap = await tx.get(parkRef);
-      final cur = (parkSnap.data()?['userCount'] ?? 0) as int;
-
-      tx.set(userRef, {'checkedInAt': FieldValue.serverTimestamp()});
-      tx.update(parkRef, {'userCount': cur + 1});
+      final snap = await tx.get(userRef);
+      if (snap.exists) return; // already checked in
+      tx.set(userRef, {
+        'uid': uid,
+        'checkedInAt': FieldValue.serverTimestamp(),
+      });
     });
   }
 
+  // Clear any other check-ins (batch delete). No userCount mutations.
   Future<void> _checkOutFromAllParks() async {
-    if (_currentUserId == null) return;
+    final uid = _currentUserId;
+    if (uid == null) return;
+
     try {
+      // requires the collection-group index on active_users.uid (you created this earlier)
       final snaps = await FirebaseFirestore.instance
           .collectionGroup('active_users')
-          .where(FieldPath.documentId, isEqualTo: _currentUserId)
+          .where('uid', isEqualTo: uid)
           .get();
 
-      for (final doc in snaps.docs) {
-        final parkRef = doc.reference.parent.parent; // parks/{parkId}
-        if (parkRef == null) continue;
-
-        await FirebaseFirestore.instance.runTransaction((tx) async {
-          final userSnap = await tx.get(doc.reference);
-          if (!userSnap.exists) return;
-
-          final parkSnap = await tx.get(parkRef);
-          final cur = (parkSnap.data()?['userCount'] ?? 0) as int;
-
-          tx.delete(doc.reference);
-          tx.update(parkRef, {'userCount': cur > 0 ? cur - 1 : 0});
-        });
-
-        _checkedInParkIds.remove(parkRef.id);
-        _activeUserCounts.update(
-          parkRef.id,
-          (v) => (v - 1).clamp(0, 1 << 30),
-          ifAbsent: () => 0,
-        );
+      final wb = FirebaseFirestore.instance.batch();
+      for (final d in snaps.docs) {
+        wb.delete(d.reference);
+        final parkRef = d.reference.parent.parent;
+        if (parkRef != null) {
+          // keep your local optimistic counters; don't write Firestore userCount
+          _checkedInParkIds.remove(parkRef.id);
+          _activeUserCounts.update(
+            parkRef.id,
+            (v) => (v - 1).clamp(0, 1 << 30),
+            ifAbsent: () => 0,
+          );
+        }
       }
+      await wb.commit();
     } catch (_) {
       // ignore
     }
   }
+
 
   // ---------- Active pets dialog (optimized) ----------
   Future<void> _showActiveUsersDialog(String parkId) async {

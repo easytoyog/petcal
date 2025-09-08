@@ -118,30 +118,25 @@ class _FriendsTabState extends State<FriendsTab> {
       setState(() => _friendOwnerNames = {});
       return;
     }
-    List<String> idsToQuery =
-        friendIds.where((id) => id != currentUserId).toList();
-    int chunkSize = 10;
+    final idsToQuery = friendIds.where((id) => id != currentUserId).toList();
+    const chunkSize = 10;
     for (int i = 0; i < idsToQuery.length; i += chunkSize) {
-      List<String> chunk =
-          idsToQuery.sublist(i, min(i + chunkSize, idsToQuery.length));
-      QuerySnapshot snapshot = await FirebaseFirestore.instance
-          .collection('owners')
+      final chunk = idsToQuery.sublist(i, min(i + chunkSize, idsToQuery.length));
+      final snapshot = await FirebaseFirestore.instance
+          .collection('public_profiles') // 👈 was 'owners'
           .where(FieldPath.documentId, whereIn: chunk)
           .get();
-      for (var doc in snapshot.docs) {
+
+      for (final doc in snapshot.docs) {
         final data = doc.data() as Map<String, dynamic>;
-        String firstName = data['firstName'] ?? data['first_name'] ?? '';
-        String lastName = data['lastName'] ?? data['last_name'] ?? '';
-        String name = "$firstName $lastName".trim();
-        if (name.isEmpty) name = "Unknown";
-        names[doc.id] = name;
+        final dn = (data['displayName'] ?? '').toString().trim();
+        names[doc.id] = dn.isEmpty ? 'Unknown' : dn;
       }
     }
     if (!mounted) return;
-    setState(() {
-      _friendOwnerNames = names;
-    });
+    setState(() => _friendOwnerNames = names);
   }
+
 
   // No major optimization here, but you could cache park names if needed
   Future<void> _fetchActiveParksMapping() async {
@@ -174,125 +169,90 @@ class _FriendsTabState extends State<FriendsTab> {
 
   Future<void> _searchPets(String query) async {
     if (query.length < 2) {
-      setState(() {
-        _searchResults = [];
-      });
+      setState(() => _searchResults = []);
       return;
     }
-    setState(() {
-      _isSearching = true;
-    });
+    setState(() => _isSearching = true);
+
     try {
-      String lowerQuery = query.toLowerCase();
+      final lowerQuery = query.toLowerCase();
 
-      // Fetch all pets matching the query (could be optimized with an index)
-      QuerySnapshot petSnapshot =
-          await FirebaseFirestore.instance.collection('pets').get();
-      List<Map<String, dynamic>> petResults = petSnapshot.docs.map((doc) {
-        Map<String, dynamic> data = doc.data() as Map<String, dynamic>;
-        data['petId'] = doc.id;
-        return data;
-      }).toList();
-      petResults = petResults.where((pet) {
-        String petName = (pet['name'] ?? '').toString().toLowerCase();
-        return petName.contains(lowerQuery);
+      // 1) Read pets (now allowed by rules) and filter by name client-side
+      final petSnapshot = await FirebaseFirestore.instance
+          .collection('pets')
+          .get();
+
+      final pets = petSnapshot.docs.map((d) {
+        final m = d.data() as Map<String, dynamic>;
+        m['petId'] = d.id;
+        return m;
+      }).where((m) {
+        final name = (m['name'] ?? '').toString().toLowerCase();
+        return name.contains(lowerQuery);
       }).toList();
 
-      // Fetch all owners matching the query
-      QuerySnapshot ownersSnapshot =
-          await FirebaseFirestore.instance.collection('owners').get();
-      Set<String> matchingOwnerIds = {};
-      for (var doc in ownersSnapshot.docs) {
-        Map<String, dynamic> data = doc.data() as Map<String, dynamic>;
-        String firstName = data['firstName'] ?? data['first_name'] ?? '';
-        String lastName = data['lastName'] ?? data['last_name'] ?? '';
-        String fullName = "$firstName $lastName".toLowerCase();
-        if (fullName.contains(lowerQuery)) {
-          matchingOwnerIds.add(doc.id);
-        }
+      // 2) Also search owner displayName in public_profiles to find their pets
+      final profilesSnap = await FirebaseFirestore.instance
+          .collection('public_profiles')
+          .get();
+
+      final matchingOwnerIds = <String>{};
+      for (final d in profilesSnap.docs) {
+        final dn = (d.data()['displayName'] ?? '').toString().toLowerCase();
+        if (dn.contains(lowerQuery)) matchingOwnerIds.add(d.id);
       }
-      // Batch fetch pets for matching owners
-      List<Map<String, dynamic>> ownerPetResults = [];
-      List<String> ownerIdList = matchingOwnerIds.toList();
-      int chunkSize = 10;
-      for (int i = 0; i < ownerIdList.length; i += chunkSize) {
-        List<String> chunk =
-            ownerIdList.sublist(i, min(i + chunkSize, ownerIdList.length));
-        QuerySnapshot ownerPetSnapshot = await FirebaseFirestore.instance
+
+      final ownerPetResults = <Map<String, dynamic>>[];
+      final ownerList = matchingOwnerIds.toList();
+      for (int i = 0; i < ownerList.length; i += 10) {
+        final chunk = ownerList.sublist(i, min(i + 10, ownerList.length));
+        final ownerPetsSnap = await FirebaseFirestore.instance
             .collection('pets')
             .where('ownerId', whereIn: chunk)
             .limit(1)
             .get();
-        for (var doc in ownerPetSnapshot.docs) {
-          Map<String, dynamic> data = doc.data() as Map<String, dynamic>;
-          data['petId'] = doc.id;
-          data['ownerId'] = data['ownerId'];
-          DocumentSnapshot ownerDoc = await FirebaseFirestore.instance
-              .collection('owners')
-              .doc(data['ownerId'])
-              .get();
-          if (ownerDoc.exists) {
-            Map<String, dynamic> ownerData =
-                ownerDoc.data() as Map<String, dynamic>;
-            String firstName =
-                ownerData['firstName'] ?? ownerData['first_name'] ?? '';
-            String lastName =
-                ownerData['lastName'] ?? ownerData['last_name'] ?? '';
-            data['ownerName'] = "$firstName $lastName".trim();
-          } else {
-            data['ownerName'] = "Unknown";
-          }
-          ownerPetResults.add(data);
+
+        for (final d in ownerPetsSnap.docs) {
+          final m = d.data() as Map<String, dynamic>;
+          m['petId'] = d.id;
+          ownerPetResults.add(m);
         }
       }
-      // Merge and deduplicate results
-      List<Map<String, dynamic>> combinedResults = [];
-      Set<String> seen = {};
-      for (var pet in petResults) {
-        if (pet.containsKey('petId')) {
-          seen.add(pet['petId']);
-          combinedResults.add(pet);
-        }
+
+      // 3) Merge and attach owner displayName from public_profiles
+      final combined = <Map<String, dynamic>>[];
+      final seen = <String>{};
+      final ownerNameCache = <String, String>{};
+
+      Future<String> ownerName(String ownerId) async {
+        if (ownerNameCache.containsKey(ownerId)) return ownerNameCache[ownerId]!;
+        final doc = await FirebaseFirestore.instance
+            .collection('public_profiles')
+            .doc(ownerId)
+            .get();
+        final dn = ((doc.data()?['displayName']) ?? 'Unknown').toString();
+        ownerNameCache[ownerId] = dn;
+        return dn;
       }
-      for (var pet in ownerPetResults) {
-        if (pet.containsKey('petId') && !seen.contains(pet['petId'])) {
-          combinedResults.add(pet);
-        }
+
+      for (final p in [...pets, ...ownerPetResults]) {
+        final id = p['petId'] as String?;
+        if (id == null || seen.contains(id)) continue;
+        seen.add(id);
+        final ownerId = (p['ownerId'] ?? '').toString();
+        p['ownerName'] = ownerId.isEmpty ? 'Unknown' : await ownerName(ownerId);
+        p['photoUrl'] = p['photoUrl'] ?? 'https://via.placeholder.com/100';
+        combined.add(p);
       }
-      for (var pet in combinedResults) {
-        if (pet['ownerName'] == null ||
-            pet['ownerName'].toString().trim().isEmpty) {
-          String ownerId = pet['ownerId'];
-          DocumentSnapshot ownerDoc = await FirebaseFirestore.instance
-              .collection('owners')
-              .doc(ownerId)
-              .get();
-          if (ownerDoc.exists) {
-            Map<String, dynamic> ownerData =
-                ownerDoc.data() as Map<String, dynamic>;
-            String firstName =
-                ownerData['firstName'] ?? ownerData['first_name'] ?? '';
-            String lastName =
-                ownerData['lastName'] ?? ownerData['last_name'] ?? '';
-            pet['ownerName'] = "$firstName $lastName".trim();
-            if (pet['ownerName'].toString().isEmpty) {
-              pet['ownerName'] = "Unknown";
-            }
-          } else {
-            pet['ownerName'] = "Unknown";
-          }
-        }
-      }
-      setState(() {
-        _searchResults = combinedResults;
-      });
+
+      setState(() => _searchResults = combined);
     } catch (e) {
       print("Error searching pets: $e");
     }
-    setState(() {
-      _isSearching = false;
-    });
+
+    setState(() => _isSearching = false);
   }
+
 
   Future<void> _addFriendFromSearch(Map<String, dynamic> petData) async {
     String friendId = petData['ownerId'];

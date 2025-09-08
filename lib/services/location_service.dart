@@ -183,43 +183,45 @@ class LocationService {
 
     final db = FirebaseFirestore.instance;
     final parkId = generateParkID(lat, lng, parkName);
+    final parkRef = db.collection('parks').doc(parkId);
 
-    // 1) Ensure park exists (safe fields only)
-    await db.collection('parks').doc(parkId).set({
-      'id': parkId,
-      'name': parkName,
-      'latitude': lat,
-      'longitude': lng,
-      'createdAt': FieldValue.serverTimestamp(),
-    }, SetOptions(merge: true));
+    // 1) Ensure park exists (safe fields only). Do NOT write 'uid'.
+    final parkSnap = await parkRef.get();
+    if (!parkSnap.exists) {
+      await parkRef.set({
+        'id': parkId,
+        'name': parkName,
+        'latitude': lat,
+        'longitude': lng,
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+    }
 
     // 2) Single-check-in: delete any existing active_users/{uid} anywhere
-    final snaps = await db
+    final existing = await db
         .collectionGroup('active_users')
-        .where(FieldPath.documentId, isEqualTo: uid)
+        .where('uid', isEqualTo: uid)
         .get();
 
-    if (snaps.docs.isNotEmpty) {
+    if (existing.docs.isNotEmpty) {
       final batch = db.batch();
-      for (final d in snaps.docs) {
+      for (final d in existing.docs) {
         batch.delete(d.reference);
       }
       await batch.commit();
-      // onDocumentDeleted CF will decrement userCount
+      // CF onDocumentDeleted will decrement userCount
     }
 
-    // 3) Create/overwrite check-in here – ONLY the allowed field(s)
-    await db
-        .collection('parks')
-        .doc(parkId)
-        .collection('active_users')
-        .doc(uid)
-        .set({
+    // 3) Create/overwrite check-in here – write 'uid' + 'checkedInAt' only
+    await parkRef.collection('active_users').doc(uid).set({
+      'uid': uid,
       'checkedInAt': FieldValue.serverTimestamp(),
     });
 
     // Do NOT touch userCount here (server maintains it).
   }
+
+
 
   /// Uncheck the current user from a specific park.
   /// Cloud Functions will decrement `userCount`.

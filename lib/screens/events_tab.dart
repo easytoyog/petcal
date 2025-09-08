@@ -1,17 +1,18 @@
-// events_tab.dart (optimized)
+// events_tab.dart
 import 'dart:async';
 import 'dart:math';
-import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:inthepark/models/park_event.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:location/location.dart' as loc;
+import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
+import 'package:location/location.dart' as loc;
+
+import 'package:inthepark/models/park_event.dart';
 import 'package:inthepark/screens/chatroom_screen.dart';
 import 'package:inthepark/widgets/ad_banner.dart';
 
 class EventsTab extends StatefulWidget {
-  final String? parkIdFilter;
+  final String? parkIdFilter; // optional: only events for a specific park
   const EventsTab({Key? key, this.parkIdFilter}) : super(key: key);
 
   @override
@@ -19,93 +20,75 @@ class EventsTab extends StatefulWidget {
 }
 
 class _EventsTabState extends State<EventsTab> {
-  // UI / state
+  // --- Config ---
+  static const double nearbyKm = 2.0;
+  static const int pageSize = 40;
+
+  // --- State ---
   bool _isLoading = true;
   bool _isPaging = false;
   bool _hasMore = true;
-  final int _pageSize = 40;
+  DocumentSnapshot? _lastDoc;
 
-  // Data
   final List<ParkEvent> _allEvents = [];
-  List<ParkEvent> _filteredEvents = [];
-  String _searchQuery = "";
-  String _filterMode = "All"; // or 'Liked'
+  List<ParkEvent> _likedEvents = [];
+  List<ParkEvent> _nearbyEvents = [];
+
+  // Caches
+  final Map<String, String> _parkNameById = {}; // parkId -> park name
 
   // Location
   loc.LocationData? _userLocation;
-
-  // Scrolling / pagination
-  final ScrollController _scrollController = ScrollController();
-  DocumentSnapshot? _lastDoc;
-
-  // Debounce search / park query lists
-  Timer? _searchDebounce;
-
-  // “Other nearby” anchor
-  final GlobalKey otherEventsKey = GlobalKey();
-  bool _showOtherEventsClicked = false;
+  final ScrollController _scroll = ScrollController();
 
   @override
   void initState() {
     super.initState();
-    _scrollController.addListener(_onScroll);
+    _scroll.addListener(_onScroll);
     _init();
-  }
-
-  Future<void> _init() async {
-    await _fetchUserLocation();
-    await _fetchEvents(reset: true);
   }
 
   @override
   void dispose() {
-    _scrollController.removeListener(_onScroll);
-    _scrollController.dispose();
-    _searchDebounce?.cancel();
+    _scroll.removeListener(_onScroll);
+    _scroll.dispose();
     super.dispose();
   }
 
-  // ---------- Location ----------
+  Future<void> _init() async {
+    await _fetchUserLocation();      // if this fails, screen shows a message
+    await _fetchEvents(reset: true); // still fetch so we’re ready when enabled
+  }
+
+  // ------------------ Location ------------------
   Future<void> _fetchUserLocation() async {
     try {
-      final location = loc.Location();
-      bool serviceEnabled = await location.serviceEnabled();
+      final l = loc.Location();
+      bool serviceEnabled = await l.serviceEnabled();
       if (!serviceEnabled) {
-        serviceEnabled = await location.requestService();
+        serviceEnabled = await l.requestService();
         if (!serviceEnabled) return;
       }
-      var permissionGranted = await location.hasPermission();
-      if (permissionGranted == loc.PermissionStatus.denied) {
-        permissionGranted = await location.requestPermission();
-        if (permissionGranted != loc.PermissionStatus.granted) return;
+      var permission = await l.hasPermission();
+      if (permission == loc.PermissionStatus.denied) {
+        permission = await l.requestPermission();
+        if (permission != loc.PermissionStatus.granted) return;
       }
-      final locData = await location.getLocation();
-      if (!mounted) return;
-      setState(() => _userLocation = locData);
-    } catch (e) {
-      debugPrint("Error fetching user location in EventsTab: $e");
+      final data = await l.getLocation();
+      if (mounted) setState(() => _userLocation = data);
+    } catch (_) {
+      // Do nothing — UI will ask user to enable location.
     }
   }
 
-  // ---------- Distance ----------
-  double _computeDistanceKm(
-      double lat1, double lng1, double lat2, double lng2) {
-    // Haversine (km)
-    const earth = 6371.0;
-    final dLat = _degToRad(lat2 - lat1);
-    final dLng = _degToRad(lng2 - lng1);
-    final a = sin(dLat / 2) * sin(dLat / 2) +
-        cos(_degToRad(lat1)) *
-            cos(_degToRad(lat2)) *
-            sin(dLng / 2) *
-            sin(dLng / 2);
-    final c = 2 * atan2(sqrt(a), sqrt(1 - a));
-    return earth * c;
+  // ------------------ Paging ------------------
+  void _onScroll() {
+    if (!_hasMore || _isPaging || _isLoading) return;
+    if (_scroll.position.pixels > _scroll.position.maxScrollExtent - 400) {
+      _fetchEvents();
+    }
   }
 
-  double _degToRad(double deg) => deg * (pi / 180);
-
-  // ---------- Firestore fetch (paged) ----------
   Future<void> _fetchEvents({bool reset = false}) async {
     if (_isPaging || (!_hasMore && !reset)) return;
 
@@ -122,10 +105,8 @@ class _EventsTabState extends State<EventsTab> {
     }
 
     try {
-      final now = DateTime.now();
-
       Query baseQuery;
-      if (widget.parkIdFilter != null) {
+      if (widget.parkIdFilter != null && widget.parkIdFilter!.isNotEmpty) {
         baseQuery = FirebaseFirestore.instance
             .collection('parks')
             .doc(widget.parkIdFilter)
@@ -134,141 +115,423 @@ class _EventsTabState extends State<EventsTab> {
         baseQuery = FirebaseFirestore.instance.collectionGroup('events');
       }
 
-      // We page by createdAt for consistency and speed. (Make sure you write createdAt when adding)
-      Query q =
-          baseQuery.orderBy('createdAt', descending: true).limit(_pageSize);
+      // Page by createdAt; client filters upcoming/recurring.
+      Query q = baseQuery.orderBy('createdAt', descending: true).limit(pageSize);
       if (_lastDoc != null) q = q.startAfterDocument(_lastDoc!);
 
       final snap = await q.get();
       if (snap.docs.isNotEmpty) _lastDoc = snap.docs.last;
 
-      // Map -> model
-      final fetched =
-          snap.docs.map((d) => ParkEvent.fromFirestore(d)).where((e) {
-        // Keep recurring; keep one-time if in the future
-        final keepRecurring = e.recurrence != "One Time";
-        final keepUpcoming = e.endDateTime.isAfter(now);
-        return keepRecurring || keepUpcoming;
+      // Keep upcoming or recurring
+      final now = DateTime.now();
+      final fetched = snap.docs.map((d) => ParkEvent.fromFirestore(d)).where((e) {
+        final recurring = (e.recurrence.toLowerCase() != 'one time' && e.recurrence.toLowerCase() != 'one-time' && e.recurrence.toLowerCase() != 'none');
+        final upcoming = e.endDateTime.isAfter(now);
+        return recurring || upcoming;
       }).toList();
 
-      // If no park filter and we have a user location, keep only within 1km
-      if (widget.parkIdFilter == null && _userLocation != null) {
-        final ulat = _userLocation!.latitude!, ulng = _userLocation!.longitude!;
-        _allEvents.addAll(fetched.where((e) =>
-            _computeDistanceKm(ulat, ulng, e.parkLatitude, e.parkLongitude) <=
-            1.0));
-      } else {
-        _allEvents.addAll(fetched);
+      _allEvents.addAll(fetched);
+
+      // Prefetch park names
+      await _warmParkNames(_allEvents);
+
+      // Build visible sections (will respect “no location” in build)
+      _recomputeSections();
+
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+          _isPaging = false;
+          _hasMore = snap.docs.length == pageSize;
+        });
       }
-
-      // De-dupe if any accidental repeats across pages (by composite key)
-      final seen = <String>{};
-      _allEvents.retainWhere((e) {
-        final key = "${e.parkId}_${e.id}";
-        if (seen.contains(key)) return false;
-        seen.add(key);
-        return true;
-      });
-
-      _applySearchFilter();
-      setState(() {
-        _isLoading = false;
-        _isPaging = false;
-        _hasMore = snap.docs.length == _pageSize;
-      });
     } catch (e) {
-      debugPrint("Error fetching events: $e");
       if (!mounted) return;
       setState(() {
         _isLoading = false;
         _isPaging = false;
       });
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error loading events: $e')),
+      );
     }
   }
 
-  void _onScroll() {
-    if (!_hasMore || _isPaging || _isLoading) return;
-    if (_scrollController.position.pixels >
-        _scrollController.position.maxScrollExtent - 400) {
-      _fetchEvents();
-    }
-  }
-
-  // ---------- Client filter / search ----------
-  void _applySearchFilter() {
+  // ------------------ Sections ------------------
+  void _recomputeSections() {
     final uid = FirebaseAuth.instance.currentUser?.uid;
-    final q = _searchQuery.trim().toLowerCase();
 
-    Iterable<ParkEvent> list = _allEvents;
-    if (q.isNotEmpty) {
-      list = list.where((e) => e.name.toLowerCase().contains(q));
+    // Liked regardless of distance (we still compute, but won’t show if no location)
+    _likedEvents = uid == null
+        ? <ParkEvent>[]
+        : _allEvents.where((e) => e.likes.contains(uid)).toList();
+
+    // Nearby within 2 km, excluding liked
+    if (_userLocation?.latitude != null && _userLocation?.longitude != null) {
+      final ulat = _userLocation!.latitude!;
+      final ulng = _userLocation!.longitude!;
+      final nearby = _allEvents.where((e) {
+        if (uid != null && e.likes.contains(uid)) return false;
+        final km = _distanceKm(ulat, ulng, e.parkLatitude, e.parkLongitude);
+        return km <= nearbyKm;
+      }).toList();
+
+      nearby.sort((a, b) => a.startDateTime.compareTo(b.startDateTime));
+      _nearbyEvents = nearby;
+    } else {
+      _nearbyEvents = <ParkEvent>[];
     }
-    if (_filterMode == "Liked" && uid != null) {
-      list = list.where((e) => e.likes.contains(uid));
-    }
-
-    // Sort: liked first (if signed in), then by start time ascending
-    final likedSet = <String>{};
-    if (uid != null) likedSet.add(uid);
-
-    final sorted = list.toList()
-      ..sort((a, b) {
-        final aLiked = uid != null && a.likes.contains(uid);
-        final bLiked = uid != null && b.likes.contains(uid);
-        if (aLiked != bLiked) return aLiked ? -1 : 1;
-        return a.startDateTime.compareTo(b.startDateTime);
-      });
-
-    if (!mounted) return;
-    setState(() => _filteredEvents = sorted);
   }
 
-  // ---------- Likes ----------
+  // ------------------ Helpers ------------------
+  Future<void> _warmParkNames(List<ParkEvent> events) async {
+    final missing = <String>{};
+    for (final e in events) {
+      if (!_parkNameById.containsKey(e.parkId)) missing.add(e.parkId);
+    }
+    if (missing.isEmpty) return;
+
+    final ids = missing.toList();
+    for (var i = 0; i < ids.length; i += 10) {
+      final batch = ids.sublist(i, i + 10 > ids.length ? ids.length : i + 10);
+      final snap = await FirebaseFirestore.instance
+          .collection('parks')
+          .where(FieldPath.documentId, whereIn: batch)
+          .get();
+      for (final d in snap.docs) {
+        final data = d.data();
+        _parkNameById[d.id] = (data['name'] ?? '') as String;
+      }
+      for (final id in batch) {
+        _parkNameById.putIfAbsent(id, () => 'Park');
+      }
+    }
+  }
+
+  double _distanceKm(double lat1, double lng1, double lat2, double lng2) {
+    const earth = 6371.0; // km
+    final dLat = _degToRad(lat2 - lat1);
+    final dLng = _degToRad(lng2 - lng1);
+    final a = sin(dLat / 2) * sin(dLat / 2) +
+        cos(_degToRad(lat1)) *
+            cos(_degToRad(lat2)) *
+            sin(dLng / 2) *
+            sin(dLng / 2);
+    final c = 2 * atan2(sqrt(a), sqrt(1 - a));
+    return earth * c;
+  }
+
+  double _degToRad(double deg) => deg * (pi / 180);
+
+  // ------------------ UI ------------------
+  @override
+  Widget build(BuildContext context) {
+    // If location is missing, show only the message — no fallbacks, no lists.
+    final noLocation = _userLocation?.latitude == null || _userLocation?.longitude == null;
+
+    return Scaffold(
+      body: Stack(
+        children: [
+          SafeArea(
+            child: _isLoading
+                ? const Center(child: CircularProgressIndicator())
+                : noLocation
+                    ? _EnableLocationMessage(onRetry: _fetchUserLocation)
+                    : RefreshIndicator(
+                        onRefresh: () => _fetchEvents(reset: true),
+                        child: ListView(
+                          controller: _scroll,
+                          padding: const EdgeInsets.fromLTRB(8, 8, 8, 120),
+                          children: [
+                            if (_likedEvents.isNotEmpty) ...[
+                              const _SectionTitle('Your Liked Events'),
+                              ..._likedEvents.map((e) => _eventCard(e, isFavorite: true)),
+                              const Divider(),
+                            ],
+                            const _SectionTitle('Nearby (within 2 km)'),
+                            if (_nearbyEvents.isEmpty)
+                              const _EmptyHint(text: 'No events within 2 km.'),
+                            ..._nearbyEvents.map(_eventCard),
+                            if (_isPaging) ...[
+                              const SizedBox(height: 12),
+                              const Center(child: CircularProgressIndicator()),
+                              const SizedBox(height: 12),
+                            ],
+                            if (!_isPaging && !_hasMore && (_likedEvents.isNotEmpty || _nearbyEvents.isNotEmpty))
+                              const Padding(
+                                padding: EdgeInsets.symmetric(vertical: 16),
+                                child: Center(child: Text('No more events')),
+                              ),
+                          ],
+                        ),
+                      ),
+          ),
+
+          // Fixed banner ad
+          const Positioned(
+            left: 0,
+            right: 0,
+            bottom: 0,
+            child: SafeArea(top: false, child: AdBanner()),
+          ),
+        ],
+      ),
+      floatingActionButton: noLocation
+          ? null
+          : FloatingActionButton(
+              heroTag: 'add_event_fab',
+              backgroundColor: const Color(0xFF567D46),
+              onPressed: _showAddEventSheet,
+              child: const Icon(Icons.add, color: Colors.white),
+            ),
+    );
+  }
+
+  Widget _eventCard(ParkEvent e, {bool isFavorite = false}) {
+    final start = DateFormat('EEE, MMM d • h:mm a').format(e.startDateTime);
+    final end = DateFormat('h:mm a').format(e.endDateTime);
+
+    final nameRow = Row(
+      children: [
+        Flexible(
+          child: Text(
+            e.name,
+            style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+        if (isFavorite) const SizedBox(width: 6),
+        if (isFavorite) const Icon(Icons.star, size: 16, color: Colors.amber),
+      ],
+    );
+
+    final parkName = _parkNameById[e.parkId] ?? 'Park';
+    String trailing = parkName;
+    if (_userLocation?.latitude != null && _userLocation?.longitude != null) {
+      final km = _distanceKm(
+        _userLocation!.latitude!, _userLocation!.longitude!,
+        e.parkLatitude, e.parkLongitude,
+      );
+      trailing = '$parkName • ${km.toStringAsFixed(1)} km';
+    }
+
+    final recurrenceBadge = Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: Colors.green.shade50,
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: Colors.green.shade200),
+      ),
+      child: Text(
+        _recurrenceLabel(e),
+        style: const TextStyle(fontSize: 11, color: Colors.green),
+      ),
+    );
+
+    final desc = (e.description ?? '').trim();
+    final descWidget = desc.isEmpty
+        ? const SizedBox.shrink()
+        : Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Text(
+              desc,
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 13, color: Colors.black87),
+            ),
+          );
+
+    final currentUid = FirebaseAuth.instance.currentUser?.uid;
+    final liked = currentUid != null && e.likes.contains(currentUid);
+
+    return Card(
+      margin: const EdgeInsets.symmetric(vertical: 5),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: () => _showEventDetails(e),
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              nameRow,
+              const SizedBox(height: 6),
+              Text(trailing, style: const TextStyle(fontSize: 12, color: Colors.grey)),
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  Icon(Icons.access_time, size: 16, color: Colors.grey.shade700),
+                  const SizedBox(width: 6),
+                  Text('$start – $end', style: const TextStyle(fontSize: 12)),
+                  const Spacer(),
+                  recurrenceBadge,
+                ],
+              ),
+              descWidget,
+              const SizedBox(height: 8),
+              Row(
+                children: [
+                  TextButton.icon(
+                    onPressed: () {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(builder: (_) => ChatRoomScreen(parkId: e.parkId)),
+                      );
+                    },
+                    icon: const Icon(Icons.chat, size: 16),
+                    label: const Text('Park Chat', style: TextStyle(fontSize: 12)),
+                  ),
+                  const Spacer(),
+                  IconButton(
+                    tooltip: liked ? 'Unlike' : 'Like',
+                    onPressed: () => _toggleLike(e),
+                    icon: Icon(liked ? Icons.favorite : Icons.favorite_border,
+                        color: liked ? Colors.green : Colors.grey),
+                  ),
+                  Text('${e.likes.length}', style: const TextStyle(fontSize: 12)),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  String _recurrenceLabel(ParkEvent e) {
+    final r = e.recurrence.toLowerCase();
+    switch (r) {
+      case 'daily':
+        return 'Daily';
+      case 'weekly':
+        return e.weekday != null ? 'Weekly • ${e.weekday}' : 'Weekly';
+      case 'monthly':
+        return e.eventDay != null ? 'Monthly • ${e.eventDay}' : 'Monthly';
+      case 'one time':
+      case 'one-time':
+        return 'One-time';
+      default:
+        return 'One-time';
+    }
+  }
+
+  // ------------------ Actions ------------------
   Future<void> _toggleLike(ParkEvent event) async {
     final uid = FirebaseAuth.instance.currentUser?.uid;
     if (uid == null) return;
 
-    final nestedRef = FirebaseFirestore.instance
+    final ref = FirebaseFirestore.instance
         .collection('parks')
         .doc(event.parkId)
         .collection('events')
         .doc(event.id);
 
+    final liked = event.likes.contains(uid);
     try {
-      final liked = event.likes.contains(uid);
-      await nestedRef.update({
-        'likes':
-            liked ? FieldValue.arrayRemove([uid]) : FieldValue.arrayUnion([uid])
+      await ref.update({
+        'likes': liked
+            ? FieldValue.arrayRemove([uid])
+            : FieldValue.arrayUnion([uid]),
       });
-      setState(() => liked ? event.likes.remove(uid) : event.likes.add(uid));
-      _applySearchFilter();
-    } catch (_) {
-      // Fallback: in case some old events live in root 'events' (legacy)
-      final rootRef =
-          FirebaseFirestore.instance.collection('events').doc(event.id);
-      try {
-        final liked = event.likes.contains(uid);
-        await rootRef.update({
-          'likes': liked
-              ? FieldValue.arrayRemove([uid])
-              : FieldValue.arrayUnion([uid])
-        });
-        setState(() => liked ? event.likes.remove(uid) : event.likes.add(uid));
-        _applySearchFilter();
-      } catch (e) {
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("Unable to update like: $e")),
-        );
-      }
+      setState(() {
+        liked ? event.likes.remove(uid) : event.likes.add(uid);
+        _recomputeSections();
+      });
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Unable to update like: $e')),
+      );
     }
+  }
+
+  void _showEventDetails(ParkEvent e) {
+    final parkName = _parkNameById[e.parkId] ?? 'Park';
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (_) {
+        final start = DateFormat('EEE, MMM d • h:mm a').format(e.startDateTime);
+        final end = DateFormat('h:mm a').format(e.endDateTime);
+        final hasLoc = _userLocation?.latitude != null && _userLocation?.longitude != null;
+        final dist = hasLoc
+            ? _distanceKm(_userLocation!.latitude!, _userLocation!.longitude!, e.parkLatitude, e.parkLongitude)
+                .toStringAsFixed(1)
+            : null;
+
+        return SafeArea(
+          top: false,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Container(width: 40, height: 4, decoration: BoxDecoration(color: Colors.black12, borderRadius: BorderRadius.circular(999))),
+                const SizedBox(height: 12),
+                Text(e.name, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
+                const SizedBox(height: 6),
+                Text(
+                  dist != null ? '$parkName • $dist km' : parkName,
+                  style: const TextStyle(fontSize: 13, color: Colors.grey),
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    const Icon(Icons.access_time, size: 18),
+                    const SizedBox(width: 6),
+                    Text('$start – $end'),
+                    const Spacer(),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                      decoration: BoxDecoration(
+                        color: Colors.green.shade50,
+                        borderRadius: BorderRadius.circular(999),
+                        border: Border.all(color: Colors.green.shade200),
+                      ),
+                      child: Text(_recurrenceLabel(e), style: const TextStyle(fontSize: 11, color: Colors.green)),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                if ((e.description ?? '').trim().isNotEmpty)
+                  Text(e.description!.trim(), style: const TextStyle(fontSize: 14)),
+                const SizedBox(height: 16),
+                Row(
+                  children: [
+                    ElevatedButton.icon(
+                      style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF567D46)),
+                      onPressed: () {
+                        Navigator.pop(context);
+                        Navigator.push(context, MaterialPageRoute(builder: (_) => ChatRoomScreen(parkId: e.parkId)));
+                      },
+                      icon: const Icon(Icons.chat, size: 16, color: Colors.white),
+                      label: const Text('Open Park Chat', style: TextStyle(color: Colors.white)),
+                    ),
+                    const Spacer(),
+                    TextButton(
+                      onPressed: () => _showLikesDialog(e),
+                      child: Text('${e.likes.length} likes'),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
   }
 
   Future<void> _showLikesDialog(ParkEvent event) async {
     final userIds = event.likes;
     final petList = <Map<String, dynamic>>[];
     try {
-      // Firestore whereIn cap: 10 per query — chunk it
       for (var i = 0; i < userIds.length; i += 10) {
         final chunk = userIds.sublist(i, (i + 10).clamp(0, userIds.length));
         final snapshots = await FirebaseFirestore.instance
@@ -277,9 +540,7 @@ class _EventsTabState extends State<EventsTab> {
             .get();
         petList.addAll(snapshots.docs.map((d) => d.data()));
       }
-    } catch (e) {
-      debugPrint("Error loading likes pets: $e");
-    }
+    } catch (_) {}
 
     if (!mounted) return;
     showDialog(
@@ -299,790 +560,102 @@ class _EventsTabState extends State<EventsTab> {
                     return ListTile(
                       leading: (photo.isNotEmpty)
                           ? CircleAvatar(backgroundImage: NetworkImage(photo))
-                          : const CircleAvatar(
-                              child: Icon(Icons.pets),
-                            ),
+                          : const CircleAvatar(child: Icon(Icons.pets)),
                       title: Text((pet['name'] ?? 'Unknown') as String),
                     );
                   },
                 ),
         ),
         actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(context),
-              child: const Text('Close'))
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Close')),
         ],
       ),
     );
   }
 
-  // ---------- Add Event ----------
-  void _showAddEventDialog() async {
-    final TextEditingController eventNameController = TextEditingController();
-    final TextEditingController eventDescController = TextEditingController();
-    final TextEditingController parkSearchController = TextEditingController();
-    String? selectedRecurrence = "One Time";
-    DateTime? oneTimeDate;
-    DateTime? monthlyDate;
-    String? selectedWeekday;
-    TimeOfDay? selectedStartTime;
-    TimeOfDay? selectedEndTime;
-
-    Map<String, dynamic>? selectedPark;
-    List<Map<String, dynamic>> parkResults = [];
-    Timer? parkSearchDebounce;
-    bool isSearchingParks = false;
-
-    Future<void> searchParks(String query) async {
-      if (query.isEmpty) {
-        parkResults = [];
-        return;
-      }
-      isSearchingParks = true;
-      final qs = await FirebaseFirestore.instance
-          .collection('parks')
-          .where('name', isGreaterThanOrEqualTo: query)
-          .where('name', isLessThanOrEqualTo: '$query\uf8ff')
-          .limit(20)
-          .get();
-
-      final userLat = _userLocation?.latitude;
-      final userLng = _userLocation?.longitude;
-
-      parkResults = qs.docs.map((d) {
-        final data = d.data();
-        data['id'] = d.id;
-        return data;
-      }).toList();
-
-      // Sort by distance if we have location
-      if (userLat != null && userLng != null) {
-        parkResults.sort((a, b) {
-          final da = sqrt(pow((a['latitude'] - userLat), 2) +
-              pow((a['longitude'] - userLng), 2));
-          final db = sqrt(pow((b['latitude'] - userLat), 2) +
-              pow((b['longitude'] - userLng), 2));
-          return da.compareTo(db);
-        });
-      }
-
-      isSearchingParks = false;
-    }
-
-    if (!mounted) return;
-    showDialog(
+  // --------------- Add Event (placeholder) ---------------
+  void _showAddEventSheet() {
+    showModalBottomSheet(
       context: context,
-      barrierDismissible: false,
-      builder: (context) {
-        return Scaffold(
-          appBar: AppBar(
-            title: const Text("Add Event"),
-            backgroundColor: const Color(0xFF567D46),
-            automaticallyImplyLeading: false,
-            actions: [
-              IconButton(
-                icon: const Icon(Icons.close),
-                onPressed: () => Navigator.of(context).pop(),
-              ),
-            ],
-          ),
-          body: StatefulBuilder(
-            builder: (context, setState) {
-              return Padding(
-                padding: const EdgeInsets.all(24.0),
-                child: SingleChildScrollView(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Text("Select Park *",
-                          style: TextStyle(fontWeight: FontWeight.w600)),
-                      const SizedBox(height: 8),
-                      TextField(
-                        controller: parkSearchController,
-                        decoration: const InputDecoration(
-                          labelText: "Search for a park",
-                          border: OutlineInputBorder(),
-                          alignLabelWithHint: true,
-                        ),
-                        onChanged: (value) {
-                          parkSearchDebounce?.cancel();
-                          parkSearchDebounce = Timer(
-                              const Duration(milliseconds: 300), () async {
-                            setState(() => isSearchingParks = true);
-                            await searchParks(value);
-                            if (context.mounted) setState(() {});
-                          });
-                        },
-                      ),
-                      if (parkSearchController.text.isNotEmpty)
-                        Container(
-                          constraints: const BoxConstraints(maxHeight: 200),
-                          child: isSearchingParks
-                              ? const Center(
-                                  child: Padding(
-                                  padding: EdgeInsets.all(8.0),
-                                  child: CircularProgressIndicator(),
-                                ))
-                              : ListView.builder(
-                                  shrinkWrap: true,
-                                  itemCount: parkResults.length,
-                                  itemBuilder: (ctx, idx) {
-                                    final park = parkResults[idx];
-                                    return ListTile(
-                                      title: Text(park['name'] ?? ''),
-                                      subtitle: park['address'] != null
-                                          ? Text(park['address'])
-                                          : null,
-                                      selected:
-                                          selectedPark?['id'] == park['id'],
-                                      onTap: () {
-                                        setState(() {
-                                          selectedPark = park;
-                                          parkSearchController.text =
-                                              park['name'];
-                                          parkResults = [];
-                                        });
-                                      },
-                                    );
-                                  },
-                                ),
-                        ),
-                      if (selectedPark != null)
-                        Padding(
-                          padding: const EdgeInsets.only(top: 8, bottom: 8),
-                          child: Row(
-                            children: [
-                              const Icon(Icons.park,
-                                  color: Colors.green, size: 18),
-                              const SizedBox(width: 6),
-                              Expanded(
-                                child: Text(
-                                  selectedPark!['name'] ?? '',
-                                  style: const TextStyle(
-                                      fontWeight: FontWeight.bold,
-                                      color: Colors.green),
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      const SizedBox(height: 16),
-                      const Text("Event Name *",
-                          style: TextStyle(fontWeight: FontWeight.w600)),
-                      const SizedBox(height: 8),
-                      TextField(
-                        controller: eventNameController,
-                        autofocus: true,
-                        decoration: const InputDecoration(
-                          labelText: "Event Name",
-                          border: OutlineInputBorder(),
-                          alignLabelWithHint: true,
-                        ),
-                      ),
-                      const SizedBox(height: 16),
-                      const Text("Description",
-                          style: TextStyle(fontWeight: FontWeight.w600)),
-                      const SizedBox(height: 8),
-                      TextField(
-                        controller: eventDescController,
-                        maxLines: 3,
-                        decoration: const InputDecoration(
-                          labelText: "Description",
-                          border: OutlineInputBorder(),
-                          alignLabelWithHint: true,
-                        ),
-                      ),
-                      const SizedBox(height: 16),
-                      DropdownButtonFormField<String>(
-                        value: selectedRecurrence,
-                        decoration: const InputDecoration(
-                          labelText: "Recurrence",
-                          border: OutlineInputBorder(),
-                          alignLabelWithHint: true,
-                        ),
-                        items: const ["One Time", "Daily", "Weekly", "Monthly"]
-                            .map((v) =>
-                                DropdownMenuItem(value: v, child: Text(v)))
-                            .toList(),
-                        onChanged: (String? newValue) {
-                          setState(() {
-                            selectedRecurrence = newValue;
-                            oneTimeDate = null;
-                            monthlyDate = null;
-                            selectedWeekday = null;
-                          });
-                        },
-                      ),
-                      const SizedBox(height: 16),
-                      if (selectedRecurrence == "One Time")
-                        Row(
-                          children: [
-                            Expanded(
-                              child: Text(
-                                oneTimeDate == null
-                                    ? "No date selected"
-                                    : "Date: ${DateFormat.yMd().format(oneTimeDate!)}",
-                              ),
-                            ),
-                            TextButton(
-                              onPressed: () async {
-                                final date = await showDatePicker(
-                                  context: context,
-                                  initialDate: DateTime.now(),
-                                  firstDate: DateTime(2000),
-                                  lastDate: DateTime(2100),
-                                );
-                                setState(() => oneTimeDate = date);
-                              },
-                              child: const Text("Select Date"),
-                            ),
-                          ],
-                        ),
-                      if (selectedRecurrence == "Weekly")
-                        DropdownButtonFormField<String>(
-                          value: selectedWeekday,
-                          decoration: const InputDecoration(
-                            labelText: "Select Day of Week",
-                            border: OutlineInputBorder(),
-                            alignLabelWithHint: true,
-                          ),
-                          items: const [
-                            "Monday",
-                            "Tuesday",
-                            "Wednesday",
-                            "Thursday",
-                            "Friday",
-                            "Saturday",
-                            "Sunday"
-                          ]
-                              .map((day) => DropdownMenuItem(
-                                  value: day, child: Text(day)))
-                              .toList(),
-                          onChanged: (String? v) =>
-                              setState(() => selectedWeekday = v),
-                        ),
-                      if (selectedRecurrence == "Monthly")
-                        Row(
-                          children: [
-                            Expanded(
-                              child: Text(
-                                monthlyDate == null
-                                    ? "No date selected"
-                                    : "Date: ${DateFormat.d().format(monthlyDate!)}",
-                              ),
-                            ),
-                            TextButton(
-                              onPressed: () async {
-                                final date = await showDatePicker(
-                                  context: context,
-                                  initialDate: DateTime.now(),
-                                  firstDate: DateTime(2000),
-                                  lastDate: DateTime(2100),
-                                );
-                                setState(() => monthlyDate = date);
-                              },
-                              child: const Text("Select Date"),
-                            ),
-                          ],
-                        ),
-                      const SizedBox(height: 16),
-                      Row(
-                        children: [
-                          Expanded(
-                            child: Text(
-                              selectedStartTime == null
-                                  ? "No start time selected"
-                                  : "Start: ${selectedStartTime!.format(context)}",
-                            ),
-                          ),
-                          TextButton(
-                            onPressed: () async {
-                              final t = await showTimePicker(
-                                context: context,
-                                initialTime: TimeOfDay.now(),
-                              );
-                              if (t != null) {
-                                setState(() => selectedStartTime = t);
-                              }
-                            },
-                            child: const Text("Select Start Time"),
-                          ),
-                        ],
-                      ),
-                      Row(
-                        children: [
-                          Expanded(
-                            child: Text(
-                              selectedEndTime == null
-                                  ? "No end time selected"
-                                  : "End: ${selectedEndTime!.format(context)}",
-                            ),
-                          ),
-                          TextButton(
-                            onPressed: () async {
-                              final t = await showTimePicker(
-                                context: context,
-                                initialTime: TimeOfDay.now(),
-                              );
-                              if (t != null) {
-                                setState(() => selectedEndTime = t);
-                              }
-                            },
-                            child: const Text("Select End Time"),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 24),
-                      Row(
-                        mainAxisAlignment: MainAxisAlignment.end,
-                        children: [
-                          TextButton(
-                            onPressed: () => Navigator.of(context).pop(),
-                            child: const Text("Cancel"),
-                          ),
-                          const SizedBox(width: 12),
-                          ElevatedButton(
-                            onPressed: () async {
-                              final eventName = eventNameController.text.trim();
-                              final eventDesc = eventDescController.text.trim();
-
-                              if (selectedPark == null ||
-                                  eventName.isEmpty ||
-                                  selectedStartTime == null ||
-                                  selectedEndTime == null ||
-                                  selectedRecurrence == null) {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(
-                                      content: Text(
-                                          "Please complete all required fields")),
-                                );
-                                return;
-                              }
-                              if (selectedRecurrence == "One Time" &&
-                                  oneTimeDate == null) {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(
-                                      content: Text(
-                                          "Please select a date for a one-time event")),
-                                );
-                                return;
-                              }
-                              if (selectedRecurrence == "Weekly" &&
-                                  selectedWeekday == null) {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(
-                                      content: Text(
-                                          "Please select a day for a weekly event")),
-                                );
-                                return;
-                              }
-                              if (selectedRecurrence == "Monthly" &&
-                                  monthlyDate == null) {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(
-                                      content: Text(
-                                          "Please select a date for a monthly event")),
-                                );
-                                return;
-                              }
-
-                              final now = DateTime.now();
-                              late DateTime eventStartDateTime;
-                              late DateTime eventEndDateTime;
-
-                              if (selectedRecurrence == "One Time") {
-                                eventStartDateTime = DateTime(
-                                  oneTimeDate!.year,
-                                  oneTimeDate!.month,
-                                  oneTimeDate!.day,
-                                  selectedStartTime!.hour,
-                                  selectedStartTime!.minute,
-                                );
-                                eventEndDateTime = DateTime(
-                                  oneTimeDate!.year,
-                                  oneTimeDate!.month,
-                                  oneTimeDate!.day,
-                                  selectedEndTime!.hour,
-                                  selectedEndTime!.minute,
-                                );
-                              } else if (selectedRecurrence == "Monthly") {
-                                eventStartDateTime = DateTime(
-                                  now.year,
-                                  now.month,
-                                  monthlyDate!.day,
-                                  selectedStartTime!.hour,
-                                  selectedStartTime!.minute,
-                                );
-                                eventEndDateTime = DateTime(
-                                  now.year,
-                                  now.month,
-                                  monthlyDate!.day,
-                                  selectedEndTime!.hour,
-                                  selectedEndTime!.minute,
-                                );
-                              } else {
-                                // Daily / Weekly base time for today
-                                eventStartDateTime = DateTime(
-                                  now.year,
-                                  now.month,
-                                  now.day,
-                                  selectedStartTime!.hour,
-                                  selectedStartTime!.minute,
-                                );
-                                eventEndDateTime = DateTime(
-                                  now.year,
-                                  now.month,
-                                  now.day,
-                                  selectedEndTime!.hour,
-                                  selectedEndTime!.minute,
-                                );
-                              }
-
-                              if (!eventEndDateTime
-                                  .isAfter(eventStartDateTime)) {
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(
-                                      content: Text(
-                                          "End time must be after start time")),
-                                );
-                                return;
-                              }
-
-                              final eventData = <String, dynamic>{
-                                'parkId': selectedPark!['id'],
-                                'parkLatitude': selectedPark!['latitude'],
-                                'parkLongitude': selectedPark!['longitude'],
-                                'name': eventName,
-                                'description': eventDesc,
-                                'startDateTime': eventStartDateTime,
-                                'endDateTime': eventEndDateTime,
-                                'recurrence': selectedRecurrence,
-                                'likes': [],
-                                'createdBy':
-                                    FirebaseAuth.instance.currentUser?.uid ??
-                                        "",
-                                'createdAt': FieldValue.serverTimestamp(),
-                              };
-
-                              if (selectedRecurrence == "Weekly") {
-                                eventData['weekday'] = selectedWeekday;
-                              }
-                              if (selectedRecurrence == "One Time") {
-                                eventData['eventDate'] = oneTimeDate;
-                              }
-                              if (selectedRecurrence == "Monthly") {
-                                eventData['eventDay'] = monthlyDate!.day;
-                              }
-
-                              // Write under parks/{parkId}/events for consistency
-                              await FirebaseFirestore.instance
-                                  .collection('parks')
-                                  .doc(selectedPark!['id'])
-                                  .collection('events')
-                                  .add(eventData);
-
-                              if (!mounted) return;
-                              Navigator.of(context).pop();
-                              await _fetchEvents(reset: true);
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                SnackBar(
-                                    content: Text("Event '$eventName' added")),
-                              );
-                            },
-                            child: const Text("Add"),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-              );
-            },
-          ),
-        );
-      },
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (_) => SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            const Text('Add Event', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
+            const SizedBox(height: 12),
+            const Text('Hook up your existing Add Event flow here.'),
+            const SizedBox(height: 12),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Close'),
+            ),
+          ]),
+        ),
+      ),
     );
   }
+}
 
-  // ---------- Build ----------
+// ------------------ Small widgets ------------------
+class _SectionTitle extends StatelessWidget {
+  final String text;
+  const _SectionTitle(this.text, {Key? key}) : super(key: key);
   @override
   Widget build(BuildContext context) {
-    final uid = FirebaseAuth.instance.currentUser?.uid;
-    final likedEvents = _filteredEvents
-        .where((e) => uid != null && e.likes.contains(uid))
-        .toList();
-    final otherEvents = _filteredEvents
-        .where((e) => uid == null || !e.likes.contains(uid))
-        .toList();
-
-    return Scaffold(
-      body: Stack(
-        children: [
-          SafeArea(
-            child: Column(
-              children: [
-                Padding(
-                  padding: const EdgeInsets.all(8),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: TextField(
-                          decoration: const InputDecoration(
-                            hintText: 'Search by event name',
-                            prefixIcon: Icon(Icons.search),
-                            border: OutlineInputBorder(),
-                          ),
-                          onChanged: (v) {
-                            _searchDebounce?.cancel();
-                            _searchDebounce =
-                                Timer(const Duration(milliseconds: 200), () {
-                              _searchQuery = v;
-                              _applySearchFilter();
-                            });
-                          },
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      PopupMenuButton<String>(
-                        icon: const Icon(Icons.filter_list),
-                        onSelected: (v) {
-                          _filterMode = v;
-                          _applySearchFilter();
-                        },
-                        itemBuilder: (_) => const [
-                          PopupMenuItem(
-                              value: 'All', child: Text('All Events')),
-                          PopupMenuItem(
-                              value: 'Liked', child: Text('Liked Events')),
-                        ],
-                      ),
-                    ],
-                  ),
-                ),
-                Expanded(
-                  child: _isLoading
-                      ? const Center(child: CircularProgressIndicator())
-                      : RefreshIndicator(
-                          onRefresh: () => _fetchEvents(reset: true),
-                          child: ListView(
-                            controller: _scrollController,
-                            padding: const EdgeInsets.only(
-                                bottom: 120, left: 8, right: 8, top: 8),
-                            children: [
-                              if (likedEvents.isNotEmpty) ...[
-                                const Padding(
-                                  padding: EdgeInsets.symmetric(vertical: 8),
-                                  child: Text('Liked Events',
-                                      style: TextStyle(
-                                          fontSize: 16,
-                                          fontWeight: FontWeight.bold)),
-                                ),
-                                ...likedEvents.map(
-                                  (e) => _eventCard(e, isFavorite: true),
-                                ),
-                                const Divider(),
-                              ],
-                              Padding(
-                                key: otherEventsKey,
-                                padding:
-                                    const EdgeInsets.symmetric(vertical: 8),
-                                child: const Text('Other Nearby Events',
-                                    style: TextStyle(
-                                        fontSize: 16,
-                                        fontWeight: FontWeight.bold)),
-                              ),
-                              ...otherEvents.map((e) => _eventCard(e)),
-                              if (_isPaging) ...[
-                                const SizedBox(height: 12),
-                                const Center(
-                                    child: CircularProgressIndicator()),
-                                const SizedBox(height: 12),
-                              ],
-                              if (!_isPaging &&
-                                  !_hasMore &&
-                                  _filteredEvents.isNotEmpty)
-                                const Padding(
-                                  padding: EdgeInsets.symmetric(vertical: 16),
-                                  child: Center(child: Text("No more events")),
-                                ),
-                              if (likedEvents.isEmpty && otherEvents.isEmpty)
-                                Center(
-                                  child: Padding(
-                                    padding: const EdgeInsets.symmetric(
-                                        vertical: 32),
-                                    child: Text(
-                                      _userLocation != null
-                                          ? "There are no events within 1 km from you."
-                                          : "No events found.",
-                                      textAlign: TextAlign.center,
-                                      style: const TextStyle(fontSize: 16),
-                                    ),
-                                  ),
-                                ),
-                              if (likedEvents.isNotEmpty) ...[
-                                Center(
-                                  child: TextButton(
-                                    child:
-                                        const Text("Show Other Nearby Events"),
-                                    onPressed: () {
-                                      setState(() {
-                                        _showOtherEventsClicked = true;
-                                      });
-                                      final ctx = otherEventsKey.currentContext;
-                                      if (ctx != null) {
-                                        Scrollable.ensureVisible(ctx,
-                                            duration: const Duration(
-                                                milliseconds: 400));
-                                      }
-                                    },
-                                  ),
-                                ),
-                              ],
-                              if (_showOtherEventsClicked &&
-                                  otherEvents.isEmpty)
-                                const Center(
-                                  child: Padding(
-                                    padding: EdgeInsets.symmetric(vertical: 32),
-                                    child: Text(
-                                      "There are no other events within 1 km. Use the + button to add one.",
-                                      textAlign: TextAlign.center,
-                                      style: TextStyle(fontSize: 16),
-                                    ),
-                                  ),
-                                ),
-                            ],
-                          ),
-                        ),
-                ),
-              ],
-            ),
-          ),
-          const Positioned(
-            bottom: 0,
-            left: 0,
-            right: 0,
-            child: AdBanner(),
-          ),
-        ],
-      ),
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(4, 8, 4, 6),
+      child: Text(text, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
     );
   }
+}
 
-  // ---------- Widgets ----------
-  Widget _eventCard(ParkEvent event, {bool isFavorite = false}) {
-    final start = DateFormat('h:mm a').format(event.startDateTime);
-    final end = DateFormat('h:mm a').format(event.endDateTime);
-    final currentUser = FirebaseAuth.instance.currentUser;
-    final liked = currentUser != null && event.likes.contains(currentUser.uid);
-    final cardColor = isFavorite ? Colors.green.shade50 : null;
-    final isCreator = currentUser != null && event.createdBy == currentUser.uid;
+class _EmptyHint extends StatelessWidget {
+  final String text;
+  const _EmptyHint({Key? key, required this.text}) : super(key: key);
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 24),
+      child: Center(child: Text(text, style: const TextStyle(fontSize: 14))),
+    );
+  }
+}
 
-    return Card(
-      color: cardColor,
-      margin: const EdgeInsets.symmetric(vertical: 4),
+class _EnableLocationMessage extends StatelessWidget {
+  final Future<void> Function() onRetry;
+  const _EnableLocationMessage({Key? key, required this.onRetry}) : super(key: key);
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
       child: Padding(
-        padding: const EdgeInsets.all(8),
+        padding: const EdgeInsets.fromLTRB(24, 24, 24, 120),
         child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
           children: [
-            Row(
-              children: [
-                Expanded(
-                  child: Row(
-                    children: [
-                      Flexible(
-                        child: Text(event.name,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                                fontSize: 14, fontWeight: FontWeight.bold)),
-                      ),
-                      if (isFavorite)
-                        const Padding(
-                          padding: EdgeInsets.only(left: 4),
-                          child:
-                              Icon(Icons.star, size: 16, color: Colors.amber),
-                        ),
-                    ],
-                  ),
-                ),
-                IconButton(
-                  icon: Icon(liked ? Icons.favorite : Icons.favorite_border),
-                  color: liked ? Colors.green : Colors.grey,
-                  onPressed: () => _toggleLike(event),
-                ),
-                if (isCreator)
-                  IconButton(
-                    icon: const Icon(Icons.delete, color: Colors.red),
-                    tooltip: "Delete Event",
-                    onPressed: () async {
-                      final confirm = await showDialog<bool>(
-                        context: context,
-                        builder: (ctx) => AlertDialog(
-                          title: const Text("Delete Event"),
-                          content: const Text(
-                              "Are you sure you want to delete this event?"),
-                          actions: [
-                            TextButton(
-                              onPressed: () => Navigator.pop(ctx, false),
-                              child: const Text("Cancel"),
-                            ),
-                            TextButton(
-                              onPressed: () => Navigator.pop(ctx, true),
-                              child: const Text("Delete"),
-                            ),
-                          ],
-                        ),
-                      );
-                      if (confirm == true) {
-                        // Try nested path first, fallback to root (legacy)
-                        try {
-                          await FirebaseFirestore.instance
-                              .collection('parks')
-                              .doc(event.parkId)
-                              .collection('events')
-                              .doc(event.id)
-                              .delete();
-                        } catch (_) {
-                          await FirebaseFirestore.instance
-                              .collection('events')
-                              .doc(event.id)
-                              .delete();
-                        }
-                        if (!mounted) return;
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text("Event deleted")),
-                        );
-                        _fetchEvents(reset: true);
-                      }
-                    },
-                  ),
-              ],
+            const Icon(Icons.location_off, size: 48, color: Colors.grey),
+            const SizedBox(height: 12),
+            const Text(
+              'Turn on Location Services to use Events Nearby.',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 16),
             ),
-            const SizedBox(height: 4),
-            Text('Time: $start - $end', style: const TextStyle(fontSize: 12)),
-            Text('Recurrence: ${event.recurrence}',
-                style: const TextStyle(fontSize: 12)),
             const SizedBox(height: 8),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                TextButton.icon(
-                  onPressed: () => Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                        builder: (_) => ChatRoomScreen(parkId: event.parkId)),
-                  ),
-                  icon: const Icon(Icons.chat, size: 14),
-                  label:
-                      const Text('Park Chat', style: TextStyle(fontSize: 12)),
-                ),
-                TextButton(
-                  onPressed: () => _showLikesDialog(event),
-                  child: Text('${event.likes.length} likes',
-                      style: const TextStyle(fontSize: 12)),
-                ),
-              ],
+            const Text(
+              'We use your location to find park events within 2 km.',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 13, color: Colors.black54),
+            ),
+            const SizedBox(height: 16),
+            ElevatedButton.icon(
+              onPressed: onRetry,
+              icon: const Icon(Icons.my_location),
+              label: const Text('Enable / Retry'),
+              style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF567D46), foregroundColor: Colors.white),
             ),
           ],
         ),

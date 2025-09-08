@@ -1,3 +1,4 @@
+// lib/screens/map_tab.dart
 import 'dart:async';
 import 'dart:ui'; // for BackdropFilter (frosted filter bar)
 import 'package:flutter/material.dart';
@@ -490,6 +491,29 @@ class _MapTabState extends State<MapTab>
     );
   }
 
+  /// Batch-load public profile docs for the given UIDs.
+  Future<Map<String, Map<String, dynamic>>> _loadPublicProfiles(
+      Set<String> uids) async {
+    final db = FirebaseFirestore.instance;
+    final out = <String, Map<String, dynamic>>{};
+    if (uids.isEmpty) return out;
+
+    for (final chunk in uids.toList().chunked(10)) {
+      final snap = await db
+          .collection('public_profiles')
+          .where(FieldPath.documentId, whereIn: chunk)
+          .get();
+      for (final d in snap.docs) {
+        final data = d.data();
+        out[d.id] = {
+          'displayName': (data['displayName'] ?? '') as String,
+          'photoUrl': (data['photoUrl'] ?? '') as String,
+        };
+      }
+    }
+    return out;
+  }
+
   Future<void> _showUsersInPark(String parkId, String parkName,
       double parkLatitude, double parkLongitude) async {
     final currentUser = FirebaseAuth.instance.currentUser;
@@ -547,11 +571,14 @@ class _MapTabState extends State<MapTab>
       final usersSnapshot = await parkRef.collection('active_users').get();
       final userIds = usersSnapshot.docs.map((doc) => doc.id).toList();
 
+      // ⬇️ NEW: batch load public profiles for display names / avatars
+      final profiles = await _loadPublicProfiles(userIds.toSet());
+
       final List<Map<String, dynamic>> userList = [];
       if (userIds.isNotEmpty) {
         for (var i = 0; i < userIds.length; i += 10) {
-          final batchIds = userIds.sublist(
-              i, i + 10 > userIds.length ? userIds.length : i + 10);
+          final batchIds =
+              userIds.sublist(i, i + 10 > userIds.length ? userIds.length : i + 10);
           final petsSnapshot = await FirebaseFirestore.instance
               .collection('pets')
               .where('ownerId', whereIn: batchIds)
@@ -570,16 +597,21 @@ class _MapTabState extends State<MapTab>
           for (final ownerId in batchIds) {
             final userDoc =
                 usersSnapshot.docs.firstWhere((d) => d.id == ownerId);
-            final checkInTime = (userDoc.data()
-                as Map<String, dynamic>)['checkedInAt'] as Timestamp?;
+            final checkInTime =
+                (userDoc.data() as Map<String, dynamic>)['checkedInAt'] as Timestamp?;
             final ownerPets = petsByOwner[ownerId] ?? [];
+
+            // profile data (public & readable)
+            final prof = profiles[ownerId];
+            final ownerName = (prof?['displayName'] as String?)?.trim() ?? '';
+
             for (final pet in ownerPets) {
               userList.add({
                 'petId': pet['petId'],
                 'ownerId': ownerId,
+                'ownerName': ownerName,
                 'petName': pet['name'] ?? 'Unknown Pet',
                 'petPhotoUrl': pet['photoUrl'] ?? '',
-                'ownerName': '',
                 'checkInTime': checkInTime != null
                     ? DateFormat.jm().format(checkInTime.toDate())
                     : '',
@@ -636,7 +668,6 @@ class _MapTabState extends State<MapTab>
                             all.where((s) => !services.contains(s)).toList();
 
                         if (options.isEmpty) {
-                          // Nothing to add
                           if (context.mounted) {
                             ScaffoldMessenger.of(context).showSnackBar(
                               const SnackBar(
@@ -706,7 +737,6 @@ class _MapTabState extends State<MapTab>
                                 parkId, parkName, parkLatitude, parkLongitude);
                           }
 
-                          // If filters are active, reapply
                           if (_selectedFilters.isNotEmpty) {
                             _applyFilters();
                           }
@@ -748,6 +778,8 @@ class _MapTabState extends State<MapTab>
                                 petData['petPhotoUrl'] as String? ?? '';
                             final checkIn =
                                 petData['checkInTime'] as String? ?? '';
+                            final ownerName =
+                                (petData['ownerName'] as String? ?? '').trim();
                             final mine = (ownerId == currentUser.uid);
 
                             return ListTile(
@@ -760,9 +792,13 @@ class _MapTabState extends State<MapTab>
                                           Icon(Icons.pets, color: Colors.white),
                                     ),
                               title: Text(petName),
-                              subtitle: Text(mine
-                                  ? "Your pet – Checked in at $checkIn"
-                                  : "Checked in at $checkIn"),
+                              subtitle: Text(
+                                [
+                                  if (ownerName.isNotEmpty && !mine) ownerName,
+                                  mine ? "Your pet" : null,
+                                  if (checkIn.isNotEmpty) "– Checked in at $checkIn",
+                                ].whereType<String>().join(' '),
+                              ),
                               trailing: mine
                                   ? null
                                   : IconButton(
@@ -805,23 +841,23 @@ class _MapTabState extends State<MapTab>
                                           _fetchFavorites();
                                         } else {
                                           // Use public_profiles mirror for display name
-                                          final ownerDoc =
-                                              await FirebaseFirestore.instance
-                                                  .collection('public_profiles')
-                                                  .doc(ownerId)
-                                                  .get();
-                                          String ownerName = "";
-                                          if (ownerDoc.exists) {
-                                            final data = ownerDoc.data()
-                                                as Map<String, dynamic>;
-                                            ownerName =
-                                                (data['displayName'] ?? '')
-                                                    .toString()
-                                                    .trim();
-                                          }
-                                          if (ownerName.isEmpty) {
-                                            ownerName = ownerId;
-                                          }
+                                          String ownerDisplay =
+                                              ownerName.isNotEmpty
+                                                  ? ownerName
+                                                  : (await FirebaseFirestore
+                                                          .instance
+                                                          .collection(
+                                                              'public_profiles')
+                                                          .doc(ownerId)
+                                                          .get())
+                                                      .data()
+                                                      ?.let((d) =>
+                                                          (d['displayName'] ??
+                                                                  '')
+                                                              .toString()
+                                                              .trim()) ??
+                                                      ownerId;
+
                                           await FirebaseFirestore.instance
                                               .collection('friends')
                                               .doc(currentUser.uid)
@@ -829,7 +865,7 @@ class _MapTabState extends State<MapTab>
                                               .doc(ownerId)
                                               .set({
                                             'friendId': ownerId,
-                                            'ownerName': ownerName,
+                                            'ownerName': ownerDisplay,
                                             'addedAt':
                                                 FieldValue.serverTimestamp(),
                                           });
@@ -1092,12 +1128,11 @@ class _MapTabState extends State<MapTab>
     try {
       final snaps = await FirebaseFirestore.instance
           .collectionGroup('active_users')
-          .where(FieldPath.documentId, isEqualTo: currentUser.uid)
+          .where('uid', isEqualTo: currentUser.uid)
           .get();
 
       final wb = FirebaseFirestore.instance.batch();
       for (final doc in snaps.docs) {
-        final parkDocRef = doc.reference.parent.parent;
         wb.delete(doc.reference);
       }
       await wb.commit();
@@ -1426,8 +1461,7 @@ class _MapTabState extends State<MapTab>
                                 'recurrence': selectedRecurrence,
                                 'likes': [],
                                 'createdBy':
-                                    FirebaseAuth.instance.currentUser?.uid ??
-                                        "",
+                                    FirebaseAuth.instance.currentUser?.uid ?? "",
                                 'createdAt': FieldValue.serverTimestamp(),
                               };
 
@@ -1828,4 +1862,9 @@ extension _ChunkExt<T> on List<T> {
     }
     return out;
   }
+}
+
+// Small nullable helper to keep null-aware mapping tidy
+extension _LetExt<T> on T? {
+  R? let<R>(R Function(T it) f) => this == null ? null : f(this as T);
 }

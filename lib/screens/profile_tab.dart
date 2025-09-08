@@ -237,17 +237,35 @@ class _ProfileTabState extends State<ProfileTab> {
                   onPressed: () async {
                     final feedback = feedbackController.text.trim();
                     if (feedback.isEmpty) return;
-                    await FirebaseFirestore.instance.collection('feedback').add({
-                      'feedback': feedback,
-                      'userId': FirebaseAuth.instance.currentUser?.uid,
-                      'timestamp': FieldValue.serverTimestamp(),
-                    });
-                    if (!mounted) return;
-                    Navigator.of(ctx).pop();
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text("Thank you for your feedback!")),
-                    );
+
+                    final user = FirebaseAuth.instance.currentUser;
+                    if (user == null) {
+                      if (!mounted) return;
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text("Please sign in to send feedback.")),
+                      );
+                      return;
+                    }
+
+                    try {
+                      await FirebaseFirestore.instance.collection('feedback').add({
+                        'feedback': feedback,
+                        'userId': user.uid,
+                        'timestamp': FieldValue.serverTimestamp(),
+                      });
+                      if (!mounted) return;
+                      Navigator.of(ctx).pop();
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text("Thank you for your feedback!")),
+                      );
+                    } catch (e) {
+                      if (!mounted) return;
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text("Couldn’t send feedback: $e")),
+                      );
+                    }
                   },
+
                   style: ElevatedButton.styleFrom(
                     backgroundColor: Colors.tealAccent,
                     foregroundColor: Colors.black,

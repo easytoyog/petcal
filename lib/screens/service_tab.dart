@@ -1,15 +1,16 @@
 import 'dart:io';
-import 'dart:math' as Math;
-import 'package:flutter/material.dart';
+import 'dart:math' as math;
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:firebase_storage/firebase_storage.dart';
+import 'package:flutter/material.dart';
+import 'package:geocoding/geocoding.dart' as geocoding;
 import 'package:image_picker/image_picker.dart';
-import 'package:location/location.dart' as loc;
-import 'package:inthepark/models/service_ad_model.dart';
 import 'package:inthepark/models/owner_model.dart';
+import 'package:inthepark/models/service_ad_model.dart';
+import 'package:inthepark/utils/image_upload_util.dart';
+import 'package:location/location.dart' as loc;
 import 'package:url_launcher/url_launcher.dart';
-import 'package:geocoding/geocoding.dart';
 
 class ServiceTab extends StatefulWidget {
   const ServiceTab({super.key});
@@ -19,23 +20,23 @@ class ServiceTab extends StatefulWidget {
 }
 
 class _ServiceTabState extends State<ServiceTab> {
-  final _types = [
+  final _types = const [
     'All',
     'Walker',
     'Groomer',
     'Daycare',
     'Lost Dog',
     'Trainer',
-    'Other'
+    'Other',
   ];
+
   String _selectedType = 'All';
   List<ServiceAd> _ads = [];
   double? userLat;
   double? userLng;
   bool _isLoading = true;
+
   final _firestore = FirebaseFirestore.instance;
-  final List<XFile> _pickedImages = [];
-  final List<String> _existingImageUrls = [];
 
   @override
   void initState() {
@@ -45,388 +46,101 @@ class _ServiceTabState extends State<ServiceTab> {
 
   Future<void> _loadLocationAndAds() async {
     setState(() => _isLoading = true);
-    final location = loc.Location();
-    final locData = await location.getLocation();
-    userLat = locData.latitude;
-    userLng = locData.longitude;
+    try {
+      final location = loc.Location();
+      final locData = await location.getLocation();
+      userLat = locData.latitude;
+      userLng = locData.longitude;
+    } catch (_) {
+      // ignore location failures; still load ads
+    }
     await _fetchAds();
   }
 
-  double _calculateDistance(
-      double lat1, double lon1, double lat2, double lon2) {
+  double _calculateDistance(double lat1, double lon1, double lat2, double lon2) {
+    // Haversine
     const p = 0.017453292519943295;
-    c(double x) => Math.cos(x);
+    double c(double x) => math.cos(x);
     final a = 0.5 -
         c((lat2 - lat1) * p) / 2 +
         c(lat1 * p) * c(lat2 * p) * (1 - c((lon2 - lon1) * p)) / 2;
-    return 12742 * Math.asin(Math.sqrt(a));
+    return 12742 * math.asin(math.sqrt(a));
   }
 
   Future<void> _fetchAds() async {
     setState(() => _isLoading = true);
-    final snapshot = await _firestore
-        .collection('services')
-        .orderBy('createdAt', descending: true)
-        .get();
-    final ads =
-        snapshot.docs.map((doc) => ServiceAd.fromFirestore(doc)).toList();
-    for (var ad in ads) {
-      if (userLat != null && userLng != null) {
-        ad.distanceFromUser =
-            _calculateDistance(userLat!, userLng!, ad.latitude, ad.longitude);
+    try {
+      final snapshot = await _firestore
+          .collection('services')
+          .orderBy('createdAt', descending: true)
+          .get();
+
+      final ads = snapshot.docs.map((doc) => ServiceAd.fromFirestore(doc)).toList();
+
+      for (var ad in ads) {
+        if (userLat != null && userLng != null) {
+          ad.distanceFromUser =
+              _calculateDistance(userLat!, userLng!, ad.latitude, ad.longitude);
+        }
       }
+
+      if (!mounted) return;
+      setState(() {
+        _ads = ads;
+        _isLoading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _isLoading = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to load services: $e')),
+      );
     }
-    setState(() {
-      _ads = ads;
-      _isLoading = false;
-    });
   }
 
-  Future<void> _pickImages(StateSetter setSt) async {
-    final picker = ImagePicker();
-    final images = await picker.pickMultiImage();
-    setSt(() {
-      int remainingSlots = 5 - _existingImageUrls.length;
-      if (remainingSlots > 0) {
-        _pickedImages.addAll(images.take(remainingSlots));
-      }
-    });
-  }
-
-  Future<void> _openPostDialog([ServiceAd? existingAd]) async {
-    _pickedImages.clear();
-    _existingImageUrls.clear();
-
+  Future<void> _openPostScreen({ServiceAd? existingAd}) async {
     final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('You must be signed in to post.')),
+      );
+      return;
+    }
+
     String? prefillPostalCode;
-
-    // Fetch user's postal code if not editing an existing ad
-    if (existingAd == null && user != null) {
-      final ownerDoc =
-          await _firestore.collection('owners').doc(user.uid).get();
-      if (ownerDoc.exists) {
-        final owner = Owner.fromFirestore(ownerDoc);
-        prefillPostalCode = owner.address.postalCode;
-      }
+    if (existingAd == null) {
+      try {
+        final ownerDoc = await _firestore.collection('owners').doc(user.uid).get();
+        if (ownerDoc.exists) {
+          final owner = Owner.fromFirestore(ownerDoc);
+          prefillPostalCode = owner.address.postalCode;
+        }
+      } catch (_) {}
     }
 
-    final titleCtl = TextEditingController(text: existingAd?.title);
-    final descCtl = TextEditingController(text: existingAd?.description);
-    final postalCtl = TextEditingController(
-      text: existingAd?.postalCode ?? prefillPostalCode ?? '',
+    final result = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(
+        fullscreenDialog: true,
+        builder: (_) => _PostServiceScreen(
+          types: _types,
+          existingAd: existingAd,
+          prefillPostalCode: prefillPostalCode,
+          userLat: userLat,
+          userLng: userLng,
+        ),
+      ),
     );
-    final titleFocusNode = FocusNode();
-    String dialogType = existingAd?.type ?? _types[1];
 
-    if (existingAd != null && existingAd.images.isNotEmpty) {
-      _existingImageUrls.addAll(existingAd.images);
+    if (result == true && mounted) {
+      await _fetchAds();
     }
-
-    WidgetsBinding.instance
-        .addPostFrameCallback((_) => titleFocusNode.requestFocus());
-
-    showDialog(
-      context: context,
-      builder: (ctx) {
-        return StatefulBuilder(
-          builder: (ctx, setSt) {
-            return AlertDialog(
-              shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(16)),
-              title: Row(
-                children: [
-                  Icon(existingAd == null ? Icons.post_add : Icons.edit,
-                      color: Colors.green),
-                  const SizedBox(width: 8),
-                  Text(
-                      existingAd == null ? 'Post New Service' : 'Edit Service'),
-                ],
-              ),
-              content: SingleChildScrollView(
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    TextField(
-                      controller: titleCtl,
-                      focusNode: titleFocusNode,
-                      decoration: const InputDecoration(
-                        labelText: 'Title',
-                        border: OutlineInputBorder(),
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: descCtl,
-                      maxLines: 3,
-                      decoration: const InputDecoration(
-                        labelText: 'Description',
-                        border: OutlineInputBorder(),
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    DropdownButtonFormField<String>(
-                      value: dialogType,
-                      items: _types
-                          .skip(1)
-                          .map(
-                              (e) => DropdownMenuItem(value: e, child: Text(e)))
-                          .toList(),
-                      onChanged: (val) {
-                        if (val != null) setSt(() => dialogType = val);
-                      },
-                      decoration: const InputDecoration(
-                        labelText: 'Type',
-                        border: OutlineInputBorder(),
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    TextField(
-                      controller: postalCtl,
-                      decoration: const InputDecoration(
-                        labelText: 'Postal Code',
-                        border: OutlineInputBorder(),
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    Row(
-                      children: [
-                        Text(
-                            "Images (${_existingImageUrls.length + _pickedImages.length}/5)"),
-                        const Spacer(),
-                        OutlinedButton(
-                          onPressed:
-                              _existingImageUrls.length + _pickedImages.length <
-                                      5
-                                  ? () => _pickImages(setSt)
-                                  : null,
-                          child: const Text('Add Images'),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    if (_existingImageUrls.isNotEmpty)
-                      Container(
-                        padding: const EdgeInsets.only(bottom: 12),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text("Existing Images:",
-                                style: TextStyle(fontWeight: FontWeight.bold)),
-                            const SizedBox(height: 4),
-                            Wrap(
-                              spacing: 6,
-                              runSpacing: 6,
-                              children: _existingImageUrls.map((url) {
-                                return Stack(
-                                  children: [
-                                    ClipRRect(
-                                      borderRadius: BorderRadius.circular(8),
-                                      child: Image.network(
-                                        url,
-                                        width: 80,
-                                        height: 80,
-                                        fit: BoxFit.cover,
-                                        loadingBuilder:
-                                            (context, child, loadingProgress) {
-                                          if (loadingProgress == null) {
-                                            return child;
-                                          }
-                                          return Container(
-                                            width: 80,
-                                            height: 80,
-                                            color: Colors.grey[300],
-                                            child: const Center(
-                                              child:
-                                                  CircularProgressIndicator(),
-                                            ),
-                                          );
-                                        },
-                                      ),
-                                    ),
-                                    Positioned(
-                                      right: 0,
-                                      top: 0,
-                                      child: GestureDetector(
-                                        onTap: () {
-                                          setSt(() =>
-                                              _existingImageUrls.remove(url));
-                                        },
-                                        child: Container(
-                                          decoration: const BoxDecoration(
-                                            color: Colors.white,
-                                            shape: BoxShape.circle,
-                                          ),
-                                          child: const Icon(Icons.cancel,
-                                              color: Colors.red, size: 22),
-                                        ),
-                                      ),
-                                    )
-                                  ],
-                                );
-                              }).toList(),
-                            ),
-                          ],
-                        ),
-                      ),
-                    if (_pickedImages.isNotEmpty)
-                      Container(
-                        padding: const EdgeInsets.only(bottom: 8),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            const Text("New Images:",
-                                style: TextStyle(fontWeight: FontWeight.bold)),
-                            const SizedBox(height: 4),
-                            Wrap(
-                              spacing: 6,
-                              runSpacing: 6,
-                              children: _pickedImages.map((img) {
-                                return Stack(
-                                  children: [
-                                    ClipRRect(
-                                      borderRadius: BorderRadius.circular(8),
-                                      child: Image.file(
-                                        File(img.path),
-                                        width: 80,
-                                        height: 80,
-                                        fit: BoxFit.cover,
-                                      ),
-                                    ),
-                                    Positioned(
-                                      right: 0,
-                                      top: 0,
-                                      child: GestureDetector(
-                                        onTap: () {
-                                          setSt(
-                                              () => _pickedImages.remove(img));
-                                        },
-                                        child: Container(
-                                          decoration: const BoxDecoration(
-                                            color: Colors.white,
-                                            shape: BoxShape.circle,
-                                          ),
-                                          child: const Icon(Icons.cancel,
-                                              color: Colors.red, size: 22),
-                                        ),
-                                      ),
-                                    )
-                                  ],
-                                );
-                              }).toList(),
-                            ),
-                          ],
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.of(ctx).pop(),
-                  child: const Text('Cancel'),
-                ),
-                TextButton(
-                  onPressed: () async {
-                    final user = FirebaseAuth.instance.currentUser;
-                    if (user == null) return;
-
-                    showDialog(
-                      context: context,
-                      barrierDismissible: false,
-                      builder: (ctx) =>
-                          const Center(child: CircularProgressIndicator()),
-                    );
-
-                    try {
-                      List<String> allImages = [..._existingImageUrls];
-                      for (var img in _pickedImages) {
-                        final file = File(img.path);
-                        final ref = FirebaseStorage.instance.ref(
-                            'service_images/${DateTime.now().millisecondsSinceEpoch}_${allImages.length}');
-                        await ref.putFile(file);
-                        final url = await ref.getDownloadURL();
-                        allImages.add(url);
-                      }
-
-                      // Geocode postal code
-                      String postal = postalCtl.text.trim();
-                      double? geoLat = userLat;
-                      double? geoLng = userLng;
-                      if (postal.isNotEmpty) {
-                        try {
-                          List<Location> locations =
-                              await locationFromAddress(postal);
-                          if (locations.isNotEmpty) {
-                            geoLat = locations.first.latitude;
-                            geoLng = locations.first.longitude;
-                          }
-                        } catch (e) {
-                          // Optionally show a warning if geocoding fails
-                          print('Postal code geocoding failed: $e');
-                        }
-                      }
-
-                      final data = {
-                        'title': titleCtl.text.trim(),
-                        'description': descCtl.text.trim(),
-                        'type': dialogType,
-                        'userId': user.uid,
-                        'latitude':
-                            geoLat ?? 0.0, // <-- Ensure double, not null
-                        'longitude':
-                            geoLng ?? 0.0, // <-- Ensure double, not null
-                        'images': allImages,
-                        'postalCode': postal,
-                      };
-
-                      if (existingAd == null) {
-                        data['createdAt'] = FieldValue.serverTimestamp();
-                        await _firestore.collection('services').add(data);
-                      } else {
-                        data['updatedAt'] = FieldValue.serverTimestamp();
-                        await _firestore
-                            .collection('services')
-                            .doc(existingAd.id)
-                            .update(data);
-                      }
-
-                      await _fetchAds();
-
-                      Navigator.of(context).pop();
-                      Navigator.of(ctx).pop();
-
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                          content: Text(existingAd == null
-                              ? 'Service posted successfully!'
-                              : 'Service updated successfully!'),
-                          backgroundColor: Colors.green,
-                        ),
-                      );
-                    } catch (e) {
-                      Navigator.of(context).pop();
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                          content: Text('Error: ${e.toString()}'),
-                          backgroundColor: Colors.red,
-                        ),
-                      );
-                    }
-                  },
-                  child: Text(existingAd == null ? 'Post' : 'Save'),
-                ),
-              ],
-            );
-          },
-        );
-      },
-    );
   }
 
   void _openServiceDetails(ServiceAd ad) {
     final currentUser = FirebaseAuth.instance.currentUser;
-    final isOwner = currentUser != null && ad.userId == currentUser.uid;
-    final PageController pageController = PageController();
+    final isOwner = currentUser != null && ad.ownerId == currentUser.uid;
+    final pageController = PageController();
     int currentPage = 0;
     bool isLoadingOwner = true;
     Owner? adOwner;
@@ -436,31 +150,22 @@ class _ServiceTabState extends State<ServiceTab> {
       builder: (ctx) => StatefulBuilder(
         builder: (context, setState) {
           if (isLoadingOwner) {
-            _firestore
+            FirebaseFirestore.instance
                 .collection('owners')
-                .doc(ad.userId)
+                .doc(ad.ownerId)
                 .get()
                 .then((ownerDoc) {
-              if (ownerDoc.exists) {
-                setState(() {
-                  adOwner = Owner.fromFirestore(ownerDoc);
-                  isLoadingOwner = false;
-                });
-              } else {
-                setState(() {
-                  isLoadingOwner = false;
-                });
-              }
-            }).catchError((error) {
               setState(() {
+                adOwner = ownerDoc.exists ? Owner.fromFirestore(ownerDoc) : null;
                 isLoadingOwner = false;
               });
+            }).catchError((_) {
+              setState(() => isLoadingOwner = false);
             });
           }
 
           return Dialog(
-            shape:
-                RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -479,7 +184,7 @@ class _ServiceTabState extends State<ServiceTab> {
                         icon: const Icon(Icons.edit),
                         onPressed: () {
                           Navigator.of(ctx).pop();
-                          _openPostDialog(ad);
+                          _openPostScreen(existingAd: ad);
                         },
                       ),
                     if (isOwner)
@@ -487,20 +192,18 @@ class _ServiceTabState extends State<ServiceTab> {
                         icon: const Icon(Icons.delete),
                         onPressed: () async {
                           final confirm = await showDialog<bool>(
-                            context: context,
-                            builder: (context) => AlertDialog(
+                            context: ctx,
+                            builder: (c) => AlertDialog(
                               title: const Text('Delete Service'),
-                              content: const Text(
-                                  'Are you sure you want to delete this service?'),
+                              content:
+                                  const Text('Are you sure you want to delete this service?'),
                               actions: [
                                 TextButton(
-                                  onPressed: () =>
-                                      Navigator.of(context).pop(false),
+                                  onPressed: () => Navigator.of(c).pop(false),
                                   child: const Text('Cancel'),
                                 ),
                                 TextButton(
-                                  onPressed: () =>
-                                      Navigator.of(context).pop(true),
+                                  onPressed: () => Navigator.of(c).pop(true),
                                   child: const Text('Delete',
                                       style: TextStyle(color: Colors.red)),
                                 ),
@@ -509,17 +212,25 @@ class _ServiceTabState extends State<ServiceTab> {
                           );
 
                           if (confirm == true) {
-                            Navigator.of(ctx).pop();
-                            await _firestore
-                                .collection('services')
-                                .doc(ad.id)
-                                .delete();
-                            await _fetchAds();
-                            if (context.mounted) {
+                            try {
+                              Navigator.of(ctx).pop();
+                              await FirebaseFirestore.instance
+                                  .collection('services')
+                                  .doc(ad.id)
+                                  .delete();
+                              await _fetchAds();
+                              if (!mounted) return;
                               ScaffoldMessenger.of(context).showSnackBar(
                                 const SnackBar(
-                                  content:
-                                      Text('Service deleted successfully!'),
+                                  content: Text('Service deleted successfully!'),
+                                  backgroundColor: Colors.red,
+                                ),
+                              );
+                            } catch (e) {
+                              if (!mounted) return;
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text('Couldn\'t delete: $e'),
                                   backgroundColor: Colors.red,
                                 ),
                               );
@@ -545,39 +256,28 @@ class _ServiceTabState extends State<ServiceTab> {
                                     controller: pageController,
                                     itemCount: ad.images.length,
                                     onPageChanged: (index) {
-                                      setState(() {
-                                        currentPage = index;
-                                      });
+                                      setState(() => currentPage = index);
                                     },
                                     itemBuilder: (context, index) {
                                       return GestureDetector(
-                                        onTap: () => _showFullImage(
-                                            context, ad.images[index]),
+                                        onTap: () => _showFullImage(context, ad.images[index]),
                                         child: Padding(
-                                          padding: const EdgeInsets.symmetric(
-                                              horizontal: 4),
+                                          padding:
+                                              const EdgeInsets.symmetric(horizontal: 4),
                                           child: ClipRRect(
-                                            borderRadius:
-                                                BorderRadius.circular(8),
+                                            borderRadius: BorderRadius.circular(8),
                                             child: Image.network(
                                               ad.images[index],
                                               fit: BoxFit.cover,
-                                              loadingBuilder: (context, child,
-                                                  loadingProgress) {
-                                                if (loadingProgress == null) {
-                                                  return child;
-                                                }
+                                              loadingBuilder: (context, child, prog) {
+                                                if (prog == null) return child;
                                                 return Center(
-                                                  child:
-                                                      CircularProgressIndicator(
-                                                    value: loadingProgress
-                                                                .expectedTotalBytes !=
-                                                            null
-                                                        ? loadingProgress
-                                                                .cumulativeBytesLoaded /
-                                                            loadingProgress
-                                                                .expectedTotalBytes!
-                                                        : null,
+                                                  child: CircularProgressIndicator(
+                                                    value:
+                                                        (prog.expectedTotalBytes != null)
+                                                            ? prog.cumulativeBytesLoaded /
+                                                                prog.expectedTotalBytes!
+                                                            : null,
                                                   ),
                                                 );
                                               },
@@ -594,61 +294,22 @@ class _ServiceTabState extends State<ServiceTab> {
                                       mainAxisAlignment:
                                           MainAxisAlignment.spaceBetween,
                                       children: [
-                                        GestureDetector(
-                                          onTap: currentPage > 0
-                                              ? () {
-                                                  pageController.previousPage(
-                                                    duration: const Duration(
-                                                        milliseconds: 300),
-                                                    curve: Curves.easeInOut,
-                                                  );
-                                                }
-                                              : null,
-                                          child: Container(
-                                            padding: const EdgeInsets.all(8),
-                                            decoration: BoxDecoration(
-                                              color: currentPage > 0
-                                                  ? Colors.black26
-                                                  : Colors.black12,
-                                              shape: BoxShape.circle,
-                                            ),
-                                            child: Icon(
-                                              Icons.arrow_back_ios,
-                                              color: currentPage > 0
-                                                  ? Colors.white
-                                                  : Colors.white54,
-                                              size: 20,
-                                            ),
+                                        _pagerButton(
+                                          enabled: currentPage > 0,
+                                          icon: Icons.arrow_back_ios,
+                                          onTap: () => pageController.previousPage(
+                                            duration:
+                                                const Duration(milliseconds: 300),
+                                            curve: Curves.easeInOut,
                                           ),
                                         ),
-                                        GestureDetector(
-                                          onTap: currentPage <
-                                                  ad.images.length - 1
-                                              ? () {
-                                                  pageController.nextPage(
-                                                    duration: const Duration(
-                                                        milliseconds: 300),
-                                                    curve: Curves.easeInOut,
-                                                  );
-                                                }
-                                              : null,
-                                          child: Container(
-                                            padding: const EdgeInsets.all(8),
-                                            decoration: BoxDecoration(
-                                              color: currentPage <
-                                                      ad.images.length - 1
-                                                  ? Colors.black26
-                                                  : Colors.black12,
-                                              shape: BoxShape.circle,
-                                            ),
-                                            child: Icon(
-                                              Icons.arrow_forward_ios,
-                                              color: currentPage <
-                                                      ad.images.length - 1
-                                                  ? Colors.white
-                                                  : Colors.white54,
-                                              size: 20,
-                                            ),
+                                        _pagerButton(
+                                          enabled: currentPage < ad.images.length - 1,
+                                          icon: Icons.arrow_forward_ios,
+                                          onTap: () => pageController.nextPage(
+                                            duration:
+                                                const Duration(milliseconds: 300),
+                                            curve: Curves.easeInOut,
                                           ),
                                         ),
                                       ],
@@ -664,8 +325,8 @@ class _ServiceTabState extends State<ServiceTab> {
                                 children: List.generate(
                                   ad.images.length,
                                   (index) => Container(
-                                    margin: const EdgeInsets.symmetric(
-                                        horizontal: 4),
+                                    margin:
+                                        const EdgeInsets.symmetric(horizontal: 4),
                                     width: 8,
                                     height: 8,
                                     decoration: BoxDecoration(
@@ -687,10 +348,8 @@ class _ServiceTabState extends State<ServiceTab> {
                             ),
                           ),
                           const SizedBox(height: 8),
-                          Text(
-                            ad.description,
-                            style: const TextStyle(fontSize: 16),
-                          ),
+                          Text(ad.description,
+                              style: const TextStyle(fontSize: 16)),
                           const SizedBox(height: 12),
                           if (ad.distanceFromUser != null)
                             Text(
@@ -702,9 +361,7 @@ class _ServiceTabState extends State<ServiceTab> {
                           const Text(
                             'Contact Information',
                             style: TextStyle(
-                              fontSize: 18,
-                              fontWeight: FontWeight.bold,
-                            ),
+                                fontSize: 18, fontWeight: FontWeight.bold),
                           ),
                           const SizedBox(height: 12),
                           isLoadingOwner
@@ -736,16 +393,16 @@ class _ServiceTabState extends State<ServiceTab> {
                                         const SizedBox(height: 8),
                                         InkWell(
                                           onTap: () async {
-                                            final url = 'tel:${adOwner!.phone}';
-                                            if (await canLaunch(url)) {
-                                              await launch(url);
+                                            final uri =
+                                                Uri(scheme: 'tel', path: adOwner!.phone);
+                                            if (await canLaunchUrl(uri)) {
+                                              await launchUrl(uri);
                                             }
                                           },
                                           child: Row(
                                             children: [
                                               const Icon(Icons.phone,
-                                                  size: 20,
-                                                  color: Colors.green),
+                                                  size: 20, color: Colors.green),
                                               const SizedBox(width: 8),
                                               Text(
                                                 adOwner!.phone,
@@ -762,17 +419,18 @@ class _ServiceTabState extends State<ServiceTab> {
                                         const SizedBox(height: 8),
                                         InkWell(
                                           onTap: () async {
-                                            final url =
-                                                'mailto:${adOwner!.email}';
-                                            if (await canLaunch(url)) {
-                                              await launch(url);
+                                            final uri = Uri(
+                                              scheme: 'mailto',
+                                              path: adOwner!.email,
+                                            );
+                                            if (await canLaunchUrl(uri)) {
+                                              await launchUrl(uri);
                                             }
                                           },
                                           child: Row(
                                             children: [
                                               const Icon(Icons.email,
-                                                  size: 20,
-                                                  color: Colors.green),
+                                                  size: 20, color: Colors.green),
                                               const SizedBox(width: 8),
                                               Text(
                                                 adOwner!.email,
@@ -816,6 +474,28 @@ class _ServiceTabState extends State<ServiceTab> {
     );
   }
 
+  Widget _pagerButton({
+    required bool enabled,
+    required IconData icon,
+    required VoidCallback onTap,
+  }) {
+    return GestureDetector(
+      onTap: enabled ? onTap : null,
+      child: Container(
+        padding: const EdgeInsets.all(8),
+        decoration: BoxDecoration(
+          color: enabled ? Colors.black26 : Colors.black12,
+          shape: BoxShape.circle,
+        ),
+        child: Icon(
+          icon,
+          color: enabled ? Colors.white : Colors.white54,
+          size: 20,
+        ),
+      ),
+    );
+  }
+
   void _showFullImage(BuildContext context, String imageUrl) {
     showDialog(
       context: context,
@@ -828,13 +508,13 @@ class _ServiceTabState extends State<ServiceTab> {
               child: Image.network(
                 imageUrl,
                 fit: BoxFit.contain,
-                loadingBuilder: (context, child, loadingProgress) {
-                  if (loadingProgress == null) return child;
+                loadingBuilder: (context, child, prog) {
+                  if (prog == null) return child;
                   return Center(
                     child: CircularProgressIndicator(
-                      value: loadingProgress.expectedTotalBytes != null
-                          ? loadingProgress.cumulativeBytesLoaded /
-                              loadingProgress.expectedTotalBytes!
+                      value: (prog.expectedTotalBytes != null)
+                          ? prog.cumulativeBytesLoaded /
+                              prog.expectedTotalBytes!
                           : null,
                     ),
                   );
@@ -859,7 +539,7 @@ class _ServiceTabState extends State<ServiceTab> {
 
   Widget _buildAdCard(ServiceAd ad) {
     final user = FirebaseAuth.instance.currentUser;
-    final isOwner = user != null && ad.userId == user.uid;
+    final isOwner = user != null && ad.ownerId == user.uid;
 
     return Card(
       margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -882,13 +562,13 @@ class _ServiceTabState extends State<ServiceTab> {
                   child: Image.network(
                     ad.images.first,
                     fit: BoxFit.cover,
-                    loadingBuilder: (context, child, loadingProgress) {
-                      if (loadingProgress == null) return child;
+                    loadingBuilder: (context, child, prog) {
+                      if (prog == null) return child;
                       return Center(
                         child: CircularProgressIndicator(
-                          value: loadingProgress.expectedTotalBytes != null
-                              ? loadingProgress.cumulativeBytesLoaded /
-                                  loadingProgress.expectedTotalBytes!
+                          value: (prog.expectedTotalBytes != null)
+                              ? prog.cumulativeBytesLoaded /
+                                  prog.expectedTotalBytes!
                               : null,
                         ),
                       );
@@ -920,7 +600,7 @@ class _ServiceTabState extends State<ServiceTab> {
                           children: [
                             IconButton(
                               icon: const Icon(Icons.edit, size: 20),
-                              onPressed: () => _openPostDialog(ad),
+                              onPressed: () => _openPostScreen(existingAd: ad),
                               padding: EdgeInsets.zero,
                               constraints: const BoxConstraints(),
                             ),
@@ -930,38 +610,44 @@ class _ServiceTabState extends State<ServiceTab> {
                               onPressed: () async {
                                 final confirm = await showDialog<bool>(
                                   context: context,
-                                  builder: (context) => AlertDialog(
+                                  builder: (c) => AlertDialog(
                                     title: const Text('Delete Service'),
                                     content: const Text(
-                                        'Are you sure you want to delete this service?'),
+                                      'Are you sure you want to delete this service?',
+                                    ),
                                     actions: [
                                       TextButton(
-                                        onPressed: () =>
-                                            Navigator.of(context).pop(false),
+                                        onPressed: () => Navigator.of(c).pop(false),
                                         child: const Text('Cancel'),
                                       ),
                                       TextButton(
-                                        onPressed: () =>
-                                            Navigator.of(context).pop(true),
+                                        onPressed: () => Navigator.of(c).pop(true),
                                         child: const Text('Delete',
-                                            style:
-                                                TextStyle(color: Colors.red)),
+                                            style: TextStyle(color: Colors.red)),
                                       ),
                                     ],
                                   ),
                                 );
 
                                 if (confirm == true) {
-                                  await _firestore
-                                      .collection('services')
-                                      .doc(ad.id)
-                                      .delete();
-                                  await _fetchAds();
-                                  if (context.mounted) {
+                                  try {
+                                    await FirebaseFirestore.instance
+                                        .collection('services')
+                                        .doc(ad.id)
+                                        .delete();
+                                    await _fetchAds();
+                                    if (!mounted) return;
                                     ScaffoldMessenger.of(context).showSnackBar(
                                       const SnackBar(
-                                        content: Text(
-                                            'Service deleted successfully!'),
+                                        content: Text('Service deleted successfully!'),
+                                        backgroundColor: Colors.red,
+                                      ),
+                                    );
+                                  } catch (e) {
+                                    if (!mounted) return;
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      SnackBar(
+                                        content: Text('Couldn\'t delete: $e'),
                                         backgroundColor: Colors.red,
                                       ),
                                     );
@@ -993,15 +679,12 @@ class _ServiceTabState extends State<ServiceTab> {
                   if (ad.distanceFromUser != null)
                     Row(
                       children: [
-                        const Icon(Icons.location_on,
-                            size: 16, color: Colors.grey),
+                        const Icon(Icons.location_on, size: 16, color: Colors.grey),
                         const SizedBox(width: 4),
                         Text(
                           '${ad.distanceFromUser!.toStringAsFixed(1)} km away',
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: Colors.grey[600],
-                          ),
+                          style:
+                              TextStyle(fontSize: 12, color: Colors.grey[600]),
                         ),
                         const Spacer(),
                         if (ad.images.length > 1)
@@ -1013,9 +696,7 @@ class _ServiceTabState extends State<ServiceTab> {
                               Text(
                                 '${ad.images.length} photos',
                                 style: TextStyle(
-                                  fontSize: 12,
-                                  color: Colors.grey[600],
-                                ),
+                                    fontSize: 12, color: Colors.grey[600]),
                               ),
                             ],
                           ),
@@ -1032,9 +713,8 @@ class _ServiceTabState extends State<ServiceTab> {
 
   @override
   Widget build(BuildContext context) {
-    final filteredAds = _selectedType == 'All'
-        ? _ads
-        : _ads.where((ad) => ad.type == _selectedType).toList();
+    final filteredAds =
+        _selectedType == 'All' ? _ads : _ads.where((ad) => ad.type == _selectedType).toList();
 
     return Scaffold(
       body: Column(
@@ -1064,16 +744,13 @@ class _ServiceTabState extends State<ServiceTab> {
                       label: Text(type),
                       selected: isSelected,
                       onSelected: (selected) {
-                        if (selected) {
-                          setState(() => _selectedType = type);
-                        }
+                        if (selected) setState(() => _selectedType = type);
                       },
                       backgroundColor: Colors.grey[200],
                       selectedColor: Colors.green[100],
                       labelStyle: TextStyle(
                         color: isSelected ? Colors.green[800] : Colors.black,
-                        fontWeight:
-                            isSelected ? FontWeight.bold : FontWeight.normal,
+                        fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
                       ),
                     ),
                   );
@@ -1089,13 +766,11 @@ class _ServiceTabState extends State<ServiceTab> {
                         child: Column(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
-                            Icon(Icons.search_off,
-                                size: 64, color: Colors.grey[400]),
+                            Icon(Icons.search_off, size: 64, color: Colors.grey[400]),
                             const SizedBox(height: 16),
                             Text(
                               'No services found${_selectedType != 'All' ? ' for $_selectedType' : ''}',
-                              style: TextStyle(
-                                  color: Colors.grey[600], fontSize: 16),
+                              style: TextStyle(color: Colors.grey[600], fontSize: 16),
                             ),
                           ],
                         ),
@@ -1105,17 +780,443 @@ class _ServiceTabState extends State<ServiceTab> {
                         child: ListView.builder(
                           padding: const EdgeInsets.only(top: 8, bottom: 80),
                           itemCount: filteredAds.length,
-                          itemBuilder: (context, index) =>
-                              _buildAdCard(filteredAds[index]),
+                          itemBuilder: (context, index) => _buildAdCard(filteredAds[index]),
                         ),
                       ),
           ),
         ],
       ),
       floatingActionButton: FloatingActionButton(
-        onPressed: () => _openPostDialog(),
+        onPressed: () => _openPostScreen(),
         backgroundColor: Colors.green,
         child: const Icon(Icons.add),
+      ),
+    );
+  }
+}
+
+/// =======================
+/// Full-screen Post Screen
+/// =======================
+class _PostServiceScreen extends StatefulWidget {
+  final List<String> types;
+  final ServiceAd? existingAd;
+  final String? prefillPostalCode;
+  final double? userLat;
+  final double? userLng;
+
+  const _PostServiceScreen({
+    required this.types,
+    this.existingAd,
+    this.prefillPostalCode,
+    this.userLat,
+    this.userLng,
+  });
+
+  @override
+  State<_PostServiceScreen> createState() => _PostServiceScreenState();
+}
+
+class _PostServiceScreenState extends State<_PostServiceScreen> {
+  final _firestore = FirebaseFirestore.instance;
+
+  late final TextEditingController titleCtl;
+  late final TextEditingController descCtl;
+  late final TextEditingController postalCtl;
+  final FocusNode titleFocusNode = FocusNode();
+
+  late String dialogType;
+  final List<XFile> _pickedImages = [];
+  final List<String> _existingImageUrls = [];
+
+  bool _saving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    titleCtl = TextEditingController(text: widget.existingAd?.title);
+    descCtl = TextEditingController(text: widget.existingAd?.description);
+    postalCtl = TextEditingController(
+      text: widget.existingAd?.postalCode ?? widget.prefillPostalCode ?? '',
+    );
+    dialogType = widget.existingAd?.type ?? widget.types[1];
+
+    if (widget.existingAd != null && widget.existingAd!.images.isNotEmpty) {
+      _existingImageUrls.addAll(widget.existingAd!.images);
+    }
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      titleFocusNode.requestFocus();
+    });
+  }
+
+  @override
+  void dispose() {
+    titleCtl.dispose();
+    descCtl.dispose();
+    postalCtl.dispose();
+    titleFocusNode.dispose();
+    super.dispose();
+  }
+
+  InputDecoration _bordered(String label) {
+    const green = Colors.green;
+    return InputDecoration(
+      labelText: label,
+      border: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(10),
+      ),
+      enabledBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(10),
+        borderSide: const BorderSide(width: 1.2, color: Color(0xFFBDBDBD)),
+      ),
+      focusedBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(10),
+        borderSide: const BorderSide(width: 1.8, color: green),
+      ),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+    );
+  }
+
+  Future<void> _pickImages() async {
+    final picker = ImagePicker();
+    final images = await picker.pickMultiImage();
+    setState(() {
+      final remaining = 5 - (_existingImageUrls.length + _pickedImages.length);
+      if (remaining > 0) {
+        _pickedImages.addAll(images.take(remaining));
+      }
+    });
+  }
+
+  Future<void> _save() async {
+    final current = FirebaseAuth.instance.currentUser;
+    if (current == null) return;
+
+    setState(() => _saving = true);
+
+    try {
+      // Upload any new images via utility (compressed JPEGs)
+      final allImages = [..._existingImageUrls];
+      for (final x in _pickedImages) {
+        final url = await ImageUploadUtil.uploadServiceImageFromXFile(
+          x,
+          maxSide: 1600,
+          quality: 80,
+        );
+        allImages.add(url);
+      }
+
+      // Geocode postal code (optional)
+      String postal = postalCtl.text.trim();
+      double? geoLat = widget.userLat;
+      double? geoLng = widget.userLng;
+
+      if (postal.isNotEmpty) {
+        try {
+          final locations = await geocoding.locationFromAddress(postal);
+          if (locations.isNotEmpty) {
+            geoLat = locations.first.latitude;
+            geoLng = locations.first.longitude;
+          }
+        } catch (_) {
+          // ignore geocoding failures
+        }
+      }
+
+      final data = <String, dynamic>{
+        'ownerId': current.uid,
+        'title': titleCtl.text.trim(),
+        'description': descCtl.text.trim(),
+        'type': dialogType,
+        'latitude': geoLat ?? 0.0,
+        'longitude': geoLng ?? 0.0,
+        'images': allImages,
+        'postalCode': postal,
+        'price': null,      // keep schema happy
+        'approved': false,  // explicit bool per rules
+        'updatedAt': FieldValue.serverTimestamp(),
+      };
+
+      if (widget.existingAd == null) {
+        data['createdAt'] = FieldValue.serverTimestamp();
+        await _firestore.collection('services').add(data);
+      } else {
+        await _firestore.collection('services').doc(widget.existingAd!.id).update(data);
+      }
+
+      if (!mounted) return;
+      setState(() => _saving = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(widget.existingAd == null
+              ? 'Service posted successfully!'
+              : 'Service updated successfully!'),
+          backgroundColor: Colors.green,
+        ),
+      );
+
+      Navigator.of(context).pop(true);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _saving = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final title = widget.existingAd == null ? 'Post New Service' : 'Save Changes';
+
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(title),
+        backgroundColor: Colors.green,
+        actions: [
+          TextButton(
+            onPressed: _saving ? null : _save,
+            child: _saving
+                ? const SizedBox(
+                    height: 20, width: 20, child: CircularProgressIndicator(strokeWidth: 2))
+                : const Text('Save', style: TextStyle(color: Colors.white, fontSize: 16)),
+          ),
+        ],
+      ),
+      body: SafeArea(
+        child: GestureDetector(
+          onTap: () => FocusScope.of(context).unfocus(),
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              children: [
+                TextField(
+                  controller: titleCtl,
+                  focusNode: titleFocusNode,
+                  decoration: _bordered('Title'),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: descCtl,
+                  maxLines: 4,
+                  decoration: _bordered('Description'),
+                ),
+                const SizedBox(height: 12),
+                DropdownButtonFormField<String>(
+                  value: dialogType,
+                  items: widget.types
+                      .skip(1)
+                      .map((e) => DropdownMenuItem(value: e, child: Text(e)))
+                      .toList(),
+                  onChanged: (val) {
+                    if (val != null) setState(() => dialogType = val);
+                  },
+                  decoration: _bordered('Type'),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: postalCtl,
+                  decoration: _bordered('Postal Code'),
+                ),
+                const SizedBox(height: 16),
+
+                // Images header + add
+                Row(
+                  children: [
+                    Text(
+                      'Images (${_existingImageUrls.length + _pickedImages.length}/5)',
+                      style: const TextStyle(fontWeight: FontWeight.w600),
+                    ),
+                    const Spacer(),
+                    OutlinedButton.icon(
+                      onPressed: _existingImageUrls.length + _pickedImages.length < 5
+                          ? _pickImages
+                          : null,
+                      icon: const Icon(Icons.add_photo_alternate),
+                      label: const Text('Add Images'),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+
+                // Existing images
+                if (_existingImageUrls.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text('Existing Images:',
+                            style: TextStyle(fontWeight: FontWeight.bold)),
+                        const SizedBox(height: 6),
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          children: _existingImageUrls.map((url) {
+                            return Stack(
+                              children: [
+                                ClipRRect(
+                                  borderRadius: BorderRadius.circular(10),
+                                  child: Image.network(
+                                    url,
+                                    width: 90,
+                                    height: 90,
+                                    fit: BoxFit.cover,
+                                    loadingBuilder: (context, child, prog) {
+                                      if (prog == null) return child;
+                                      return Container(
+                                        width: 90,
+                                        height: 90,
+                                        color: Colors.grey[300],
+                                        child: const Center(
+                                          child: CircularProgressIndicator(),
+                                        ),
+                                      );
+                                    },
+                                  ),
+                                ),
+                                Positioned(
+                                  right: 0,
+                                  top: 0,
+                                  child: GestureDetector(
+                                    onTap: () => setState(
+                                        () => _existingImageUrls.remove(url)),
+                                    child: Container(
+                                      decoration: BoxDecoration(
+                                        color: Colors.white,
+                                        borderRadius: BorderRadius.circular(12),
+                                        boxShadow: [
+                                          BoxShadow(
+                                            color: Colors.black.withOpacity(0.15),
+                                            blurRadius: 6,
+                                          )
+                                        ],
+                                      ),
+                                      padding: const EdgeInsets.all(2),
+                                      child: const Icon(Icons.close,
+                                          color: Colors.red, size: 18),
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            );
+                          }).toList(),
+                        ),
+                      ],
+                    ),
+                  ),
+
+                // New images
+                if (_pickedImages.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text('New Images:',
+                            style: TextStyle(fontWeight: FontWeight.bold)),
+                        const SizedBox(height: 6),
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 8,
+                          children: _pickedImages.map((img) {
+                            return Stack(
+                              children: [
+                                ClipRRect(
+                                  borderRadius: BorderRadius.circular(10),
+                                  child: Image.file(
+                                    File(img.path),
+                                    width: 90,
+                                    height: 90,
+                                    fit: BoxFit.cover,
+                                  ),
+                                ),
+                                Positioned(
+                                  right: 0,
+                                  top: 0,
+                                  child: GestureDetector(
+                                    onTap: () => setState(() => _pickedImages.remove(img)),
+                                    child: Container(
+                                      decoration: BoxDecoration(
+                                        color: Colors.white,
+                                        borderRadius: BorderRadius.circular(12),
+                                        boxShadow: [
+                                          BoxShadow(
+                                            color: Colors.black.withOpacity(0.15),
+                                            blurRadius: 6,
+                                          )
+                                        ],
+                                      ),
+                                      padding: const EdgeInsets.all(2),
+                                      child: const Icon(Icons.close,
+                                          color: Colors.red, size: 18),
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            );
+                          }).toList(),
+                        ),
+                      ],
+                    ),
+                  ),
+
+                const SizedBox(height: 24),
+
+                // Post button with spinner next to it
+                Row(
+                  children: [
+                    Expanded(
+                      child: ElevatedButton.icon(
+                        onPressed: _saving ? null : _save,
+                        icon: const Icon(Icons.check),
+                        label: Text(
+                          widget.existingAd == null ? 'Post Service' : 'Save Changes',
+                        ),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.green,
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    if (_saving)
+                      const SizedBox(
+                        width: 24,
+                        height: 24,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      ),
+                  ],
+                ),
+
+                const SizedBox(height: 12),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: _saving ? null : () => Navigator.of(context).pop(false),
+                    icon: const Icon(Icons.close),
+                    label: const Text('Cancel'),
+                    style: OutlinedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }

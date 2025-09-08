@@ -1,3 +1,4 @@
+
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -6,6 +7,8 @@ import 'package:firebase_auth/firebase_auth.dart';
 // import 'package:font_awesome_flutter/font_awesome_flutter.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_html/flutter_html.dart';
+import 'package:inthepark/legal/terms_conditions.dart';
+import 'package:inthepark/legal/privacy_policy.dart';
 import 'package:inthepark/screens/wait_screen.dart';
 
 class AccountCreationScreen extends StatefulWidget {
@@ -21,8 +24,6 @@ class _AccountCreationScreenState extends State<AccountCreationScreen> {
   final TextEditingController passwordController = TextEditingController();
   final TextEditingController confirmPasswordController =
       TextEditingController();
-  bool isOver18 = false;
-  bool agreedToTerms = false;
 
   @override
   void initState() {
@@ -95,8 +96,7 @@ class _AccountCreationScreenState extends State<AccountCreationScreen> {
   // Future<void> createAccountWithApple(BuildContext context) async { ... }
 
   void showDocumentHtml(
-      BuildContext context, String title, String filePath) async {
-    final htmlContent = await rootBundle.loadString(filePath); // Load HTML file
+      BuildContext context, String title, String htmlContent) {
     showDialog(
       context: context,
       builder: (BuildContext context) {
@@ -105,7 +105,7 @@ class _AccountCreationScreenState extends State<AccountCreationScreen> {
           content: SizedBox(
             width: double.maxFinite,
             child: SingleChildScrollView(
-              child: Html(data: htmlContent), // Render HTML content
+              child: Html(data: htmlContent),
             ),
           ),
           actions: [
@@ -229,85 +229,6 @@ class _AccountCreationScreenState extends State<AccountCreationScreen> {
                   ),
                 ),
                 const SizedBox(height: 20),
-                // Over 18 checkbox
-                Row(
-                  children: [
-                    Checkbox(
-                      value: isOver18,
-                      onChanged: (val) {
-                        setState(() {
-                          isOver18 = val ?? false;
-                        });
-                      },
-                      activeColor: Colors.tealAccent,
-                    ),
-                    const Expanded(
-                      child: Text(
-                        "I confirm that I am over 18 years old.",
-                        style: TextStyle(color: Colors.white70),
-                      ),
-                    ),
-                  ],
-                ),
-                // Terms and Privacy checkbox with clickable RichText
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Checkbox(
-                      value: agreedToTerms,
-                      onChanged: (val) {
-                        setState(() {
-                          agreedToTerms = val ?? false;
-                        });
-                      },
-                      activeColor: Colors.tealAccent,
-                    ),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: RichText(
-                        textAlign: TextAlign.left,
-                        text: TextSpan(
-                          style: const TextStyle(
-                              color: Colors.white70, fontSize: 14),
-                          children: [
-                            const TextSpan(
-                                text:
-                                    "By creating an account, you agree to our "),
-                            TextSpan(
-                              text: "Terms",
-                              style: const TextStyle(
-                                decoration: TextDecoration.underline,
-                                color: Colors.tealAccent,
-                              ),
-                              recognizer: TapGestureRecognizer()
-                                ..onTap = () => showDocumentHtml(
-                                      context,
-                                      "Terms and Conditions",
-                                      "lib/legal/termsandconditions.html", // Path to the HTML file
-                                    ),
-                            ),
-                            const TextSpan(text: " and "),
-                            TextSpan(
-                              text: "Privacy",
-                              style: const TextStyle(
-                                decoration: TextDecoration.underline,
-                                color: Colors.tealAccent,
-                              ),
-                              recognizer: TapGestureRecognizer()
-                                ..onTap = () => showDocumentHtml(
-                                      context,
-                                      "Privacy Policy",
-                                      "lib/legal/privacy.html",
-                                    ),
-                            ),
-                            const TextSpan(text: " document."),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 20),
                 SizedBox(
                   width: MediaQuery.of(context).size.width / 2,
                   child: ElevatedButton(
@@ -320,22 +241,6 @@ class _AccountCreationScreenState extends State<AccountCreationScreen> {
                       ),
                     ),
                     onPressed: () async {
-                      if (!isOver18) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                              content: Text(
-                                  "You must confirm you are over 18 to proceed.")),
-                        );
-                        return;
-                      }
-                      if (!agreedToTerms) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                              content: Text(
-                                  "You must agree to the Terms and Privacy Policy to proceed.")),
-                        );
-                        return;
-                      }
                       await createAccountWithEmailPassword(context);
                     },
                     child: const Text("Create Account",
@@ -382,6 +287,45 @@ class _AccountCreationScreenState extends State<AccountCreationScreen> {
                     //   label: const Text("Apple"),
                     // ),
                   ],
+                ),
+                const SizedBox(height: 20),
+                RichText(
+                  textAlign: TextAlign.center,
+                  text: TextSpan(
+                    style: const TextStyle(color: Colors.white70, fontSize: 14),
+                    children: [
+                      const TextSpan(
+                          text: "By creating an account, you agree to our "),
+                      TextSpan(
+                        text: "Terms",
+                        style: const TextStyle(
+                          decoration: TextDecoration.underline,
+                          color: Colors.tealAccent,
+                        ),
+                        recognizer: TapGestureRecognizer()
+                          ..onTap = () => showDocumentHtml(
+                                context,
+                                "Terms and Conditions",
+                                termsConditionsHtml,
+                              ),
+                      ),
+                      const TextSpan(text: " and "),
+                      TextSpan(
+                        text: "Privacy",
+                        style: const TextStyle(
+                          decoration: TextDecoration.underline,
+                          color: Colors.tealAccent,
+                        ),
+                        recognizer: TapGestureRecognizer()
+                          ..onTap = () => showDocumentHtml(
+                                context,
+                                "Privacy Policy",
+                                privacyPolicyHtml,
+                              ),
+                      ),
+                      const TextSpan(text: " document."),
+                    ],
+                  ),
                 ),
               ],
             ),
