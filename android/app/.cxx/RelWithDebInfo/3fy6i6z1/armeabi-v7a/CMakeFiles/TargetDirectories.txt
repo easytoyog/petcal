@@ -1,0 +1,2 @@
+C:/Users/GGFruits/Desktop/petcal/android/app/.cxx/RelWithDebInfo/3fy6i6z1/armeabi-v7a/CMakeFiles/edit_cache.dir
+C:/Users/GGFruits/Desktop/petcal/android/app/.cxx/RelWithDebInfo/3fy6i6z1/armeabi-v7a/CMakeFiles/rebuild_cache.dir

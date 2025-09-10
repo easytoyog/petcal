@@ -3,8 +3,8 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
-// import 'package:google_sign_in/google_sign_in.dart';
-// import 'package:sign_in_with_apple/sign_in_with_apple.dart';
+
+// Screens
 import 'package:inthepark/screens/profile_screen.dart';
 import 'package:inthepark/screens/signup_screen.dart';
 import 'package:inthepark/screens/account_creation_screen.dart';
@@ -12,15 +12,72 @@ import 'package:inthepark/screens/owner_detail_screen.dart';
 import 'package:inthepark/screens/pet_detail_screen.dart';
 import 'package:inthepark/screens/location_service_choice.dart';
 import 'package:inthepark/screens/allsetup.dart';
-import 'package:flutter_dotenv/flutter_dotenv.dart';
-import 'package:firebase_app_check/firebase_app_check.dart';
-import 'package:google_mobile_ads/google_mobile_ads.dart';
-import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:inthepark/screens/forgot_password_screen.dart';
 import 'package:inthepark/screens/wait_screen.dart';
+
+import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:firebase_app_check/firebase_app_check.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart' show kDebugMode, kReleaseMode;
 
+// Ads SDK — hide UMP symbols to avoid name clashes with the standalone UMP package
+import 'package:google_mobile_ads/google_mobile_ads.dart' as gma
+    show MobileAds, RequestConfiguration, MaxAdContentRating;
+
+import 'package:google_mobile_ads/google_mobile_ads.dart'
+    show ConsentInformation, ConsentRequestParameters, ConsentForm,
+         ConsentDebugSettings, DebugGeography, PrivacyOptionsRequirementStatus;
+
+
 bool _appCheckActivated = false;
+
+/// Ask/refresh user consent and show the UMP form when required (EEA/UK, etc.)
+Future<void> _gatherConsentIfNeeded() async {
+  final params = ConsentRequestParameters(
+    // consentDebugSettings: ConsentDebugSettings(
+    //   debugGeography: DebugGeography.debugGeographyEea,
+    //   testIdentifiers: const ['YOUR-TEST-DEVICE-HASHED-ID'],
+    // ),
+  );
+
+  ConsentInformation.instance.requestConsentInfoUpdate(
+    params,
+    () async {
+      // Loads & shows a form if required; callback runs after dismissal
+      ConsentForm.loadAndShowConsentFormIfRequired((formError) async {
+        if (formError != null) {
+          debugPrint('UMP form error: ${formError.errorCode}: ${formError.message}');
+        }
+        final canRequest = await ConsentInformation.instance.canRequestAds();
+        if (canRequest) {
+          await _configureMobileAds();
+          await gma.MobileAds.instance.initialize();
+        }
+      });
+    },
+    (err) async {
+      debugPrint('Consent update error: ${err.errorCode}: ${err.message}');
+      // Even on error, prior consent may allow ads:
+      final canRequest = await ConsentInformation.instance.canRequestAds();
+      if (canRequest) {
+        await _configureMobileAds();
+        await gma.MobileAds.instance.initialize();
+      }
+    },
+  );
+}
+
+
+/// Configure Mobile Ads (test devices in debug, content rating, etc.)
+Future<void> _configureMobileAds() async {
+  await gma.MobileAds.instance.updateRequestConfiguration(
+    gma.RequestConfiguration(
+      testDeviceIds: kReleaseMode ? const <String>[] : const <String>[],
+      maxAdContentRating: gma.MaxAdContentRating.pg,
+      // Optionally set tagForChildDirectedTreatment / tagForUnderAgeOfConsent here if needed.
+    ),
+  );
+}
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -30,28 +87,30 @@ Future<void> main() async {
 
     await Firebase.initializeApp();
 
-    // ✅ Move App Check here
+    // ✅ App Check: real in release, debug in dev/emulators
     if (!_appCheckActivated) {
       await FirebaseAppCheck.instance.activate(
-        androidProvider: AndroidProvider.debug, // force debug provider for this test
+        androidProvider: kReleaseMode
+            ? AndroidProvider.playIntegrity
+            : AndroidProvider.debug,
+        // appleProvider: AppleProvider.appAttest, // if you also ship iOS
       );
-     // await FirebaseAppCheck.instance.activate(
-     //   androidProvider: kReleaseMode
-     //       ? AndroidProvider.playIntegrity   // real device
-     //       : AndroidProvider.debug,          // emulator/dev
-     //    appleProvider: AppleProvider.appAttest, // if you ship iOS
-     // );
       _appCheckActivated = true;
     }
 
-    // Other Firebase stuff AFTER App Check
+    // Notifications permission (iOS prompt; Android no-op)
     final messaging = FirebaseMessaging.instance;
     await messaging.requestPermission();
 
-    await MobileAds.instance.initialize();
+    // ✅ Get consent BEFORE initializing ads
+    await _gatherConsentIfNeeded();
+
+    await _configureMobileAds();
+    await gma.MobileAds.instance.initialize();
   } catch (e, stack) {
-    print("🔥 Firebase init failed: $e");
-    print(stack);
+    // Don’t block app startup if anything above fails
+    debugPrint("🔥 Startup error: $e");
+    debugPrint("$stack");
   }
 
   runApp(const MyApp());
@@ -62,7 +121,7 @@ class MyApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    print("✅ MyApp is building...");
+    debugPrint("✅ MyApp is building...");
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
@@ -73,17 +132,14 @@ class MyApp extends StatelessWidget {
         ),
         textTheme: GoogleFonts.nunitoTextTheme(),
       ),
-      // Instead of initialRoute, we use the home property with a StreamBuilder.
       home: StreamBuilder<User?>(
         stream: FirebaseAuth.instance.authStateChanges(),
         builder: (context, snapshot) {
-          // Show a loading indicator while waiting for auth state.
           if (snapshot.connectionState == ConnectionState.waiting) {
             return const Scaffold(
               body: Center(child: CircularProgressIndicator()),
             );
           }
-          // If user is logged in, navigate to HomeScreen.
           if (snapshot.hasData) {
             final user = snapshot.data!;
             if (!user.emailVerified) {
@@ -116,7 +172,6 @@ class MyApp extends StatelessWidget {
               },
             );
           }
-          // Otherwise, show the login screen.
           return const ModernLoginScreen();
         },
       ),
@@ -153,15 +208,14 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
     final messaging = FirebaseMessaging.instance;
     final settings = await messaging.requestPermission();
     if (settings.authorizationStatus == AuthorizationStatus.authorized) {
-      // Listen for token refresh (works for initial token too)
+      // Listen for token refresh (also fires with current token once)
       messaging.onTokenRefresh.listen((token) async {
         await FirebaseFirestore.instance.collection('owners').doc(user.uid).set(
-          {'fcmToken': token},
-          SetOptions(merge: true),
-        );
+              {'fcmToken': token},
+              SetOptions(merge: true),
+            );
       });
 
-      // Try to get the token immediately, but ignore errors
       try {
         final token = await messaging.getToken();
         if (token != null) {
@@ -174,76 +228,13 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
           );
         }
       } catch (e) {
-        print('FCM token error: $e');
-        // Optionally show a SnackBar or ignore
+        debugPrint('FCM token error: $e');
       }
     } else {
-      print('User declined or has not accepted notification permission');
+      debugPrint('User declined or has not accepted notification permission');
     }
   }
 
-  // Google Sign-In (commented out)
-  // Future<User?> signInWithGoogle() async {
-  //   FirebaseAuth auth = FirebaseAuth.instance;
-  //   final GoogleSignIn googleSignIn = GoogleSignIn();
-  //   try {
-  //     final GoogleSignInAccount? googleUser = await googleSignIn.signIn();
-  //     if (googleUser != null) {
-  //       final GoogleSignInAuthentication googleAuth =
-  //           await googleUser.authentication;
-  //       final OAuthCredential credential = GoogleAuthProvider.credential(
-  //         accessToken: googleAuth.accessToken,
-  //         idToken: googleAuth.idToken,
-  //       );
-  //       final UserCredential userCredential =
-  //           await auth.signInWithCredential(credential);
-  //       final user = userCredential.user;
-  //       if (user != null) {
-  //         await saveUserFcmToken(user);
-  //         Navigator.of(context).pushReplacementNamed('/profile');
-  //       }
-  //       return user;
-  //     }
-  //   } catch (e) {
-  //     ScaffoldMessenger.of(context).showSnackBar(
-  //       SnackBar(content: Text("Google sign-in error: $e")),
-  //     );
-  //   }
-  //   return null;
-  // }
-
-  // Apple Sign-In (commented out)
-  // Future<User?> signInWithApple() async {
-  //   FirebaseAuth auth = FirebaseAuth.instance;
-  //   try {
-  //     final AuthorizationCredentialAppleID appleCredential =
-  //         await SignInWithApple.getAppleIDCredential(
-  //       scopes: [
-  //         AppleIDAuthorizationScopes.email,
-  //         AppleIDAuthorizationScopes.fullName
-  //       ],
-  //     );
-  //     final OAuthCredential credential = OAuthProvider("apple.com").credential(
-  //       idToken: appleCredential.identityToken,
-  //       accessToken: appleCredential.authorizationCode,
-  //     );
-  //     final UserCredential userCredential =
-  //         await auth.signInWithCredential(credential);
-  //     final user = userCredential.user;
-  //     if (user != null) {
-  //       await saveUserFcmToken(user);
-  //       Navigator.of(context).pushReplacementNamed('/profile');
-  //     }
-  //     return user;
-  //   } catch (e) {
-  //     ScaffoldMessenger.of(context).showSnackBar(
-  //       SnackBar(content: Text("Apple sign-in error: $e")),
-  //     );
-  //     return null;
-  //   }
-  // }
-
-  // Email/Password login
   Future<User?> loginUsingEmailPassword({
     required String email,
     required String password,
@@ -258,16 +249,16 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
       );
       user = userCredential.user;
       if (user != null) {
-        await user.reload(); // Refresh user info
+        await user.reload();
         if (!user.emailVerified) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
-                content: Text("Please verify your email before logging in.")),
+              content: Text("Please verify your email before logging in."),
+            ),
           );
           await FirebaseAuth.instance.signOut();
           return null;
         }
-        // Check if user is active in Firestore
         final doc = await FirebaseFirestore.instance
             .collection('owners')
             .doc(user.uid)
@@ -277,13 +268,15 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
               content: Text(
-                  "Your account has been deactivated. Please contact support ."),
+                "Your account has been deactivated. Please contact support .",
+              ),
             ),
           );
           await FirebaseAuth.instance.signOut();
           return null;
         }
         await saveUserFcmToken(user);
+        if (!mounted) return user;
         Navigator.of(context).pushReplacementNamed('/profile');
       }
     } on FirebaseAuthException catch (e) {
@@ -307,9 +300,8 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
   @override
   Widget build(BuildContext context) {
     final screenWidth = MediaQuery.of(context).size.width;
-    print("✅ ModernLoginScreen is building...");
+    debugPrint("✅ ModernLoginScreen is building...");
     return Scaffold(
-      // resizeToAvoidBottomInset: true, // (default is true)
       body: Container(
         decoration: const BoxDecoration(
           gradient: LinearGradient(
@@ -341,7 +333,7 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
                 const SizedBox(height: 40),
                 TextField(
                   controller: emailController,
-                  cursorColor: Colors.tealAccent, // <-- Add this line
+                  cursorColor: Colors.tealAccent,
                   style: const TextStyle(color: Colors.white),
                   decoration: InputDecoration(
                     filled: true,
@@ -366,7 +358,7 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
                 TextField(
                   controller: passwordController,
                   obscureText: true,
-                  cursorColor: Colors.tealAccent, // <-- Add this line
+                  cursorColor: Colors.tealAccent,
                   style: const TextStyle(color: Colors.white),
                   decoration: InputDecoration(
                     filled: true,
@@ -436,15 +428,11 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
                   ),
                 ),
                 const SizedBox(height: 15),
-                //   Text(
-                //     "Or sign in with",
-                //     style: GoogleFonts.nunito(color: Colors.white54, fontSize: 14),
-                //   ),
                 const SizedBox(height: 15),
                 Row(
                   mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    // Social login buttons (commented out)
+                  children: const [
+                    // Social buttons (if you re-enable later)
                   ],
                 ),
                 const SizedBox(height: 20),

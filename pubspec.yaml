@@ -41,7 +41,8 @@ dependencies:
   country_state_city_picker: ^1.2.8
   dropdown_search: ^5.0.6
   flutter_image_compress: ^2.3.0 
-  image: ^4.2.0  
+  image: ^4.2.0    
+  
 
 flutter_launcher_icons:
   ios: true

@@ -1,0 +1,2 @@
+C:/Users/GGFruits/Desktop/petcal/android/app/.cxx/RelWithDebInfo/446w325t/x86/CMakeFiles/edit_cache.dir
+C:/Users/GGFruits/Desktop/petcal/android/app/.cxx/RelWithDebInfo/446w325t/x86/CMakeFiles/rebuild_cache.dir
