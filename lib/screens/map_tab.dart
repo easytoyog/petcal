@@ -438,7 +438,8 @@ class _MapTabState extends State<MapTab>
     if (isCheckedIn) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("You are already checked in to this park.")),
+        const SnackBar(
+            content: Text("You are already checked in to this park.")),
       );
       return;
     }
@@ -453,10 +454,12 @@ class _MapTabState extends State<MapTab>
           builder: (context, setStateDialog) {
             return AlertDialog(
               title: const Text("Check In"),
-              content: Text("You are at ${park.name}. Do you want to check in?"),
+              content:
+                  Text("You are at ${park.name}. Do you want to check in?"),
               actions: [
                 TextButton(
-                  onPressed: isProcessing ? null : () => Navigator.of(context).pop(),
+                  onPressed:
+                      isProcessing ? null : () => Navigator.of(context).pop(),
                   child: const Text("No"),
                 ),
                 ElevatedButton(
@@ -571,8 +574,8 @@ class _MapTabState extends State<MapTab>
       final List<Map<String, dynamic>> userList = [];
       if (userIds.isNotEmpty) {
         for (var i = 0; i < userIds.length; i += 10) {
-          final batchIds =
-              userIds.sublist(i, i + 10 > userIds.length ? userIds.length : i + 10);
+          final batchIds = userIds.sublist(
+              i, i + 10 > userIds.length ? userIds.length : i + 10);
           final petsSnapshot = await FirebaseFirestore.instance
               .collection('pets')
               .where('ownerId', whereIn: batchIds)
@@ -591,8 +594,8 @@ class _MapTabState extends State<MapTab>
           for (final ownerId in batchIds) {
             final userDoc =
                 usersSnapshot.docs.firstWhere((d) => d.id == ownerId);
-            final checkInTime =
-                (userDoc.data() as Map<String, dynamic>)['checkedInAt'] as Timestamp?;
+            final checkInTime = (userDoc.data()
+                as Map<String, dynamic>)['checkedInAt'] as Timestamp?;
             final ownerPets = petsByOwner[ownerId] ?? [];
 
             // profile data (public & readable)
@@ -642,7 +645,8 @@ class _MapTabState extends State<MapTab>
                           if (context.mounted) {
                             ScaffoldMessenger.of(context).showSnackBar(
                               const SnackBar(
-                                  content: Text("Removed park from liked parks")),
+                                  content:
+                                      Text("Removed park from liked parks")),
                             );
                           }
                         } else {
@@ -706,15 +710,16 @@ class _MapTabState extends State<MapTab>
                                   "Off-leash Dog Park",
                                   "Off-leash Beach"
                                 ];
-                                final options =
-                                    all.where((s) => !services.contains(s)).toList();
+                                final options = all
+                                    .where((s) => !services.contains(s))
+                                    .toList();
 
                                 if (options.isEmpty) {
                                   if (context.mounted) {
                                     ScaffoldMessenger.of(context).showSnackBar(
                                       const SnackBar(
-                                          content:
-                                              Text("All services are already added.")),
+                                          content: Text(
+                                              "All services are already added.")),
                                     );
                                   }
                                   return;
@@ -728,7 +733,8 @@ class _MapTabState extends State<MapTab>
                                       builder: (ctx, setState) {
                                         return AlertDialog(
                                           title: const Text("Add Service"),
-                                          content: DropdownButtonFormField<String>(
+                                          content:
+                                              DropdownButtonFormField<String>(
                                             value: selected,
                                             items: options
                                                 .map((s) => DropdownMenuItem(
@@ -741,12 +747,13 @@ class _MapTabState extends State<MapTab>
                                           ),
                                           actions: [
                                             TextButton(
-                                              onPressed: () => Navigator.of(ctx).pop(),
+                                              onPressed: () =>
+                                                  Navigator.of(ctx).pop(),
                                               child: const Text("Cancel"),
                                             ),
                                             ElevatedButton(
-                                              onPressed: () =>
-                                                  Navigator.of(ctx).pop(selected),
+                                              onPressed: () => Navigator.of(ctx)
+                                                  .pop(selected),
                                               child: const Text("Add"),
                                             ),
                                           ],
@@ -808,7 +815,8 @@ class _MapTabState extends State<MapTab>
                         final ownerId = petData['ownerId'] as String? ?? '';
                         final petId = petData['petId'] as String? ?? '';
                         final petName = petData['petName'] as String? ?? '';
-                        final petPhoto = petData['petPhotoUrl'] as String? ?? '';
+                        final petPhoto =
+                            petData['petPhotoUrl'] as String? ?? '';
                         final checkIn = petData['checkInTime'] as String? ?? '';
                         final ownerName =
                             (petData['ownerName'] as String? ?? '').trim();
@@ -816,7 +824,8 @@ class _MapTabState extends State<MapTab>
 
                         return ListTile(
                           leading: (petPhoto.isNotEmpty)
-                              ? CircleAvatar(backgroundImage: NetworkImage(petPhoto))
+                              ? CircleAvatar(
+                                  backgroundImage: NetworkImage(petPhoto))
                               : const CircleAvatar(
                                   backgroundColor: Colors.brown,
                                   child: Icon(Icons.pets, color: Colors.white),
@@ -826,7 +835,8 @@ class _MapTabState extends State<MapTab>
                             [
                               if (ownerName.isNotEmpty && !mine) ownerName,
                               mine ? "Your pet" : null,
-                              if (checkIn.isNotEmpty) "– Checked in at $checkIn",
+                              if (checkIn.isNotEmpty)
+                                "– Checked in at $checkIn",
                             ].whereType<String>().join(' '),
                           ),
                           trailing: mine
@@ -862,7 +872,8 @@ class _MapTabState extends State<MapTab>
                                         });
                                       }
                                       if (context.mounted) {
-                                        ScaffoldMessenger.of(context).showSnackBar(
+                                        ScaffoldMessenger.of(context)
+                                            .showSnackBar(
                                           const SnackBar(
                                               content: Text("Friend removed.")),
                                         );
@@ -870,11 +881,11 @@ class _MapTabState extends State<MapTab>
                                       _fetchFavorites();
                                     } else {
                                       // Use public_profiles mirror for display name
-                                      String ownerDisplay =
-                                          ownerName.isNotEmpty
-                                              ? ownerName
-                                              : (await FirebaseFirestore.instance
-                                                      .collection('public_profiles')
+                                      String ownerDisplay = ownerName.isNotEmpty
+                                          ? ownerName
+                                          : (await FirebaseFirestore.instance
+                                                      .collection(
+                                                          'public_profiles')
                                                       .doc(ownerId)
                                                       .get())
                                                   .data()
@@ -882,7 +893,7 @@ class _MapTabState extends State<MapTab>
                                                       (d['displayName'] ?? '')
                                                           .toString()
                                                           .trim()) ??
-                                                  ownerId;
+                                              ownerId;
 
                                       await FirebaseFirestore.instance
                                           .collection('friends')
@@ -892,8 +903,7 @@ class _MapTabState extends State<MapTab>
                                           .set({
                                         'friendId': ownerId,
                                         'ownerName': ownerDisplay,
-                                        'addedAt':
-                                            FieldValue.serverTimestamp(),
+                                        'addedAt': FieldValue.serverTimestamp(),
                                       });
                                       await FirebaseFirestore.instance
                                           .collection('favorites')
@@ -902,8 +912,7 @@ class _MapTabState extends State<MapTab>
                                           .doc(petId)
                                           .set({
                                         'petId': petId,
-                                        'addedAt':
-                                            FieldValue.serverTimestamp(),
+                                        'addedAt': FieldValue.serverTimestamp(),
                                       });
                                       if (mounted) {
                                         setState(() {
@@ -911,7 +920,8 @@ class _MapTabState extends State<MapTab>
                                         });
                                       }
                                       if (context.mounted) {
-                                        ScaffoldMessenger.of(context).showSnackBar(
+                                        ScaffoldMessenger.of(context)
+                                            .showSnackBar(
                                           const SnackBar(
                                               content: Text("Friend added!")),
                                         );
@@ -933,8 +943,9 @@ class _MapTabState extends State<MapTab>
                         Expanded(
                           child: _BigActionButton(
                             label: isCheckedIn ? "Check Out" : "Check In",
-                            backgroundColor:
-                                isCheckedIn ? Colors.red : const Color(0xFF567D46),
+                            backgroundColor: isCheckedIn
+                                ? Colors.red
+                                : const Color(0xFF567D46),
                             onPressed: () async {
                               // keep identical behavior
                               final processing = ValueNotifier<bool>(true);
@@ -974,8 +985,10 @@ class _MapTabState extends State<MapTab>
                               }
                               processing.value = false;
                               if (mounted) {
-                                Navigator.of(context, rootNavigator: true).pop();
-                                Navigator.of(context).pop(); // close full-screen
+                                Navigator.of(context, rootNavigator: true)
+                                    .pop();
+                                Navigator.of(context)
+                                    .pop(); // close full-screen
                               }
                             },
                           ),
@@ -989,7 +1002,8 @@ class _MapTabState extends State<MapTab>
                               Navigator.push(
                                 context,
                                 MaterialPageRoute(
-                                  builder: (_) => ChatRoomScreen(parkId: parkId),
+                                  builder: (_) =>
+                                      ChatRoomScreen(parkId: parkId),
                                 ),
                               );
                             },
@@ -1035,8 +1049,8 @@ class _MapTabState extends State<MapTab>
     } catch (e) {
       if (!mounted) return;
       Navigator.of(context, rootNavigator: true).pop();
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text("Error loading active users: $e")));
+      ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("Error loading active users: $e")));
     }
   }
   // -----------------------------------------------------------------------------------------
@@ -1421,12 +1435,13 @@ class _MapTabState extends State<MapTab>
                                 );
                               }
 
-                              if (!eventEndDateTime.isAfter(eventStartDateTime)) {
+                              if (!eventEndDateTime
+                                  .isAfter(eventStartDateTime)) {
                                 if (!mounted) return;
                                 ScaffoldMessenger.of(context).showSnackBar(
                                   const SnackBar(
-                                      content:
-                                          Text("End time must be after start time")),
+                                      content: Text(
+                                          "End time must be after start time")),
                                 );
                                 return;
                               }
@@ -1442,7 +1457,8 @@ class _MapTabState extends State<MapTab>
                                 'recurrence': selectedRecurrence,
                                 'likes': [],
                                 'createdBy':
-                                    FirebaseAuth.instance.currentUser?.uid ?? "",
+                                    FirebaseAuth.instance.currentUser?.uid ??
+                                        "",
                                 'createdAt': FieldValue.serverTimestamp(),
                               };
 

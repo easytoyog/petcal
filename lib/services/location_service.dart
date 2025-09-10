@@ -221,8 +221,6 @@ class LocationService {
     // Do NOT touch userCount here (server maintains it).
   }
 
-
-
   /// Uncheck the current user from a specific park.
   /// Cloud Functions will decrement `userCount`.
   Future<void> removeUserFromActiveUsersTable(String parkId) async {

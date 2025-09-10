@@ -25,20 +25,24 @@ import 'package:google_mobile_ads/google_mobile_ads.dart' as gma
     show MobileAds, RequestConfiguration, MaxAdContentRating;
 
 import 'package:google_mobile_ads/google_mobile_ads.dart'
-    show ConsentInformation, ConsentRequestParameters, ConsentForm,
-         ConsentDebugSettings, DebugGeography, PrivacyOptionsRequirementStatus;
-
+    show
+        ConsentInformation,
+        ConsentRequestParameters,
+        ConsentForm,
+        ConsentDebugSettings,
+        DebugGeography,
+        PrivacyOptionsRequirementStatus;
 
 bool _appCheckActivated = false;
 
 /// Ask/refresh user consent and show the UMP form when required (EEA/UK, etc.)
 Future<void> _gatherConsentIfNeeded() async {
   final params = ConsentRequestParameters(
-    // consentDebugSettings: ConsentDebugSettings(
-    //   debugGeography: DebugGeography.debugGeographyEea,
-    //   testIdentifiers: const ['YOUR-TEST-DEVICE-HASHED-ID'],
-    // ),
-  );
+      // consentDebugSettings: ConsentDebugSettings(
+      //   debugGeography: DebugGeography.debugGeographyEea,
+      //   testIdentifiers: const ['YOUR-TEST-DEVICE-HASHED-ID'],
+      // ),
+      );
 
   ConsentInformation.instance.requestConsentInfoUpdate(
     params,
@@ -46,7 +50,8 @@ Future<void> _gatherConsentIfNeeded() async {
       // Loads & shows a form if required; callback runs after dismissal
       ConsentForm.loadAndShowConsentFormIfRequired((formError) async {
         if (formError != null) {
-          debugPrint('UMP form error: ${formError.errorCode}: ${formError.message}');
+          debugPrint(
+              'UMP form error: ${formError.errorCode}: ${formError.message}');
         }
         final canRequest = await ConsentInformation.instance.canRequestAds();
         if (canRequest) {
@@ -66,7 +71,6 @@ Future<void> _gatherConsentIfNeeded() async {
     },
   );
 }
-
 
 /// Configure Mobile Ads (test devices in debug, content rating, etc.)
 Future<void> _configureMobileAds() async {
@@ -211,9 +215,9 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
       // Listen for token refresh (also fires with current token once)
       messaging.onTokenRefresh.listen((token) async {
         await FirebaseFirestore.instance.collection('owners').doc(user.uid).set(
-              {'fcmToken': token},
-              SetOptions(merge: true),
-            );
+          {'fcmToken': token},
+          SetOptions(merge: true),
+        );
       });
 
       try {
