@@ -1,7 +1,16 @@
+// main.dart
+
+import 'dart:async';
+
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_app_check/firebase_app_check.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
+
+import 'package:flutter/foundation.dart' show kReleaseMode;
 import 'package:flutter/material.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 // Screens
@@ -15,62 +24,24 @@ import 'package:inthepark/screens/allsetup.dart';
 import 'package:inthepark/screens/forgot_password_screen.dart';
 import 'package:inthepark/screens/wait_screen.dart';
 
-import 'package:flutter_dotenv/flutter_dotenv.dart';
-import 'package:firebase_app_check/firebase_app_check.dart';
-import 'package:firebase_messaging/firebase_messaging.dart';
-import 'package:flutter/foundation.dart' show kDebugMode, kReleaseMode;
-
-// Ads SDK — hide UMP symbols to avoid name clashes with the standalone UMP package
+// Google Mobile Ads: keep SDK import separate to avoid UMP symbol clashes
 import 'package:google_mobile_ads/google_mobile_ads.dart' as gma
     show MobileAds, RequestConfiguration, MaxAdContentRating;
 
+// UMP (User Messaging Platform) classes (same package, but un-aliased)
 import 'package:google_mobile_ads/google_mobile_ads.dart'
     show
         ConsentInformation,
         ConsentRequestParameters,
         ConsentForm,
         ConsentDebugSettings,
-        DebugGeography,
-        PrivacyOptionsRequirementStatus;
+        DebugGeography;
+
+import 'dart:async';
+import 'package:google_mobile_ads/google_mobile_ads.dart'
+    show ConsentInformation, ConsentRequestParameters, ConsentForm;
 
 bool _appCheckActivated = false;
-
-/// Ask/refresh user consent and show the UMP form when required (EEA/UK, etc.)
-Future<void> _gatherConsentIfNeeded() async {
-  final params = ConsentRequestParameters(
-      // consentDebugSettings: ConsentDebugSettings(
-      //   debugGeography: DebugGeography.debugGeographyEea,
-      //   testIdentifiers: const ['YOUR-TEST-DEVICE-HASHED-ID'],
-      // ),
-      );
-
-  ConsentInformation.instance.requestConsentInfoUpdate(
-    params,
-    () async {
-      // Loads & shows a form if required; callback runs after dismissal
-      ConsentForm.loadAndShowConsentFormIfRequired((formError) async {
-        if (formError != null) {
-          debugPrint(
-              'UMP form error: ${formError.errorCode}: ${formError.message}');
-        }
-        final canRequest = await ConsentInformation.instance.canRequestAds();
-        if (canRequest) {
-          await _configureMobileAds();
-          await gma.MobileAds.instance.initialize();
-        }
-      });
-    },
-    (err) async {
-      debugPrint('Consent update error: ${err.errorCode}: ${err.message}');
-      // Even on error, prior consent may allow ads:
-      final canRequest = await ConsentInformation.instance.canRequestAds();
-      if (canRequest) {
-        await _configureMobileAds();
-        await gma.MobileAds.instance.initialize();
-      }
-    },
-  );
-}
 
 /// Configure Mobile Ads (test devices in debug, content rating, etc.)
 Future<void> _configureMobileAds() async {
@@ -78,41 +49,88 @@ Future<void> _configureMobileAds() async {
     gma.RequestConfiguration(
       testDeviceIds: kReleaseMode ? const <String>[] : const <String>[],
       maxAdContentRating: gma.MaxAdContentRating.pg,
-      // Optionally set tagForChildDirectedTreatment / tagForUnderAgeOfConsent here if needed.
+      // Optionally set child-directed flags here if applicable.
     ),
   );
+}
+
+Future<void> _gatherConsentIfNeeded() async {
+  final completer = Completer<void>();
+  final consentInfo = ConsentInformation.instance;
+
+  // ✅ Your API version: callback-based and returns void
+  consentInfo.requestConsentInfoUpdate(
+    ConsentRequestParameters(
+        // consentDebugSettings: ConsentDebugSettings(
+        //   debugGeography: DebugGeography.debugGeographyEea,
+        //   testIdentifiers: ['YOUR-TEST-DEVICE-HASHED-ID'],
+        // ),
+        ),
+    () async {
+      // Success: now load & show if required (also callback-style)
+      ConsentForm.loadAndShowConsentFormIfRequired((formError) async {
+        if (formError != null) {
+          debugPrint(
+              'UMP form error: ${formError.errorCode}: ${formError.message}');
+        }
+        final canRequest = await consentInfo.canRequestAds();
+        if (canRequest) {
+          await _configureMobileAds();
+          await gma.MobileAds.instance.initialize();
+        }
+        if (!completer.isCompleted) completer.complete();
+      });
+    },
+    (err) async {
+      // Failure path: you might still be allowed to request ads from prior consent
+      debugPrint('Consent update error: ${err.errorCode}: ${err.message}');
+      final canRequest = await consentInfo.canRequestAds();
+      if (canRequest) {
+        await _configureMobileAds();
+        await gma.MobileAds.instance.initialize();
+      }
+      if (!completer.isCompleted) completer.complete();
+    },
+  );
+
+  return completer.future;
 }
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   try {
-    await dotenv.load(fileName: '.env');
+    // dotenv is optional — tolerate missing file in release
+    await dotenv.load(fileName: '.env').catchError((_) {});
 
     await Firebase.initializeApp();
 
-    // ✅ App Check: real in release, debug in dev/emulators
+    // ✅ App Check
     if (!_appCheckActivated) {
       await FirebaseAppCheck.instance.activate(
         androidProvider: kReleaseMode
             ? AndroidProvider.playIntegrity
             : AndroidProvider.debug,
-        // appleProvider: AppleProvider.appAttest, // if you also ship iOS
+        appleProvider: kReleaseMode
+            ? AppleProvider.appAttestWithDeviceCheckFallback
+            : AppleProvider.debug,
       );
       _appCheckActivated = true;
     }
 
-    // Notifications permission (iOS prompt; Android no-op)
+    // ✅ Notifications permission (iOS prompt; Android no-op)
     final messaging = FirebaseMessaging.instance;
     await messaging.requestPermission();
+    await messaging.setForegroundNotificationPresentationOptions(
+      alert: true,
+      badge: true,
+      sound: true,
+    );
 
-    // ✅ Get consent BEFORE initializing ads
+    // ✅ Gather consent first; if allowed, this will init Mobile Ads inside
     await _gatherConsentIfNeeded();
-
-    await _configureMobileAds();
-    await gma.MobileAds.instance.initialize();
   } catch (e, stack) {
-    // Don’t block app startup if anything above fails
+    // Don’t block startup if anything above fails
     debugPrint("🔥 Startup error: $e");
     debugPrint("$stack");
   }
@@ -139,35 +157,46 @@ class MyApp extends StatelessWidget {
       home: StreamBuilder<User?>(
         stream: FirebaseAuth.instance.authStateChanges(),
         builder: (context, snapshot) {
+          // Auth stream booting
           if (snapshot.connectionState == ConnectionState.waiting) {
             return const Scaffold(
               body: Center(child: CircularProgressIndicator()),
             );
           }
+          // Logged in
           if (snapshot.hasData) {
             final user = snapshot.data!;
             if (!user.emailVerified) {
               return WaitForEmailVerificationScreen(user: user);
             }
+            // Load profile minimal fields before home
             return FutureBuilder<DocumentSnapshot>(
               future: FirebaseFirestore.instance
                   .collection('owners')
                   .doc(user.uid)
                   .get(),
               builder: (context, snap) {
-                if (!snap.hasData) {
+                if (snap.connectionState == ConnectionState.waiting) {
                   return const Scaffold(
                       body: Center(child: CircularProgressIndicator()));
                 }
-                final doc = snap.data!;
-                final data = doc.data() as Map<String, dynamic>? ?? {};
-                final missingProfile = !doc.exists ||
-                    !(data.containsKey('firstName') &&
-                        data['firstName'] != null &&
-                        data['firstName'].toString().trim().isNotEmpty) ||
-                    !(data.containsKey('lastName') &&
-                        data['lastName'] != null &&
-                        data['lastName'].toString().trim().isNotEmpty);
+                if (snap.hasError) {
+                  return const Scaffold(
+                    body: Center(
+                      child: Text(
+                        'Oops—failed to load your profile. Please try again.',
+                      ),
+                    ),
+                  );
+                }
+                final doc = snap.data;
+                final data = (doc?.data() as Map<String, dynamic>?) ?? {};
+                final hasFirst =
+                    (data['firstName'] ?? '').toString().trim().isNotEmpty;
+                final hasLast =
+                    (data['lastName'] ?? '').toString().trim().isNotEmpty;
+                final missingProfile =
+                    (doc == null || !doc.exists) || !(hasFirst && hasLast);
 
                 if (missingProfile) {
                   return OwnerDetailsScreen();
@@ -176,6 +205,7 @@ class MyApp extends StatelessWidget {
               },
             );
           }
+          // Logged out
           return const ModernLoginScreen();
         },
       ),
@@ -207,35 +237,44 @@ class ModernLoginScreen extends StatefulWidget {
 class _ModernLoginScreenState extends State<ModernLoginScreen> {
   final TextEditingController emailController = TextEditingController();
   final TextEditingController passwordController = TextEditingController();
+  StreamSubscription<String>? _tokenSub;
+
+  @override
+  void dispose() {
+    _tokenSub?.cancel();
+    emailController.dispose();
+    passwordController.dispose();
+    super.dispose();
+  }
 
   Future<void> saveUserFcmToken(User user) async {
     final messaging = FirebaseMessaging.instance;
-    final settings = await messaging.requestPermission();
-    if (settings.authorizationStatus == AuthorizationStatus.authorized) {
-      // Listen for token refresh (also fires with current token once)
-      messaging.onTokenRefresh.listen((token) async {
-        await FirebaseFirestore.instance.collection('owners').doc(user.uid).set(
-          {'fcmToken': token},
-          SetOptions(merge: true),
-        );
-      });
 
-      try {
+    try {
+      // Check current settings (does not re-prompt if already determined)
+      final settings = await messaging.getNotificationSettings();
+      if (settings.authorizationStatus.name == 'authorized' ||
+          settings.authorizationStatus.name == 'provisional') {
+        // Keep token up to date
+        _tokenSub = messaging.onTokenRefresh.listen((token) async {
+          await FirebaseFirestore.instance
+              .collection('owners')
+              .doc(user.uid)
+              .set({'fcmToken': token}, SetOptions(merge: true));
+        });
+
         final token = await messaging.getToken();
         if (token != null) {
           await FirebaseFirestore.instance
               .collection('owners')
               .doc(user.uid)
-              .set(
-            {'fcmToken': token},
-            SetOptions(merge: true),
-          );
+              .set({'fcmToken': token}, SetOptions(merge: true));
         }
-      } catch (e) {
-        debugPrint('FCM token error: $e');
+      } else {
+        debugPrint('User declined or has not accepted notification permission');
       }
-    } else {
-      debugPrint('User declined or has not accepted notification permission');
+    } catch (e) {
+      debugPrint('FCM token error: $e');
     }
   }
 
@@ -247,11 +286,12 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
     FirebaseAuth auth = FirebaseAuth.instance;
     User? user;
     try {
-      UserCredential userCredential = await auth.signInWithEmailAndPassword(
+      final userCredential = await auth.signInWithEmailAndPassword(
         email: email,
         password: password,
       );
       user = userCredential.user;
+
       if (user != null) {
         await user.reload();
         if (!user.emailVerified) {
@@ -263,39 +303,45 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
           await FirebaseAuth.instance.signOut();
           return null;
         }
+
         final doc = await FirebaseFirestore.instance
             .collection('owners')
             .doc(user.uid)
             .get();
         final data = doc.data() ?? {};
-        if (data.containsKey('active') && data['active'] == false) {
+        if (data['active'] == false) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
               content: Text(
-                "Your account has been deactivated. Please contact support .",
+                "Your account has been deactivated. Please contact support.",
               ),
             ),
           );
           await FirebaseAuth.instance.signOut();
           return null;
         }
+
         await saveUserFcmToken(user);
+
         if (!mounted) return user;
         Navigator.of(context).pushReplacementNamed('/profile');
       }
     } on FirebaseAuthException catch (e) {
-      if (e.code == "user-not-found") {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("No user found with this email.")),
-        );
-      } else if (e.code == "wrong-password") {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("Incorrect password.")),
-        );
-      } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("Login error: ${e.message}")),
-        );
+      switch (e.code) {
+        case "user-not-found":
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text("No user found with this email.")),
+          );
+          break;
+        case "wrong-password":
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text("Incorrect password.")),
+          );
+          break;
+        default:
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text("Login error: ${e.message}")),
+          );
       }
     }
     return user;
@@ -423,21 +469,13 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
                     ),
                     onPressed: () async {
                       await loginUsingEmailPassword(
-                        email: emailController.text,
+                        email: emailController.text.trim(),
                         password: passwordController.text,
                         context: context,
                       );
                     },
                     child: const Text("Log in", style: TextStyle(fontSize: 18)),
                   ),
-                ),
-                const SizedBox(height: 15),
-                const SizedBox(height: 15),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: const [
-                    // Social buttons (if you re-enable later)
-                  ],
                 ),
                 const SizedBox(height: 20),
                 GestureDetector(
