@@ -239,6 +239,8 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
   final TextEditingController passwordController = TextEditingController();
   StreamSubscription<String>? _tokenSub;
 
+  bool _isLoading = false;
+
   @override
   void dispose() {
     _tokenSub?.cancel();
@@ -247,15 +249,28 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
     super.dispose();
   }
 
-  Future<void> saveUserFcmToken(User user) async {
-    final messaging = FirebaseMessaging.instance;
+  Future<void> _attemptLogin() async {
+    if (_isLoading) return;
+    setState(() => _isLoading = true);
 
     try {
-      // Check current settings (does not re-prompt if already determined)
+      await loginUsingEmailPassword(
+        email: emailController.text.trim(),
+        password: passwordController.text,
+        context: context,
+      );
+      // If login navigates away, the setState below won't run (that's fine).
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  Future<void> saveUserFcmToken(User user) async {
+    final messaging = FirebaseMessaging.instance;
+    try {
       final settings = await messaging.getNotificationSettings();
       if (settings.authorizationStatus.name == 'authorized' ||
           settings.authorizationStatus.name == 'provisional') {
-        // Keep token up to date
         _tokenSub = messaging.onTokenRefresh.listen((token) async {
           await FirebaseFirestore.instance
               .collection('owners')
@@ -352,149 +367,171 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
     final screenWidth = MediaQuery.of(context).size.width;
     debugPrint("✅ ModernLoginScreen is building...");
     return Scaffold(
-      body: Container(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            colors: [Color(0xFF567D46), Color(0xFF365A38)],
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-          ),
-        ),
-        child: Center(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.symmetric(horizontal: 24.0),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              crossAxisAlignment: CrossAxisAlignment.center,
-              children: [
-                Image.asset(
-                  "assets/images/home_icon.png",
-                  width: screenWidth / 3,
-                ),
-                const SizedBox(height: 20),
-                Text(
-                  "Pet Calendar",
-                  style: GoogleFonts.nunito(
-                    fontSize: 32,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.white,
-                  ),
-                ),
-                const SizedBox(height: 40),
-                TextField(
-                  controller: emailController,
-                  cursorColor: Colors.tealAccent,
-                  style: const TextStyle(color: Colors.white),
-                  decoration: InputDecoration(
-                    filled: true,
-                    fillColor: Colors.white.withOpacity(0.15),
-                    hintText: "Email",
-                    hintStyle: const TextStyle(color: Colors.white70),
-                    prefixIcon: const Icon(Icons.mail, color: Colors.white),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: BorderSide.none,
+      body: Stack(
+        children: [
+          // Main content
+          Container(
+            decoration: const BoxDecoration(
+              gradient: LinearGradient(
+                colors: [Color(0xFF567D46), Color(0xFF365A38)],
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+              ),
+            ),
+            child: Center(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.symmetric(horizontal: 24.0),
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    Image.asset(
+                      "assets/images/home_icon.png",
+                      width: screenWidth / 3,
                     ),
-                    focusedBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: const BorderSide(
-                        color: Colors.tealAccent,
-                        width: 2,
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 20),
-                TextField(
-                  controller: passwordController,
-                  obscureText: true,
-                  cursorColor: Colors.tealAccent,
-                  style: const TextStyle(color: Colors.white),
-                  decoration: InputDecoration(
-                    filled: true,
-                    fillColor: Colors.white.withOpacity(0.15),
-                    hintText: "Password",
-                    hintStyle: const TextStyle(color: Colors.white70),
-                    prefixIcon: const Icon(Icons.lock, color: Colors.white),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: BorderSide.none,
-                    ),
-                    focusedBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: const BorderSide(
-                        color: Colors.tealAccent,
-                        width: 2,
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 10),
-                Align(
-                  alignment: Alignment.centerRight,
-                  child: GestureDetector(
-                    onTap: () async {
-                      final result = await Navigator.pushNamed(
-                        context,
-                        '/forgotPassword',
-                        arguments: emailController.text.trim(),
-                      );
-                      if (result is String && result.isNotEmpty) {
-                        setState(() {
-                          emailController.text = result;
-                        });
-                      }
-                    },
-                    child: Text(
-                      "Forgot password?",
+                    const SizedBox(height: 20),
+                    Text(
+                      "Pet Calendar",
                       style: GoogleFonts.nunito(
-                        color: Colors.lightBlueAccent,
-                        fontSize: 14,
+                        fontSize: 32,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white,
                       ),
                     ),
-                  ),
-                ),
-                const SizedBox(height: 30),
-                SizedBox(
-                  width: MediaQuery.of(context).size.width / 2,
-                  child: ElevatedButton(
-                    style: ElevatedButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(vertical: 16.0),
-                      backgroundColor: Colors.tealAccent,
-                      foregroundColor: Colors.black,
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
+                    const SizedBox(height: 40),
+                    TextField(
+                      controller: emailController,
+                      enabled: !_isLoading,
+                      cursorColor: Colors.tealAccent,
+                      style: const TextStyle(color: Colors.white),
+                      decoration: InputDecoration(
+                        filled: true,
+                        fillColor: Colors.white.withOpacity(0.15),
+                        hintText: "Email",
+                        hintStyle: const TextStyle(color: Colors.white70),
+                        prefixIcon: const Icon(Icons.mail, color: Colors.white),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          borderSide: BorderSide.none,
+                        ),
+                        focusedBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          borderSide: const BorderSide(
+                            color: Colors.tealAccent,
+                            width: 2,
+                          ),
+                        ),
                       ),
-                      elevation: 5,
+                      keyboardType: TextInputType.emailAddress,
+                      textInputAction: TextInputAction.next,
                     ),
-                    onPressed: () async {
-                      await loginUsingEmailPassword(
-                        email: emailController.text.trim(),
-                        password: passwordController.text,
-                        context: context,
-                      );
-                    },
-                    child: const Text("Log in", style: TextStyle(fontSize: 18)),
-                  ),
-                ),
-                const SizedBox(height: 20),
-                GestureDetector(
-                  onTap: () {
-                    Navigator.pushNamed(context, '/accountCreation');
-                  },
-                  child: Text(
-                    "Create New Account",
-                    style: GoogleFonts.nunito(
-                      fontSize: 16,
-                      color: Colors.tealAccent,
+                    const SizedBox(height: 20),
+                    TextField(
+                      controller: passwordController,
+                      enabled: !_isLoading,
+                      obscureText: true,
+                      cursorColor: Colors.tealAccent,
+                      style: const TextStyle(color: Colors.white),
+                      decoration: InputDecoration(
+                        filled: true,
+                        fillColor: Colors.white.withOpacity(0.15),
+                        hintText: "Password",
+                        hintStyle: const TextStyle(color: Colors.white70),
+                        prefixIcon: const Icon(Icons.lock, color: Colors.white),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          borderSide: BorderSide.none,
+                        ),
+                        focusedBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(12),
+                          borderSide: const BorderSide(
+                            color: Colors.tealAccent,
+                            width: 2,
+                          ),
+                        ),
+                      ),
+                      onSubmitted: (_) => _attemptLogin(), // enter-to-login
+                      textInputAction: TextInputAction.done,
                     ),
-                  ),
+                    const SizedBox(height: 10),
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: GestureDetector(
+                        onTap: _isLoading
+                            ? null
+                            : () async {
+                                final result = await Navigator.pushNamed(
+                                  context,
+                                  '/forgotPassword',
+                                  arguments: emailController.text.trim(),
+                                );
+                                if (result is String && result.isNotEmpty) {
+                                  setState(() {
+                                    emailController.text = result;
+                                  });
+                                }
+                              },
+                        child: Text(
+                          "Forgot password?",
+                          style: GoogleFonts.nunito(
+                            color: Colors.lightBlueAccent,
+                            fontSize: 14,
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 30),
+                    SizedBox(
+                      width: MediaQuery.of(context).size.width / 2,
+                      child: ElevatedButton(
+                        style: ElevatedButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(vertical: 16.0),
+                          backgroundColor: Colors.tealAccent,
+                          foregroundColor: Colors.black,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          elevation: 5,
+                        ),
+                        onPressed: _isLoading ? null : _attemptLogin,
+                        child: _isLoading
+                            ? const SizedBox(
+                                height: 22,
+                                width: 22,
+                                child: CircularProgressIndicator(strokeWidth: 2),
+                              )
+                            : const Text("Log in", style: TextStyle(fontSize: 18)),
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+                    GestureDetector(
+                      onTap: _isLoading
+                          ? null
+                          : () {
+                              Navigator.pushNamed(context, '/accountCreation');
+                            },
+                      child: Text(
+                        "Create New Account",
+                        style: GoogleFonts.nunito(
+                          fontSize: 16,
+                          color: Colors.tealAccent,
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
-              ],
+              ),
             ),
           ),
-        ),
+
+          // Loading overlay
+          if (_isLoading) ...[
+            const ModalBarrier(dismissible: false, color: Colors.black38),
+            const Center(child: CircularProgressIndicator()),
+          ],
+        ],
       ),
     );
   }
 }
+

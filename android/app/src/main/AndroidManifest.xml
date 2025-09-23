@@ -13,7 +13,7 @@
         <!-- ✅ THIS is the correct AdMob App ID -->
         <meta-data
             android:name="com.google.android.gms.ads.APPLICATION_ID"
-            android:value="ca-app-pub-3773871623541431/1452134694"/>
+            android:value="ca-app-pub-3773871623541431~5391379707"/>
 
         <activity
             android:name=".MainActivity"
@@ -30,12 +30,6 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-
-        <!-- REQUIRED for Google AdMob -->
-        <activity
-            android:name="com.google.android.gms.ads.AdActivity"
-            android:exported="false"
-            android:theme="@android:style/Theme.Translucent" />
 
         <!-- Google Maps API key -->
         <meta-data

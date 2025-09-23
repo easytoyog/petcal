@@ -34,7 +34,7 @@ class ServiceAd {
   factory ServiceAd.fromFirestore(DocumentSnapshot doc) {
     final data = (doc.data() ?? {}) as Map<String, dynamic>;
 
-    double _asDouble(dynamic v) {
+    double asDouble(dynamic v) {
       if (v is num) return v.toDouble();
       if (v is String) return double.tryParse(v) ?? 0.0;
       return 0.0;
@@ -49,8 +49,8 @@ class ServiceAd {
       type: (data['type'] ?? '') as String,
       title: (data['title'] ?? '') as String,
       description: (data['description'] ?? '') as String,
-      latitude: _asDouble(data['latitude']),
-      longitude: _asDouble(data['longitude']),
+      latitude: asDouble(data['latitude']),
+      longitude: asDouble(data['longitude']),
       images: imgs,
       postalCode: data['postalCode'] as String?,
       createdAt: data['createdAt'] is Timestamp ? data['createdAt'] as Timestamp : null,

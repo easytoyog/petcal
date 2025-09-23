@@ -15,6 +15,8 @@ class ChatRoomScreen extends StatefulWidget {
 
 class _ChatRoomScreenState extends State<ChatRoomScreen> {
   final TextEditingController _messageController = TextEditingController();
+  final FocusNode _inputFocus = FocusNode();
+  final ScrollController _scrollController = ScrollController();
   final ProfanityFilter _filter = ProfanityFilter();
 
   late final Stream<QuerySnapshot<Map<String, dynamic>>> _chatStream;
@@ -50,7 +52,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
           .get();
 
       if (parkDoc.exists) {
-        final data = parkDoc.data() as Map<String, dynamic>?;
+        final data = parkDoc.data();
         setState(() {
           _parkName = (data?['name'] as String?)?.trim().isNotEmpty == true
               ? data!['name'] as String
@@ -58,6 +60,20 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
         });
       }
     } catch (_) {}
+  }
+
+  void _scrollToBottom({bool animated = true}) {
+    if (!_scrollController.hasClients) return;
+    final max = _scrollController.position.maxScrollExtent;
+    if (animated) {
+      _scrollController.animateTo(
+        max,
+        duration: const Duration(milliseconds: 250),
+        curve: Curves.easeOut,
+      );
+    } else {
+      _scrollController.jumpTo(max);
+    }
   }
 
   /// Warms cache for any senderIds we haven't seen:
@@ -90,7 +106,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
       }
 
       for (final p in profileSnap.docs) {
-        final d = p.data() as Map<String, dynamic>;
+        final d = p.data();
         final displayName = (d['displayName'] ?? '') as String? ?? '';
         final photoUrl = (d['photoUrl'] ?? '') as String? ?? '';
         final existing = _profiles[p.id] ?? const _PublicProfile.empty();
@@ -109,7 +125,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
       // Group pets by ownerId
       final Map<String, List<QueryDocumentSnapshot>> petsByOwner = {};
       for (final petDoc in petsSnap.docs) {
-        final data = petDoc.data() as Map<String, dynamic>;
+        final data = petDoc.data();
         final ownerId = (data['ownerId'] ?? '') as String;
         (petsByOwner[ownerId] ??= []).add(petDoc);
       }
@@ -139,7 +155,8 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
 
         // write back into cache (don’t wipe display/profile photo if already set)
         final existing = _profiles[ownerId] ?? const _PublicProfile.empty();
-        _profiles[ownerId] = existing.copyWith(primaryPetPhotoUrl: primaryPhoto);
+        _profiles[ownerId] =
+            existing.copyWith(primaryPetPhotoUrl: primaryPhoto);
       }
     }
 
@@ -162,6 +179,11 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
       return;
     }
 
+    // Clear immediately & scroll now (don’t wait for Firestore)
+    _messageController.clear();
+    _inputFocus.unfocus();
+    _scrollToBottom();
+
     try {
       await FirebaseFirestore.instance
           .collection('parks')
@@ -172,8 +194,6 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
         'text': text,
         'createdAt': FieldValue.serverTimestamp(),
       });
-
-      _messageController.clear();
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -280,7 +300,13 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
                     return const Center(child: Text('Be the first to say hi 👋'));
                   }
 
+                  // After the list builds this frame, jump to bottom
+                  WidgetsBinding.instance.addPostFrameCallback((_) {
+                    _scrollToBottom(animated: false);
+                  });
+
                   return ListView.builder(
+                    controller: _scrollController,
                     padding: const EdgeInsets.only(top: 8, bottom: 8),
                     itemCount: docs.length,
                     itemBuilder: (context, i) => _messageTile(docs[i]),
@@ -312,6 +338,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
                     Expanded(
                       child: TextField(
                         controller: _messageController,
+                        focusNode: _inputFocus,
                         textInputAction: TextInputAction.send,
                         onSubmitted: (_) => _sendMessage(),
                         decoration: const InputDecoration(
@@ -336,13 +363,21 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
       ),
     );
   }
+
+  @override
+  void dispose() {
+    _messageController.dispose();
+    _inputFocus.dispose();
+    _scrollController.dispose();
+    super.dispose();
+  }
 }
 
 /// Profile cache entry
 class _PublicProfile {
   final String displayName;
-  final String profilePhotoUrl;     // from public_profiles.photoUrl
-  final String primaryPetPhotoUrl;  // chosen pet photo (isMain -> first)
+  final String profilePhotoUrl; // from public_profiles.photoUrl
+  final String primaryPetPhotoUrl; // chosen pet photo (isMain -> first)
 
   const _PublicProfile({
     required this.displayName,
@@ -365,5 +400,5 @@ class _PublicProfile {
       profilePhotoUrl: profilePhotoUrl ?? this.profilePhotoUrl,
       primaryPetPhotoUrl: primaryPetPhotoUrl ?? this.primaryPetPhotoUrl,
     );
-    }
+  }
 }
