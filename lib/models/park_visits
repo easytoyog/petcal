@@ -1,0 +1,59 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
+
+class ParkVisit {
+  final String id;
+  final String parkId;
+  final String userId;
+  final DateTime checkInAt;
+  final DateTime? checkOutAt;
+  final int? durationMinutes;   // computed at checkout
+  final String day;             // "YYYY-MM-DD" in UTC, for fast grouping
+  final String? openedBy;       // who created the check-in (uid or "system")
+  final String? closedBy;       // who closed the visit
+  final DateTime createdAt;
+  final DateTime updatedAt;
+
+  const ParkVisit({
+    required this.id,
+    required this.parkId,
+    required this.userId,
+    required this.checkInAt,
+    this.checkOutAt,
+    this.durationMinutes,
+    required this.day,
+    this.openedBy,
+    this.closedBy,
+    required this.createdAt,
+    required this.updatedAt,
+  });
+
+  factory ParkVisit.fromDoc(DocumentSnapshot<Map<String, dynamic>> doc) {
+    final d = doc.data()!;
+    return ParkVisit(
+      id: doc.id,
+      parkId: d['parkId'] as String,
+      userId: d['userId'] as String,
+      checkInAt: (d['checkInAt'] as Timestamp).toDate(),
+      checkOutAt: d['checkOutAt'] != null ? (d['checkOutAt'] as Timestamp).toDate() : null,
+      durationMinutes: (d['durationMinutes'] as num?)?.toInt(),
+      day: d['day'] as String,
+      openedBy: d['openedBy'] as String?,
+      closedBy: d['closedBy'] as String?,
+      createdAt: (d['createdAt'] as Timestamp).toDate(),
+      updatedAt: (d['updatedAt'] as Timestamp).toDate(),
+    );
+  }
+
+  Map<String, dynamic> toMap() => {
+    'parkId': parkId,
+    'userId': userId,
+    'checkInAt': Timestamp.fromDate(checkInAt),
+    'checkOutAt': checkOutAt != null ? Timestamp.fromDate(checkOutAt!) : null,
+    'durationMinutes': durationMinutes,
+    'day': day,
+    'openedBy': openedBy,
+    'closedBy': closedBy,
+    'createdAt': Timestamp.fromDate(createdAt),
+    'updatedAt': Timestamp.fromDate(updatedAt),
+  };
+}

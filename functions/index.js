@@ -16,9 +16,67 @@ const { onCall, HttpsError } = require("firebase-functions/v2/https");
 
 // -------- Init --------
 admin.initializeApp();
+const db = getFirestore();
+
+// ---------- Helpers ----------
+function dateToDayUTCString(d) {
+  // "YYYY-MM-DD" (UTC)
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(d.getUTCDate()).padStart(2, "0");
+  return y + "-" + m + "-" + day;
+}
+
+/**
+ * Close the latest open visit for a park/user (one with null checkOutAt).
+ * Returns true if a visit was closed; false if none found.
+ */
+async function closeLatestOpenVisit(opts) {
+  const parkId = opts.parkId;
+  const userId = opts.userId;
+  const closedBy = opts.closedBy || "unknown";
+  const checkoutDate = opts.checkoutDate || new Date();
+
+  // Find most recent open visit
+  const q = await db
+    .collection("park_visits")
+    .where("parkId", "==", parkId)
+    .where("userId", "==", userId)
+    .where("checkOutAt", "==", null)
+    .orderBy("checkInAt", "desc")
+    .limit(1)
+    .get();
+
+  if (q.empty) return false;
+
+  const doc = q.docs[0];
+  const data = doc.data();
+
+  let checkInAt = new Date();
+  if (data && data.checkInAt && typeof data.checkInAt.toDate === "function") {
+    checkInAt = data.checkInAt.toDate();
+  }
+
+  const minutes = Math.max(
+    0,
+    Math.round((checkoutDate.getTime() - checkInAt.getTime()) / 60000)
+  );
+
+  await doc.ref.set(
+    {
+      checkOutAt: admin.firestore.Timestamp.fromDate(checkoutDate),
+      durationMinutes: minutes,
+      closedBy: closedBy,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    },
+    { merge: true }
+  );
+
+  return true;
+}
 
 /* =========================
-   Existing logic
+   Check-in: notify friends + create visit row
    ========================= */
 
 exports.notifyFriendCheckIn = onDocumentCreated(
@@ -26,19 +84,18 @@ exports.notifyFriendCheckIn = onDocumentCreated(
   async (event) => {
     const parkId = event.params.parkId;
     const userId = event.params.userId;
-    const db = getFirestore();
 
-    // Get all friends of this user
+    // ----- Notify friends who liked this park (no visit writes here) -----
     const friendsSnap = await db
       .collection("friends")
       .doc(userId)
       .collection("userFriends")
       .get();
 
-    for (const friendDoc of friendsSnap.docs) {
+    for (let i = 0; i < friendsSnap.docs.length; i++) {
+      const friendDoc = friendsSnap.docs[i];
       const friendId = friendDoc.id;
 
-      // Check if friend liked this park
       const likedParkDoc = await db
         .collection("owners")
         .doc(friendId)
@@ -47,7 +104,6 @@ exports.notifyFriendCheckIn = onDocumentCreated(
         .get();
 
       if (likedParkDoc.exists) {
-        // Get friend's FCM token
         const ownerDoc = await db.collection("owners").doc(friendId).get();
         const data = ownerDoc.exists ? ownerDoc.data() : {};
         const fcmToken = data && data.fcmToken;
@@ -59,10 +115,7 @@ exports.notifyFriendCheckIn = onDocumentCreated(
               title: "Friend at your favorite park!",
               body: "Your friend just checked into a park you like.",
             },
-            data: {
-              parkId: parkId,
-              friendId: userId,
-            },
+            data: { parkId: parkId, friendId: userId },
           });
         }
       }
@@ -70,25 +123,33 @@ exports.notifyFriendCheckIn = onDocumentCreated(
   }
 );
 
+
+/* =========================
+   Chat message: notify friends who like the park
+   ========================= */
+
 exports.notifyFriendChatMessage = onDocumentCreated(
   "parks/{parkId}/chat/{messageId}",
   async (event) => {
     const parkId = event.params.parkId;
-    const messageData = event.data.data();
-    const senderId = messageData.senderId;
-    const db = getFirestore();
+    const payload =
+      event.data && typeof event.data.data === "function"
+        ? event.data.data()
+        : {};
+    const senderId = payload && payload.senderId ? payload.senderId : "";
 
-    // Get all friends of the sender
+    if (!senderId) return;
+
     const friendsSnap = await db
       .collection("friends")
       .doc(senderId)
       .collection("userFriends")
       .get();
 
-    for (const friendDoc of friendsSnap.docs) {
+    for (let i = 0; i < friendsSnap.docs.length; i++) {
+      const friendDoc = friendsSnap.docs[i];
       const friendId = friendDoc.id;
 
-      // Check if friend liked this park
       const likedParkDoc = await db
         .collection("owners")
         .doc(friendId)
@@ -97,7 +158,6 @@ exports.notifyFriendChatMessage = onDocumentCreated(
         .get();
 
       if (likedParkDoc.exists) {
-        // Get friend's FCM token
         const ownerDoc = await db.collection("owners").doc(friendId).get();
         const data = ownerDoc.exists ? ownerDoc.data() : {};
         const fcmToken = data && data.fcmToken;
@@ -121,22 +181,30 @@ exports.notifyFriendChatMessage = onDocumentCreated(
   }
 );
 
-// --- Auto checkout inactive users after ~1 hour (runs every 10 minutes) ---
+/* =========================
+   Auto-checkout (3 hours) — runs every 10 minutes
+   ========================= */
+
 exports.autoCheckoutInactiveUsers = onSchedule(
   { schedule: "every 10 minutes" },
   async () => {
-    const db = admin.firestore();
-    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+    const threeHoursAgo = new Date(Date.now() - 3 * 60 * 60 * 1000);
 
     const parksSnapshot = await db.collection("parks").get();
-    for (const parkDoc of parksSnapshot.docs) {
+    for (let p = 0; p < parksSnapshot.docs.length; p++) {
+      const parkDoc = parksSnapshot.docs[p];
       const activeUsersRef = parkDoc.ref.collection("active_users");
       const activeUsersSnapshot = await activeUsersRef.get();
 
-      for (const userDoc of activeUsersSnapshot.docs) {
+      for (let u = 0; u < activeUsersSnapshot.docs.length; u++) {
+        const userDoc = activeUsersSnapshot.docs[u];
         const checkedInAt = userDoc.get("checkedInAt");
-        if (checkedInAt && checkedInAt.toDate() < oneHourAgo) {
-          // Delete the active user; the onDocumentDeleted trigger will decrement userCount
+        const hasToDate =
+          checkedInAt && typeof checkedInAt.toDate === "function";
+
+        if (hasToDate && checkedInAt.toDate() < threeHoursAgo) {
+          // Deleting the doc will trigger onDocumentDeleted below,
+          // which decrements userCount and closes the visit.
           await userDoc.ref.delete();
         }
       }
@@ -149,11 +217,6 @@ exports.autoCheckoutInactiveUsers = onSchedule(
    Admin callables
    ========================= */
 
-/**
- * setAdmin — Promote/demote by UID
- * Only callers who already have { admin: true } can use this.
- * App Check enforced to block non-legit clients.
- */
 exports.setAdmin = onCall({ enforceAppCheck: true }, async (request) => {
   if (
     !request.auth ||
@@ -182,15 +245,11 @@ exports.setAdmin = onCall({ enforceAppCheck: true }, async (request) => {
   merged.admin = makeAdmin;
 
   await auth.setCustomUserClaims(uid, merged);
-  await auth.revokeRefreshTokens(uid); // force token refresh
+  await auth.revokeRefreshTokens(uid);
 
   return { ok: true, uid: uid, claims: merged };
 });
 
-/**
- * setAdminByEmail — Convenience: promote/demote by email
- * Same restrictions as above; returns the resolved uid for logging.
- */
 exports.setAdminByEmail = onCall(
   { enforceAppCheck: true },
   async (request) => {
@@ -228,30 +287,90 @@ exports.setAdminByEmail = onCall(
 );
 
 /* =========================
-   userCount triggers (tamper-proof)
+   userCount triggers (tamper-proof) + visit sync
    ========================= */
 
 exports.onCheckInIncrementCount = onDocumentCreated(
   "parks/{parkId}/active_users/{uid}",
   async (event) => {
     const parkId = event.params.parkId;
-    const db = admin.firestore();
+    const uid = event.params.uid;
+
+    // Increment park userCount
     await db.collection("parks").doc(parkId).update({
       userCount: admin.firestore.FieldValue.increment(1),
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
+
+    // ----- Visit history: close any dangling visit, then open a new one -----
+    // Safely read the checkedInAt from the new active_users doc
+    const payload =
+      event.data && typeof event.data.data === "function"
+        ? event.data.data()
+        : {};
+    let checkedInAt = new Date();
+    if (payload && payload.checkedInAt && typeof payload.checkedInAt.toDate === "function") {
+      checkedInAt = payload.checkedInAt.toDate();
+    }
+
+    // Try to close any previous open visit for this park/user
+    try {
+      await closeLatestOpenVisit({
+        parkId: parkId,
+        userId: uid,
+        closedBy: "system(auto-close-on-new-checkin)",
+        checkoutDate: checkedInAt,
+      });
+    } catch (e) {
+      console.warn("closeLatestOpenVisit failed; continuing:", e);
+    }
+
+    // Always create a fresh visit record
+    try {
+      const day = dateToDayUTCString(checkedInAt);
+      await db.collection("park_visits").add({
+        parkId: parkId,
+        userId: uid,
+        checkInAt: admin.firestore.Timestamp.fromDate(checkedInAt),
+        checkOutAt: null,
+        durationMinutes: null,
+        day: day,                 // for reporting/grouping
+        openedBy: uid,
+        closedBy: null,
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+      console.log("park_visits: created for", { parkId, uid });
+    } catch (e) {
+      console.error("Failed to create park_visits:", e);
+    }
   }
 );
+
 
 exports.onCheckOutDecrementCount = onDocumentDeleted(
   "parks/{parkId}/active_users/{uid}",
   async (event) => {
     const parkId = event.params.parkId;
-    const db = admin.firestore();
+    const uid = event.params.uid;
+
+    // Decrement the counter
     await db.collection("parks").doc(parkId).update({
       userCount: admin.firestore.FieldValue.increment(-1),
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
+
+    // Close the latest open visit for this park/user
+    try {
+      await closeLatestOpenVisit({
+        parkId: parkId,
+        userId: uid,
+        closedBy: "system(or-user)",
+        // checkoutDate omitted -> use now()
+      });
+    } catch (e) {
+      console.error("Failed to close park_visits on checkout:", e);
+    }
   }
 );
 
@@ -259,23 +378,19 @@ exports.onCheckOutDecrementCount = onDocumentDeleted(
    Public profile mirror
    ========================= */
 
-/**
- * Mirrors non-sensitive fields from owners/{uid} into public_profiles/{uid}.
- * If owners doc is deleted, remove the public profile.
- */
 exports.mirrorOwnerToPublicProfile = onDocumentWritten(
   "owners/{uid}",
   async (event) => {
     const uid = event.params.uid;
-    const db = admin.firestore();
     const pubRef = db.collection("public_profiles").doc(uid);
 
-    // Get the "after" snapshot safely (no optional chaining)
-    var afterSnap = event.data && event.data.after ? event.data.after : null;
-    var after = null;
-    if (afterSnap && typeof afterSnap.data === "function") {
-      after = afterSnap.data();
-    }
+    // Get "after" snapshot safely (no optional chaining)
+    const afterSnap =
+      event.data && event.data.after ? event.data.after : null;
+    const after =
+      afterSnap && typeof afterSnap.data === "function"
+        ? afterSnap.data()
+        : null;
 
     // If owners/{uid} was deleted, delete public profile
     if (!after) {
@@ -288,9 +403,15 @@ exports.mirrorOwnerToPublicProfile = onDocumentWritten(
     }
 
     // Build displayName
-    var displayName = "";
-    var firstName = after.firstName ? String(after.firstName).trim() : "";
-    var lastName = after.lastName ? String(after.lastName).trim() : "";
+    const firstName =
+      after.firstName && typeof after.firstName === "string"
+        ? after.firstName.trim()
+        : "";
+    const lastName =
+      after.lastName && typeof after.lastName === "string"
+        ? after.lastName.trim()
+        : "";
+    let displayName = "";
     if (firstName && lastName) {
       displayName = (firstName + " " + lastName).trim();
     } else if (after.displayName) {
@@ -298,7 +419,7 @@ exports.mirrorOwnerToPublicProfile = onDocumentWritten(
     }
 
     // Optional photoUrl
-    var photoUrl =
+    const photoUrl =
       after.photoUrl && typeof after.photoUrl === "string"
         ? after.photoUrl
         : undefined;

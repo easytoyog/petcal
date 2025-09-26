@@ -229,7 +229,8 @@ class _ProfileTabState extends State<ProfileTab> {
                     maxLines: null,
                     expands: true,
                     autofocus: true,
-                    decoration: _outlinedDecoration("Enter your feedback here..."),
+                    decoration:
+                        _outlinedDecoration("Enter your feedback here..."),
                   ),
                 ),
                 const SizedBox(height: 24),
@@ -242,13 +243,16 @@ class _ProfileTabState extends State<ProfileTab> {
                     if (user == null) {
                       if (!mounted) return;
                       ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text("Please sign in to send feedback.")),
+                        const SnackBar(
+                            content: Text("Please sign in to send feedback.")),
                       );
                       return;
                     }
 
                     try {
-                      await FirebaseFirestore.instance.collection('feedback').add({
+                      await FirebaseFirestore.instance
+                          .collection('feedback')
+                          .add({
                         'feedback': feedback,
                         'userId': user.uid,
                         'timestamp': FieldValue.serverTimestamp(),
@@ -256,7 +260,8 @@ class _ProfileTabState extends State<ProfileTab> {
                       if (!mounted) return;
                       Navigator.of(ctx).pop();
                       ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text("Thank you for your feedback!")),
+                        const SnackBar(
+                            content: Text("Thank you for your feedback!")),
                       );
                     } catch (e) {
                       if (!mounted) return;
@@ -265,7 +270,6 @@ class _ProfileTabState extends State<ProfileTab> {
                       );
                     }
                   },
-
                   style: ElevatedButton.styleFrom(
                     backgroundColor: Colors.tealAccent,
                     foregroundColor: Colors.black,
@@ -303,7 +307,8 @@ class _ProfileTabState extends State<ProfileTab> {
             builder: (context, setSheetState) {
               Future<void> pickImage() async {
                 setSheetState(() => _sheetUploading = true);
-                final uploaded = await ImageUploadUtil.pickAndUploadPetPhoto(newPetId);
+                final uploaded =
+                    await ImageUploadUtil.pickAndUploadPetPhoto(newPetId);
                 setSheetState(() {
                   photoUrl = uploaded;
                   _sheetUploading = false;
@@ -318,18 +323,18 @@ class _ProfileTabState extends State<ProfileTab> {
                 children: [
                   const _SheetHeader(title: "Add Pet"),
                   const SizedBox(height: 12),
-
                   _AvatarPicker(
                     imageUrl: photoUrl,
                     isUploading: _sheetUploading,
                     onTap: pickImage,
                   ),
                   const SizedBox(height: 16),
-
                   TextField(
                     controller: nameController,
                     decoration: _outlinedDecoration("Pet name").copyWith(
-                      errorText: (triedSave && nameEmpty) ? "Pet name is required" : null,
+                      errorText: (triedSave && nameEmpty)
+                          ? "Pet name is required"
+                          : null,
                     ),
                     onChanged: (_) => setSheetState(() {}),
                   ),
@@ -339,7 +344,6 @@ class _ProfileTabState extends State<ProfileTab> {
                     decoration: _outlinedDecoration("Pet breed (optional)"),
                   ),
                   const SizedBox(height: 18),
-
                   Row(
                     children: [
                       Expanded(
@@ -367,7 +371,8 @@ class _ProfileTabState extends State<ProfileTab> {
                                     petId: newPetId,
                                     name: name,
                                     breed: breedController.text.trim(),
-                                    photoUrl: photoUrl, // nullable; defaulted inside
+                                    photoUrl:
+                                        photoUrl, // nullable; defaulted inside
                                   );
                                 },
                           style: ElevatedButton.styleFrom(
@@ -383,7 +388,6 @@ class _ProfileTabState extends State<ProfileTab> {
                       ),
                     ],
                   ),
-
                   if (!_sheetUploading && nameEmpty)
                     Align(
                       alignment: Alignment.centerLeft,
@@ -401,8 +405,8 @@ class _ProfileTabState extends State<ProfileTab> {
                         ),
                       ),
                     ),
-
-                  SizedBox(height: MediaQuery.of(context).viewInsets.bottom + 6),
+                  SizedBox(
+                      height: MediaQuery.of(context).viewInsets.bottom + 6),
                 ],
               );
             },
@@ -429,7 +433,8 @@ class _ProfileTabState extends State<ProfileTab> {
             builder: (context, setSheetState) {
               Future<void> pickImage() async {
                 setSheetState(() => _sheetUploading = true);
-                final uploaded = await ImageUploadUtil.pickAndUploadPetPhoto(pet.id);
+                final uploaded =
+                    await ImageUploadUtil.pickAndUploadPetPhoto(pet.id);
                 setSheetState(() {
                   if (uploaded != null) photoUrl = uploaded;
                   _sheetUploading = false;
@@ -444,18 +449,18 @@ class _ProfileTabState extends State<ProfileTab> {
                 children: [
                   const _SheetHeader(title: "Edit Pet"),
                   const SizedBox(height: 12),
-
                   _AvatarPicker(
                     imageUrl: photoUrl,
                     isUploading: _sheetUploading,
                     onTap: pickImage,
                   ),
                   const SizedBox(height: 16),
-
                   TextField(
                     controller: nameController,
                     decoration: _outlinedDecoration("Pet name").copyWith(
-                      errorText: (triedSave && nameEmpty) ? "Pet name is required" : null,
+                      errorText: (triedSave && nameEmpty)
+                          ? "Pet name is required"
+                          : null,
                     ),
                     onChanged: (_) => setSheetState(() {}),
                   ),
@@ -465,7 +470,6 @@ class _ProfileTabState extends State<ProfileTab> {
                     decoration: _outlinedDecoration("Pet breed (optional)"),
                   ),
                   const SizedBox(height: 18),
-
                   Row(
                     children: [
                       Expanded(
@@ -493,7 +497,8 @@ class _ProfileTabState extends State<ProfileTab> {
                                     oldPet: pet,
                                     newName: name,
                                     newBreed: breedController.text.trim(),
-                                    newPhotoUrl: photoUrl, // nullable; handled inside
+                                    newPhotoUrl:
+                                        photoUrl, // nullable; handled inside
                                   );
                                 },
                           style: ElevatedButton.styleFrom(
@@ -509,7 +514,6 @@ class _ProfileTabState extends State<ProfileTab> {
                       ),
                     ],
                   ),
-
                   if (!_sheetUploading && nameEmpty)
                     Align(
                       alignment: Alignment.centerLeft,
@@ -527,8 +531,8 @@ class _ProfileTabState extends State<ProfileTab> {
                         ),
                       ),
                     ),
-
-                  SizedBox(height: MediaQuery.of(context).viewInsets.bottom + 6),
+                  SizedBox(
+                      height: MediaQuery.of(context).viewInsets.bottom + 6),
                 ],
               );
             },
@@ -552,9 +556,7 @@ class _ProfileTabState extends State<ProfileTab> {
       id: petId,
       ownerId: _owner!.uid,
       name: name.isEmpty ? "Unnamed Pet" : name,
-      photoUrl: (photoUrl == null || photoUrl.isEmpty)
-          ? "https://via.placeholder.com/150"
-          : photoUrl,
+      photoUrl: (photoUrl == null || photoUrl.isEmpty) ? null : photoUrl,
       breed: breed.isEmpty ? null : breed,
       temperament: null,
       weight: null,
@@ -712,7 +714,7 @@ class _ProfileTabState extends State<ProfileTab> {
 
                     // Pets header + add
                     Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
                         const Text(
                           "My Pets",
@@ -743,21 +745,25 @@ class _ProfileTabState extends State<ProfileTab> {
                       Column(
                         children: _pets.map((pet) {
                           // Safe check for a non-empty URL
-                          final photo = pet.photoUrl ?? '';                  // <-- safe coalesce
-                          final hasPhoto = photo.trim().isNotEmpty;          // no null error
-                          final ImageProvider? petImage = hasPhoto ? NetworkImage(photo) : null;
+                          final photo = pet.photoUrl ?? ''; // <-- safe coalesce
+                          final hasPhoto =
+                              photo.trim().isNotEmpty; // no null error
+                          final ImageProvider? petImage =
+                              hasPhoto ? NetworkImage(photo) : null;
 
                           return Container(
                             decoration: _glassCardDecoration(),
                             margin: const EdgeInsets.symmetric(vertical: 8),
                             child: ListTile(
-                              contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                              contentPadding: const EdgeInsets.symmetric(
+                                  horizontal: 14, vertical: 8),
                               leading: CircleAvatar(
                                 radius: 24,
                                 backgroundColor: Colors.black12,
                                 backgroundImage: petImage,
                                 child: petImage == null
-                                    ? const Icon(Icons.pets, color: Colors.black45)
+                                    ? const Icon(Icons.pets,
+                                        color: Colors.black45)
                                     : null,
                               ),
                               title: Text(pet.name),
@@ -766,11 +772,13 @@ class _ProfileTabState extends State<ProfileTab> {
                                 mainAxisSize: MainAxisSize.min,
                                 children: [
                                   IconButton(
-                                    icon: const Icon(Icons.edit, color: Colors.blueGrey),
+                                    icon: const Icon(Icons.edit,
+                                        color: Colors.blueGrey),
                                     onPressed: () => _showEditPetSheet(pet),
                                   ),
                                   IconButton(
-                                    icon: const Icon(Icons.delete, color: Colors.red),
+                                    icon: const Icon(Icons.delete,
+                                        color: Colors.red),
                                     onPressed: () => _removePet(pet.id),
                                   ),
                                 ],
@@ -779,7 +787,6 @@ class _ProfileTabState extends State<ProfileTab> {
                           );
                         }).toList(),
                       ),
-
 
                     const SizedBox(height: 32),
                     ElevatedButton.icon(
@@ -1005,7 +1012,8 @@ class _AvatarPicker extends StatelessWidget {
                 color: Colors.tealAccent,
                 shape: BoxShape.circle,
               ),
-              child: const Icon(Icons.camera_alt, size: 16, color: Colors.black),
+              child:
+                  const Icon(Icons.camera_alt, size: 16, color: Colors.black),
             ),
           ),
         ],

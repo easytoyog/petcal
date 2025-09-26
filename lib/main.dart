@@ -498,9 +498,11 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
                             ? const SizedBox(
                                 height: 22,
                                 width: 22,
-                                child: CircularProgressIndicator(strokeWidth: 2),
+                                child:
+                                    CircularProgressIndicator(strokeWidth: 2),
                               )
-                            : const Text("Log in", style: TextStyle(fontSize: 18)),
+                            : const Text("Log in",
+                                style: TextStyle(fontSize: 18)),
                       ),
                     ),
                     const SizedBox(height: 20),
@@ -534,4 +536,3 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
     );
   }
 }
-

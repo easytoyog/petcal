@@ -1,5 +1,6 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart';
 import 'package:inthepark/models/owner_model.dart';
 import 'package:inthepark/models/pet_model.dart';
 import 'package:inthepark/models/park_event.dart';
@@ -24,11 +25,16 @@ class FirestoreService {
 
   /// Add (or update) a pet document
   Future<void> addPet(Pet pet) async {
-    await _firestore.collection('pets').doc(pet.id).set({
-      ...pet.toMap(),
-      'createdAt': FieldValue.serverTimestamp(),
-      'updatedAt': FieldValue.serverTimestamp(),
-    });
+    try {
+      await _firestore.collection('pets').doc(pet.id).set({
+        ...pet.toMap(),
+        'createdAt': FieldValue.serverTimestamp(),
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    } on FirebaseException catch (e) {
+      debugPrint('Firestore error [${e.code}] ${e.message}');
+      rethrow;
+    }
   }
 
   /// Delete a pet document
@@ -69,10 +75,9 @@ class FirestoreService {
 
   Future<void> updatePet(Pet pet) async {
     await _firestore.collection('pets').doc(pet.id).update({
-    ...pet.toMap(),
-    'updatedAt': FieldValue.serverTimestamp(),
-  });
-
+      ...pet.toMap(),
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
   }
 
   Future<void> addEventToPark(String parkId, ParkEvent event) async {

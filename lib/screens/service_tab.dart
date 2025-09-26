@@ -11,12 +11,58 @@ import 'package:inthepark/models/service_ad_model.dart';
 import 'package:inthepark/utils/image_upload_util.dart';
 import 'package:location/location.dart' as loc;
 import 'package:url_launcher/url_launcher.dart';
+import 'package:profanity_filter/profanity_filter.dart';
 
 class ServiceTab extends StatefulWidget {
   const ServiceTab({super.key});
 
   @override
   State<ServiceTab> createState() => _ServiceTabState();
+}
+
+class ReportsService {
+  final _db = FirebaseFirestore.instance;
+  String? get _me => FirebaseAuth.instance.currentUser?.uid;
+
+  Future<void> submitServiceReport({
+    required String serviceId,
+    required String serviceOwnerId,
+    required String serviceTitle,
+    required String serviceType,
+    String? serviceDescription,
+    required String reason,
+    String? notes,
+  }) async {
+    final me = _me;
+    if (me == null || serviceOwnerId.isEmpty) return;
+
+    await _db.collection('moderation_reports').add({
+      'type': 'service',
+      'reporterId': me,
+      'reportedUserId': serviceOwnerId,
+      'serviceId': serviceId,
+      'serviceTitle': serviceTitle,
+      'serviceType': serviceType,
+      'serviceDescription': serviceDescription ?? '',
+      'reason': reason,
+      'notes': notes ?? '',
+      'createdAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  Future<Set<String>> fetchMyReportedServiceIds() async {
+    final me = _me;
+    if (me == null) return <String>{};
+    final q = await _db
+        .collection('moderation_reports')
+        .where('type', isEqualTo: 'service')
+        .where('reporterId', isEqualTo: me)
+        .get();
+    return q.docs
+        .map((d) => (d.data()['serviceId'] ?? '') as String)
+        .where((id) => id.isNotEmpty)
+        .toSet();
+  }
 }
 
 class _ServiceTabState extends State<ServiceTab> {
@@ -36,10 +82,14 @@ class _ServiceTabState extends State<ServiceTab> {
   double? userLng;
   bool _isLoading = true;
 
-  // Quick filter: show only ads created by current user
   bool _showOnlyMine = false;
 
   final _firestore = FirebaseFirestore.instance;
+  final _reports = ReportsService();
+
+  Set<String> _myReportedServiceIds = <String>{};
+
+  final ProfanityFilter _filter = ProfanityFilter();
 
   @override
   void initState() {
@@ -54,14 +104,111 @@ class _ServiceTabState extends State<ServiceTab> {
       final locData = await location.getLocation();
       userLat = locData.latitude;
       userLng = locData.longitude;
-    } catch (_) {
-      // ignore location failures; still load ads
-    }
+    } catch (_) {}
     await _fetchAds();
+    await _refreshMyReportedServices();
+    if (mounted) setState(() => _isLoading = false);
   }
 
-  double _calculateDistance(double lat1, double lon1, double lat2, double lon2) {
-    // Haversine
+  Future<void> _refreshMyReportedServices() async {
+    final set = await _reports.fetchMyReportedServiceIds();
+    if (mounted) setState(() => _myReportedServiceIds = set);
+  }
+
+  Future<void> _reportServiceDialog(ServiceAd ad) async {
+    final me = FirebaseAuth.instance.currentUser?.uid;
+    if (me == ad.ownerId) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("You can’t report your own service.")),
+      );
+      return;
+    }
+    if (_myReportedServiceIds.contains(ad.id)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('You already flagged this service.')),
+      );
+      return;
+    }
+
+    final reasons = <String>[
+      'Spam',
+      'Harassment or bullying',
+      'Hate speech',
+      'Explicit content',
+      'Scam or fraud',
+      'Other',
+    ];
+    String selected = reasons.first;
+    final notesCtl = TextEditingController();
+
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Report service'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            DropdownButtonFormField<String>(
+              value: selected,
+              items: reasons
+                  .map((r) => DropdownMenuItem(value: r, child: Text(r)))
+                  .toList(),
+              onChanged: (v) => selected = v ?? reasons.first,
+              decoration: const InputDecoration(labelText: 'Reason'),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: notesCtl,
+              decoration: const InputDecoration(
+                labelText: 'Additional details (optional)',
+                hintText: 'Add context for moderators…',
+              ),
+              maxLines: 3,
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            child: const Text('Cancel'),
+            onPressed: () => Navigator.of(ctx).pop(false),
+          ),
+          FilledButton(
+            child: const Text('Submit'),
+            onPressed: () => Navigator.of(ctx).pop(true),
+          ),
+        ],
+      ),
+    );
+
+    if (ok == true) {
+      try {
+        await _reports.submitServiceReport(
+          serviceId: ad.id,
+          serviceOwnerId: ad.ownerId,
+          serviceTitle: ad.title,
+          serviceType: ad.type,
+          serviceDescription: ad.description,
+          reason: selected,
+          notes: notesCtl.text.trim(),
+        );
+        if (mounted) {
+          setState(() {
+            _myReportedServiceIds.add(ad.id);
+          });
+        }
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Report submitted. Thank you.')),
+        );
+      } catch (e) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to submit report: $e')),
+        );
+      }
+    }
+  }
+
+  double _calculateDistance(
+      double lat1, double lon1, double lat2, double lon2) {
     const p = 0.017453292519943295;
     double c(double x) => math.cos(x);
     final a = 0.5 -
@@ -71,14 +218,14 @@ class _ServiceTabState extends State<ServiceTab> {
   }
 
   Future<void> _fetchAds() async {
-    setState(() => _isLoading = true);
     try {
       final snapshot = await _firestore
           .collection('services')
           .orderBy('createdAt', descending: true)
           .get();
 
-      final ads = snapshot.docs.map((doc) => ServiceAd.fromFirestore(doc)).toList();
+      final ads =
+          snapshot.docs.map((doc) => ServiceAd.fromFirestore(doc)).toList();
 
       for (var ad in ads) {
         if (userLat != null && userLng != null) {
@@ -88,13 +235,9 @@ class _ServiceTabState extends State<ServiceTab> {
       }
 
       if (!mounted) return;
-      setState(() {
-        _ads = ads;
-        _isLoading = false;
-      });
+      setState(() => _ads = ads);
     } catch (e) {
       if (!mounted) return;
-      setState(() => _isLoading = false);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Failed to load services: $e')),
       );
@@ -114,7 +257,8 @@ class _ServiceTabState extends State<ServiceTab> {
     String? prefillPostalCode;
     if (existingAd == null) {
       try {
-        final ownerDoc = await _firestore.collection('owners').doc(user.uid).get();
+        final ownerDoc =
+            await _firestore.collection('owners').doc(user.uid).get();
         if (ownerDoc.exists) {
           final owner = Owner.fromFirestore(ownerDoc);
           prefillPostalCode = owner.address.postalCode;
@@ -140,402 +284,19 @@ class _ServiceTabState extends State<ServiceTab> {
     }
   }
 
-  void _openServiceDetails(ServiceAd ad) {
-    final currentUser = FirebaseAuth.instance.currentUser;
-    final isOwner = currentUser != null && ad.ownerId == currentUser.uid;
-    final pageController = PageController();
-    int currentPage = 0;
-    bool isLoadingOwner = true;
-    Owner? adOwner;
-
-    showDialog(
-      context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (context, setState) {
-          if (isLoadingOwner) {
-            FirebaseFirestore.instance
-                .collection('owners')
-                .doc(ad.ownerId)
-                .get()
-                .then((ownerDoc) {
-              setState(() {
-                adOwner = ownerDoc.exists ? Owner.fromFirestore(ownerDoc) : null;
-                isLoadingOwner = false;
-              });
-            }).catchError((_) {
-              setState(() => isLoadingOwner = false);
-            });
-          }
-
-          return Dialog(
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                AppBar(
-                  title: Text(ad.title),
-                  backgroundColor: Colors.green,
-                  shape: const RoundedRectangleBorder(
-                    borderRadius: BorderRadius.only(
-                      topLeft: Radius.circular(16),
-                      topRight: Radius.circular(16),
-                    ),
-                  ),
-                  actions: [
-                    // Only show edit/delete when user is the creator
-                    if (isOwner)
-                      IconButton(
-                        icon: const Icon(Icons.edit),
-                        onPressed: () {
-                          Navigator.of(ctx).pop();
-                          _openPostScreen(existingAd: ad);
-                        },
-                      ),
-                    if (isOwner)
-                      IconButton(
-                        icon: const Icon(Icons.delete),
-                        onPressed: () async {
-                          final confirm = await showDialog<bool>(
-                            context: ctx,
-                            builder: (c) => AlertDialog(
-                              title: const Text('Delete Service'),
-                              content:
-                                  const Text('Are you sure you want to delete this service?'),
-                              actions: [
-                                TextButton(
-                                  onPressed: () => Navigator.of(c).pop(false),
-                                  child: const Text('Cancel'),
-                                ),
-                                TextButton(
-                                  onPressed: () => Navigator.of(c).pop(true),
-                                  child: const Text('Delete',
-                                      style: TextStyle(color: Colors.red)),
-                                ),
-                              ],
-                            ),
-                          );
-
-                          if (confirm == true) {
-                            try {
-                              Navigator.of(ctx).pop();
-                              await FirebaseFirestore.instance
-                                  .collection('services')
-                                  .doc(ad.id)
-                                  .delete();
-                              await _fetchAds();
-                              if (!mounted) return;
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(
-                                  content: Text('Service deleted successfully!'),
-                                  backgroundColor: Colors.red,
-                                ),
-                              );
-                            } catch (e) {
-                              if (!mounted) return;
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                SnackBar(
-                                  content: Text('Couldn\'t delete: $e'),
-                                  backgroundColor: Colors.red,
-                                ),
-                              );
-                            }
-                          }
-                        },
-                      ),
-                  ],
-                ),
-                Flexible(
-                  child: SingleChildScrollView(
-                    child: Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          if (ad.images.isNotEmpty)
-                            Stack(
-                              children: [
-                                SizedBox(
-                                  height: 200,
-                                  child: PageView.builder(
-                                    controller: pageController,
-                                    itemCount: ad.images.length,
-                                    onPageChanged: (index) {
-                                      setState(() => currentPage = index);
-                                    },
-                                    itemBuilder: (context, index) {
-                                      return GestureDetector(
-                                        onTap: () => _showFullImage(context, ad.images[index]),
-                                        child: Padding(
-                                          padding:
-                                              const EdgeInsets.symmetric(horizontal: 4),
-                                          child: ClipRRect(
-                                            borderRadius: BorderRadius.circular(8),
-                                            child: Image.network(
-                                              ad.images[index],
-                                              fit: BoxFit.cover,
-                                              loadingBuilder: (context, child, prog) {
-                                                if (prog == null) return child;
-                                                return Center(
-                                                  child: CircularProgressIndicator(
-                                                    value:
-                                                        (prog.expectedTotalBytes != null)
-                                                            ? prog.cumulativeBytesLoaded /
-                                                                prog.expectedTotalBytes!
-                                                            : null,
-                                                  ),
-                                                );
-                                              },
-                                            ),
-                                          ),
-                                        ),
-                                      );
-                                    },
-                                  ),
-                                ),
-                                if (ad.images.length > 1)
-                                  Positioned.fill(
-                                    child: Row(
-                                      mainAxisAlignment:
-                                          MainAxisAlignment.spaceBetween,
-                                      children: [
-                                        _pagerButton(
-                                          enabled: currentPage > 0,
-                                          icon: Icons.arrow_back_ios,
-                                          onTap: () => pageController.previousPage(
-                                            duration:
-                                                const Duration(milliseconds: 300),
-                                            curve: Curves.easeInOut,
-                                          ),
-                                        ),
-                                        _pagerButton(
-                                          enabled: currentPage < ad.images.length - 1,
-                                          icon: Icons.arrow_forward_ios,
-                                          onTap: () => pageController.nextPage(
-                                            duration:
-                                                const Duration(milliseconds: 300),
-                                            curve: Curves.easeInOut,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                              ],
-                            ),
-                          if (ad.images.length > 1)
-                            Padding(
-                              padding: const EdgeInsets.only(top: 12),
-                              child: Row(
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: List.generate(
-                                  ad.images.length,
-                                  (index) => Container(
-                                    margin:
-                                        const EdgeInsets.symmetric(horizontal: 4),
-                                    width: 8,
-                                    height: 8,
-                                    decoration: BoxDecoration(
-                                      shape: BoxShape.circle,
-                                      color: currentPage == index
-                                          ? Colors.green
-                                          : Colors.grey[300],
-                                    ),
-                                  ),
-                                ),
-                              ),
-                            ),
-                          const SizedBox(height: 16),
-                          Text(
-                            ad.type,
-                            style: TextStyle(
-                              color: Colors.grey[700],
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
-                          const SizedBox(height: 8),
-                          Text(ad.description,
-                              style: const TextStyle(fontSize: 16)),
-                          const SizedBox(height: 12),
-                          if (ad.distanceFromUser != null)
-                            Text(
-                              'Distance: ${ad.distanceFromUser!.toStringAsFixed(1)} km',
-                              style: TextStyle(color: Colors.grey[600]),
-                            ),
-                          const SizedBox(height: 20),
-                          const Divider(),
-                          const Text(
-                            'Contact Information',
-                            style: TextStyle(
-                                fontSize: 18, fontWeight: FontWeight.bold),
-                          ),
-                          const SizedBox(height: 12),
-                          isLoadingOwner
-                              ? const Center(
-                                  child: Padding(
-                                    padding: EdgeInsets.all(8.0),
-                                    child: CircularProgressIndicator(),
-                                  ),
-                                )
-                              : adOwner != null
-                                  ? Column(
-                                      crossAxisAlignment:
-                                          CrossAxisAlignment.start,
-                                      children: [
-                                        Row(
-                                          children: [
-                                            const Icon(Icons.person,
-                                                size: 20, color: Colors.green),
-                                            const SizedBox(width: 8),
-                                            Text(
-                                              '${adOwner!.firstName} ${adOwner!.lastName}',
-                                              style: const TextStyle(
-                                                fontSize: 16,
-                                                fontWeight: FontWeight.w500,
-                                              ),
-                                            ),
-                                          ],
-                                        ),
-                                        const SizedBox(height: 8),
-                                        InkWell(
-                                          onTap: () async {
-                                            final uri =
-                                                Uri(scheme: 'tel', path: adOwner!.phone);
-                                            if (await canLaunchUrl(uri)) {
-                                              await launchUrl(uri);
-                                            }
-                                          },
-                                          child: Row(
-                                            children: [
-                                              const Icon(Icons.phone,
-                                                  size: 20, color: Colors.green),
-                                              const SizedBox(width: 8),
-                                              Text(
-                                                adOwner!.phone,
-                                                style: const TextStyle(
-                                                  fontSize: 16,
-                                                  color: Colors.blue,
-                                                  decoration:
-                                                      TextDecoration.underline,
-                                                ),
-                                              ),
-                                            ],
-                                          ),
-                                        ),
-                                        const SizedBox(height: 8),
-                                        InkWell(
-                                          onTap: () async {
-                                            final uri = Uri(
-                                              scheme: 'mailto',
-                                              path: adOwner!.email,
-                                            );
-                                            if (await canLaunchUrl(uri)) {
-                                              await launchUrl(uri);
-                                            }
-                                          },
-                                          child: Row(
-                                            children: [
-                                              const Icon(Icons.email,
-                                                  size: 20, color: Colors.green),
-                                              const SizedBox(width: 8),
-                                              Text(
-                                                adOwner!.email,
-                                                style: const TextStyle(
-                                                  fontSize: 16,
-                                                  color: Colors.blue,
-                                                  decoration:
-                                                      TextDecoration.underline,
-                                                ),
-                                              ),
-                                            ],
-                                          ),
-                                        ),
-                                      ],
-                                    )
-                                  : const Text(
-                                      'Contact information not available',
-                                      style: TextStyle(
-                                        fontStyle: FontStyle.italic,
-                                        color: Colors.grey,
-                                      ),
-                                    ),
-                          const SizedBox(height: 20),
-                          OutlinedButton(
-                            onPressed: () => Navigator.of(ctx).pop(),
-                            style: OutlinedButton.styleFrom(
-                              minimumSize: const Size(double.infinity, 40),
-                            ),
-                            child: const Text('Close'),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          );
-        },
-      ),
-    );
-  }
-
-  Widget _pagerButton({
-    required bool enabled,
-    required IconData icon,
-    required VoidCallback onTap,
-  }) {
-    return GestureDetector(
-      onTap: enabled ? onTap : null,
-      child: Container(
-        padding: const EdgeInsets.all(8),
-        decoration: BoxDecoration(
-          color: enabled ? Colors.black26 : Colors.black12,
-          shape: BoxShape.circle,
-        ),
-        child: Icon(
-          icon,
-          color: enabled ? Colors.white : Colors.white54,
-          size: 20,
-        ),
-      ),
-    );
-  }
-
-  void _showFullImage(BuildContext context, String imageUrl) {
-    showDialog(
-      context: context,
-      builder: (ctx) => Dialog(
-        insetPadding: const EdgeInsets.all(12),
-        child: Stack(
-          alignment: Alignment.topRight,
-          children: [
-            InteractiveViewer(
-              child: Image.network(
-                imageUrl,
-                fit: BoxFit.contain,
-                loadingBuilder: (context, child, prog) {
-                  if (prog == null) return child;
-                  return Center(
-                    child: CircularProgressIndicator(
-                      value: (prog.expectedTotalBytes != null)
-                          ? prog.cumulativeBytesLoaded /
-                              prog.expectedTotalBytes!
-                          : null,
-                    ),
-                  );
-                },
-              ),
-            ),
-            IconButton(
-              icon: Container(
-                decoration: BoxDecoration(
-                  color: Colors.black.withOpacity(0.5),
-                  shape: BoxShape.circle,
-                ),
-                child: const Icon(Icons.close, color: Colors.white),
-              ),
-              onPressed: () => Navigator.of(ctx).pop(),
-            ),
-          ],
+  Future<void> _openServiceDetailsFullScreen(ServiceAd ad) async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => ServiceDetailsScreen(
+          ad: ad,
+          initiallyReported: _myReportedServiceIds.contains(ad.id),
+          onReportSubmitted: () {
+            setState(() => _myReportedServiceIds.add(ad.id));
+          },
+          onEditRequested: () => _openPostScreen(existingAd: ad),
+          onDeleted: () async {
+            await _fetchAds();
+          },
         ),
       ),
     );
@@ -544,13 +305,14 @@ class _ServiceTabState extends State<ServiceTab> {
   Widget _buildAdCard(ServiceAd ad) {
     final user = FirebaseAuth.instance.currentUser;
     final isOwner = user != null && ad.ownerId == user.uid;
+    final isReported = _myReportedServiceIds.contains(ad.id);
 
     return Card(
       margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       elevation: 2,
       child: InkWell(
-        onTap: () => _openServiceDetails(ad),
+        onTap: () => _openServiceDetailsFullScreen(ad),
         borderRadius: BorderRadius.circular(12),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -586,83 +348,97 @@ class _ServiceTabState extends State<ServiceTab> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
                       Expanded(
                         child: Text(
                           ad.title,
                           style: const TextStyle(
-                            fontSize: 18,
-                            fontWeight: FontWeight.bold,
-                          ),
+                              fontSize: 18, fontWeight: FontWeight.bold),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
-                      // Only show edit/delete when user is the creator
+
+                      // flag only for non-owners
+                      if (!isOwner)
+                        IconButton(
+                          tooltip: isReported
+                              ? 'You flagged this'
+                              : 'Report this service',
+                          icon: Icon(
+                            isReported ? Icons.flag : Icons.flag_outlined,
+                            color: isReported ? Colors.red : Colors.grey[700],
+                          ),
+                          onPressed: isReported
+                              ? null
+                              : () => _reportServiceDialog(ad),
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(),
+                        ),
+
+                      const SizedBox(width: 4),
+
                       if (isOwner)
-                        Row(
-                          children: [
-                            IconButton(
-                              icon: const Icon(Icons.edit, size: 20),
-                              onPressed: () => _openPostScreen(existingAd: ad),
-                              padding: EdgeInsets.zero,
-                              constraints: const BoxConstraints(),
-                            ),
-                            const SizedBox(width: 8),
-                            IconButton(
-                              icon: const Icon(Icons.delete, size: 20),
-                              onPressed: () async {
-                                final confirm = await showDialog<bool>(
-                                  context: context,
-                                  builder: (c) => AlertDialog(
-                                    title: const Text('Delete Service'),
-                                    content: const Text(
-                                      'Are you sure you want to delete this service?',
-                                    ),
-                                    actions: [
-                                      TextButton(
-                                        onPressed: () => Navigator.of(c).pop(false),
-                                        child: const Text('Cancel'),
-                                      ),
-                                      TextButton(
-                                        onPressed: () => Navigator.of(c).pop(true),
-                                        child: const Text('Delete',
-                                            style: TextStyle(color: Colors.red)),
-                                      ),
-                                    ],
+                        IconButton(
+                          icon: const Icon(Icons.edit, size: 20),
+                          onPressed: () => _openPostScreen(existingAd: ad),
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(),
+                        ),
+                      if (isOwner) const SizedBox(width: 8),
+                      if (isOwner)
+                        IconButton(
+                          icon: const Icon(Icons.delete, size: 20),
+                          onPressed: () async {
+                            final confirm = await showDialog<bool>(
+                              context: context,
+                              builder: (c) => AlertDialog(
+                                title: const Text('Delete Service'),
+                                content: const Text(
+                                  'Are you sure you want to delete this service?',
+                                ),
+                                actions: [
+                                  TextButton(
+                                    onPressed: () => Navigator.of(c).pop(false),
+                                    child: const Text('Cancel'),
+                                  ),
+                                  TextButton(
+                                    onPressed: () => Navigator.of(c).pop(true),
+                                    child: const Text('Delete',
+                                        style: TextStyle(color: Colors.red)),
+                                  ),
+                                ],
+                              ),
+                            );
+
+                            if (confirm == true) {
+                              try {
+                                await FirebaseFirestore.instance
+                                    .collection('services')
+                                    .doc(ad.id)
+                                    .delete();
+                                await _fetchAds();
+                                if (!mounted) return;
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content:
+                                        Text('Service deleted successfully!'),
+                                    backgroundColor: Colors.red,
                                   ),
                                 );
-
-                                if (confirm == true) {
-                                  try {
-                                    await FirebaseFirestore.instance
-                                        .collection('services')
-                                        .doc(ad.id)
-                                        .delete();
-                                    await _fetchAds();
-                                    if (!mounted) return;
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      const SnackBar(
-                                        content: Text('Service deleted successfully!'),
-                                        backgroundColor: Colors.red,
-                                      ),
-                                    );
-                                  } catch (e) {
-                                    if (!mounted) return;
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      SnackBar(
-                                        content: Text('Couldn\'t delete: $e'),
-                                        backgroundColor: Colors.red,
-                                      ),
-                                    );
-                                  }
-                                }
-                              },
-                              padding: EdgeInsets.zero,
-                              constraints: const BoxConstraints(),
-                            ),
-                          ],
+                              } catch (e) {
+                                if (!mounted) return;
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(
+                                    content: Text('Couldn\'t delete: $e'),
+                                    backgroundColor: Colors.red,
+                                  ),
+                                );
+                              }
+                            }
+                          },
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(),
                         ),
                     ],
                   ),
@@ -684,7 +460,8 @@ class _ServiceTabState extends State<ServiceTab> {
                   if (ad.distanceFromUser != null)
                     Row(
                       children: [
-                        const Icon(Icons.location_on, size: 16, color: Colors.grey),
+                        const Icon(Icons.location_on,
+                            size: 16, color: Colors.grey),
                         const SizedBox(width: 4),
                         Text(
                           '${ad.distanceFromUser!.toStringAsFixed(1)} km away',
@@ -730,7 +507,6 @@ class _ServiceTabState extends State<ServiceTab> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text("You haven't created any services yet")),
       );
-      // Do not toggle on since there are none
       return;
     }
 
@@ -741,14 +517,13 @@ class _ServiceTabState extends State<ServiceTab> {
   Widget build(BuildContext context) {
     final current = FirebaseAuth.instance.currentUser;
 
-    // Apply type filter first
     List<ServiceAd> filteredAds = _selectedType == 'All'
         ? _ads
         : _ads.where((ad) => ad.type == _selectedType).toList();
 
-    // Then apply "My posts" quick filter if active
     if (_showOnlyMine && current != null) {
-      filteredAds = filteredAds.where((ad) => ad.ownerId == current.uid).toList();
+      filteredAds =
+          filteredAds.where((ad) => ad.ownerId == current.uid).toList();
     }
 
     return Scaffold(
@@ -794,7 +569,6 @@ class _ServiceTabState extends State<ServiceTab> {
               ),
             ),
           ),
-          // Optional small banner to show quick filter status (purely visual)
           if (_showOnlyMine)
             Container(
               width: double.infinity,
@@ -802,7 +576,8 @@ class _ServiceTabState extends State<ServiceTab> {
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
               child: const Text(
                 'Showing only your services',
-                style: TextStyle(color: Colors.green, fontWeight: FontWeight.w600),
+                style:
+                    TextStyle(color: Colors.green, fontWeight: FontWeight.w600),
               ),
             ),
           Expanded(
@@ -813,19 +588,24 @@ class _ServiceTabState extends State<ServiceTab> {
                         child: Column(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
-                            Icon(Icons.search_off, size: 64, color: Colors.grey[400]),
+                            Icon(Icons.search_off,
+                                size: 64, color: Colors.grey[400]),
                             const SizedBox(height: 16),
                             Text(
                               'No services found'
                               '${_selectedType != 'All' ? ' for $_selectedType' : ''}'
                               '${_showOnlyMine ? ' (your posts)' : ''}',
-                              style: TextStyle(color: Colors.grey[600], fontSize: 16),
+                              style: TextStyle(
+                                  color: Colors.grey[600], fontSize: 16),
                             ),
                           ],
                         ),
                       )
                     : RefreshIndicator(
-                        onRefresh: _fetchAds,
+                        onRefresh: () async {
+                          await _fetchAds();
+                          await _refreshMyReportedServices();
+                        },
                         child: ListView.builder(
                           padding: const EdgeInsets.only(top: 8, bottom: 120),
                           itemCount: filteredAds.length,
@@ -836,20 +616,20 @@ class _ServiceTabState extends State<ServiceTab> {
           ),
         ],
       ),
-      // Two FABs stacked vertically: quick filter above the "+" button
       floatingActionButton: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          // Quick filter: My posts
           FloatingActionButton.extended(
             heroTag: 'fab_my_posts',
             onPressed: _onTapMyPostsQuickFilter,
-            backgroundColor: _showOnlyMine ? const Color(0xFF2E7D32) : const Color(0xFF66BB6A),
+            backgroundColor: _showOnlyMine
+                ? const Color(0xFF2E7D32)
+                : const Color(0xFF66BB6A),
             icon: const Icon(Icons.filter_list, color: Colors.white),
-            label: const Text('My posts', style: TextStyle(color: Colors.white)),
+            label:
+                const Text('My posts', style: TextStyle(color: Colors.white)),
           ),
           const SizedBox(height: 12),
-          // Add new post
           FloatingActionButton(
             heroTag: 'fab_add',
             onPressed: () => _openPostScreen(),
@@ -863,7 +643,395 @@ class _ServiceTabState extends State<ServiceTab> {
 }
 
 /// =======================
-/// Full-screen Post Screen
+/// Full-screen Service Details
+/// =======================
+class ServiceDetailsScreen extends StatefulWidget {
+  final ServiceAd ad;
+  final bool initiallyReported;
+  final VoidCallback onReportSubmitted;
+  final VoidCallback onEditRequested;
+  final Future<void> Function() onDeleted;
+
+  const ServiceDetailsScreen({
+    super.key,
+    required this.ad,
+    required this.initiallyReported,
+    required this.onReportSubmitted,
+    required this.onEditRequested,
+    required this.onDeleted,
+  });
+
+  @override
+  State<ServiceDetailsScreen> createState() => _ServiceDetailsScreenState();
+}
+
+class _ServiceDetailsScreenState extends State<ServiceDetailsScreen> {
+  final _reports = ReportsService();
+
+  int _currentPage = 0;
+  bool _isLoadingOwner = true;
+  Owner? _owner;
+  late bool _isReportedByMe;
+
+  @override
+  void initState() {
+    super.initState();
+    _isReportedByMe = widget.initiallyReported;
+    _loadOwner();
+  }
+
+  Future<void> _loadOwner() async {
+    try {
+      final ownerDoc = await FirebaseFirestore.instance
+          .collection('owners')
+          .doc(widget.ad.ownerId)
+          .get();
+      if (!mounted) return;
+      setState(() {
+        _owner = ownerDoc.exists ? Owner.fromFirestore(ownerDoc) : null;
+        _isLoadingOwner = false;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() => _isLoadingOwner = false);
+    }
+  }
+
+  Future<void> _deleteService() async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('Delete Service'),
+        content: const Text('Are you sure you want to delete this service?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(c).pop(false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(c).pop(true),
+            child: const Text('Delete', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+    if (confirm == true) {
+      try {
+        await FirebaseFirestore.instance
+            .collection('services')
+            .doc(widget.ad.id)
+            .delete();
+        if (!mounted) return;
+        await widget.onDeleted();
+        Navigator.of(context).pop();
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Service deleted successfully!'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      } catch (e) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Couldn\'t delete: $e')),
+        );
+      }
+    }
+  }
+
+  Future<void> _reportService() async {
+    // block self-flag in details too
+    final me = FirebaseAuth.instance.currentUser?.uid;
+    if (me == widget.ad.ownerId) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("You can’t report your own service.")),
+      );
+      return;
+    }
+
+    if (_isReportedByMe) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('You already flagged this service.')),
+      );
+      return;
+    }
+
+    final reasons = <String>[
+      'Spam',
+      'Harassment or bullying',
+      'Hate speech',
+      'Explicit content',
+      'Scam or fraud',
+      'Other',
+    ];
+    String selected = reasons.first;
+    final notesCtl = TextEditingController();
+
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Report service'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            DropdownButtonFormField<String>(
+              value: selected,
+              items: reasons
+                  .map((r) => DropdownMenuItem(value: r, child: Text(r)))
+                  .toList(),
+              onChanged: (v) => selected = v ?? reasons.first,
+              decoration: const InputDecoration(labelText: 'Reason'),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: notesCtl,
+              decoration: const InputDecoration(
+                labelText: 'Additional details (optional)',
+                hintText: 'Add context for moderators…',
+              ),
+              maxLines: 3,
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            child: const Text('Cancel'),
+            onPressed: () => Navigator.of(ctx).pop(false),
+          ),
+          FilledButton(
+            child: const Text('Submit'),
+            onPressed: () => Navigator.of(ctx).pop(true),
+          ),
+        ],
+      ),
+    );
+
+    if (ok == true) {
+      try {
+        await _reports.submitServiceReport(
+          serviceId: widget.ad.id,
+          serviceOwnerId: widget.ad.ownerId,
+          serviceTitle: widget.ad.title,
+          serviceType: widget.ad.type,
+          serviceDescription: widget.ad.description,
+          reason: selected,
+          notes: notesCtl.text.trim(),
+        );
+        if (!mounted) return;
+        setState(() => _isReportedByMe = true);
+        widget.onReportSubmitted();
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Report submitted. Thank you.')),
+        );
+      } catch (e) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to submit report: $e')),
+        );
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final currentUser = FirebaseAuth.instance.currentUser;
+    final isOwner = currentUser != null && widget.ad.ownerId == currentUser.uid;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(widget.ad.title),
+        backgroundColor: Colors.green,
+        actions: [
+          // flag only for non-owners
+          if (!isOwner)
+            IconButton(
+              tooltip: _isReportedByMe ? 'You flagged this' : 'Report service',
+              icon: Icon(
+                _isReportedByMe ? Icons.flag : Icons.flag_outlined,
+                color: _isReportedByMe ? Colors.red : Colors.white,
+              ),
+              onPressed: _isReportedByMe ? null : _reportService,
+            ),
+          if (isOwner)
+            IconButton(
+              icon: const Icon(Icons.edit),
+              onPressed: widget.onEditRequested,
+            ),
+          if (isOwner)
+            IconButton(
+              icon: const Icon(Icons.delete),
+              onPressed: _deleteService,
+            ),
+        ],
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          if (widget.ad.images.isNotEmpty)
+            Column(
+              children: [
+                AspectRatio(
+                  aspectRatio: 16 / 9,
+                  child: PageView.builder(
+                    itemCount: widget.ad.images.length,
+                    onPageChanged: (i) => setState(() => _currentPage = i),
+                    itemBuilder: (context, idx) => ClipRRect(
+                      borderRadius: BorderRadius.circular(8),
+                      child: Image.network(
+                        widget.ad.images[idx],
+                        fit: BoxFit.cover,
+                        loadingBuilder: (context, child, prog) {
+                          if (prog == null) return child;
+                          return Center(
+                            child: CircularProgressIndicator(
+                              value: (prog.expectedTotalBytes != null)
+                                  ? prog.cumulativeBytesLoaded /
+                                      prog.expectedTotalBytes!
+                                  : null,
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                  ),
+                ),
+                if (widget.ad.images.length > 1)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: List.generate(
+                        widget.ad.images.length,
+                        (index) => Container(
+                          margin: const EdgeInsets.symmetric(horizontal: 4),
+                          width: 8,
+                          height: 8,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: _currentPage == index
+                                ? Colors.green
+                                : Colors.grey[300],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          const SizedBox(height: 16),
+          Text(
+            widget.ad.type,
+            style: TextStyle(
+              color: Colors.grey[700],
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(widget.ad.description, style: const TextStyle(fontSize: 16)),
+          const SizedBox(height: 12),
+          if (widget.ad.distanceFromUser != null)
+            Text(
+              'Distance: ${widget.ad.distanceFromUser!.toStringAsFixed(1)} km',
+              style: TextStyle(color: Colors.grey[600]),
+            ),
+          const SizedBox(height: 20),
+          const Divider(),
+          const Text(
+            'Contact Information',
+            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+          ),
+          const SizedBox(height: 12),
+          _isLoadingOwner
+              ? const Center(
+                  child: Padding(
+                    padding: EdgeInsets.all(8.0),
+                    child: CircularProgressIndicator(),
+                  ),
+                )
+              : _owner != null
+                  ? Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            const Icon(Icons.person,
+                                size: 20, color: Colors.green),
+                            const SizedBox(width: 8),
+                            Text(
+                              '${_owner!.firstName} ${_owner!.lastName}',
+                              style: const TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        InkWell(
+                          onTap: () async {
+                            final uri = Uri(scheme: 'tel', path: _owner!.phone);
+                            if (await canLaunchUrl(uri)) {
+                              await launchUrl(uri);
+                            }
+                          },
+                          child: Row(
+                            children: [
+                              const Icon(Icons.phone,
+                                  size: 20, color: Colors.green),
+                              const SizedBox(width: 8),
+                              Text(
+                                _owner!.phone,
+                                style: const TextStyle(
+                                  fontSize: 16,
+                                  color: Colors.blue,
+                                  decoration: TextDecoration.underline,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        InkWell(
+                          onTap: () async {
+                            final uri =
+                                Uri(scheme: 'mailto', path: _owner!.email);
+                            if (await canLaunchUrl(uri)) {
+                              await launchUrl(uri);
+                            }
+                          },
+                          child: Row(
+                            children: [
+                              const Icon(Icons.email,
+                                  size: 20, color: Colors.green),
+                              const SizedBox(width: 8),
+                              Text(
+                                _owner!.email,
+                                style: const TextStyle(
+                                  fontSize: 16,
+                                  color: Colors.blue,
+                                  decoration: TextDecoration.underline,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    )
+                  : const Text(
+                      'Contact information not available',
+                      style: TextStyle(
+                        fontStyle: FontStyle.italic,
+                        color: Colors.grey,
+                      ),
+                    ),
+        ],
+      ),
+    );
+  }
+}
+
+/// =======================
+/// Full-screen Post Screen (with profanity checks)
 /// =======================
 class _PostServiceScreen extends StatefulWidget {
   final List<String> types;
@@ -898,6 +1066,8 @@ class _PostServiceScreenState extends State<_PostServiceScreen> {
 
   bool _saving = false;
 
+  final ProfanityFilter _filter = ProfanityFilter();
+
   @override
   void initState() {
     super.initState();
@@ -930,16 +1100,12 @@ class _PostServiceScreenState extends State<_PostServiceScreen> {
     const green = Colors.green;
     return InputDecoration(
       labelText: label,
-      border: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(10),
+      border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+      enabledBorder: const OutlineInputBorder(
+        borderSide: BorderSide(width: 1.2, color: Color(0xFFBDBDBD)),
       ),
-      enabledBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(10),
-        borderSide: const BorderSide(width: 1.2, color: Color(0xFFBDBDBD)),
-      ),
-      focusedBorder: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(10),
-        borderSide: const BorderSide(width: 1.8, color: green),
+      focusedBorder: const OutlineInputBorder(
+        borderSide: BorderSide(width: 1.8, color: green),
       ),
       contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
     );
@@ -960,10 +1126,37 @@ class _PostServiceScreenState extends State<_PostServiceScreen> {
     final current = FirebaseAuth.instance.currentUser;
     if (current == null) return;
 
+    final title = titleCtl.text.trim();
+    final desc = descCtl.text.trim();
+
+    if (_filter.hasProfanity(title) || _filter.hasProfanity(desc)) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            'Please keep it friendly — title/description contains inappropriate language.',
+          ),
+        ),
+      );
+      return;
+    }
+
+    if (title.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Title cannot be empty.')),
+      );
+      return;
+    }
+    if (desc.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Description cannot be empty.')),
+      );
+      return;
+    }
+
     setState(() => _saving = true);
 
     try {
-      // Upload any new images via utility (compressed JPEGs)
       final allImages = [..._existingImageUrls];
       for (final x in _pickedImages) {
         final url = await ImageUploadUtil.uploadServiceImageFromXFile(
@@ -974,7 +1167,6 @@ class _PostServiceScreenState extends State<_PostServiceScreen> {
         allImages.add(url);
       }
 
-      // Geocode postal code (optional)
       String postal = postalCtl.text.trim();
       double? geoLat = widget.userLat;
       double? geoLng = widget.userLng;
@@ -986,22 +1178,20 @@ class _PostServiceScreenState extends State<_PostServiceScreen> {
             geoLat = locations.first.latitude;
             geoLng = locations.first.longitude;
           }
-        } catch (_) {
-          // ignore geocoding failures
-        }
+        } catch (_) {}
       }
 
       final data = <String, dynamic>{
         'ownerId': current.uid,
-        'title': titleCtl.text.trim(),
-        'description': descCtl.text.trim(),
+        'title': title,
+        'description': desc,
         'type': dialogType,
         'latitude': geoLat ?? 0.0,
         'longitude': geoLng ?? 0.0,
         'images': allImages,
         'postalCode': postal,
-        'price': null,      // keep schema happy
-        'approved': false,  // explicit bool per rules
+        'price': null,
+        'approved': false,
         'updatedAt': FieldValue.serverTimestamp(),
       };
 
@@ -1009,7 +1199,10 @@ class _PostServiceScreenState extends State<_PostServiceScreen> {
         data['createdAt'] = FieldValue.serverTimestamp();
         await _firestore.collection('services').add(data);
       } else {
-        await _firestore.collection('services').doc(widget.existingAd!.id).update(data);
+        await _firestore
+            .collection('services')
+            .doc(widget.existingAd!.id)
+            .update(data);
       }
 
       if (!mounted) return;
@@ -1038,7 +1231,8 @@ class _PostServiceScreenState extends State<_PostServiceScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final title = widget.existingAd == null ? 'Post New Service' : 'Save Changes';
+    final title =
+        widget.existingAd == null ? 'Post New Service' : 'Save Changes';
 
     return Scaffold(
       appBar: AppBar(
@@ -1049,8 +1243,12 @@ class _PostServiceScreenState extends State<_PostServiceScreen> {
             onPressed: _saving ? null : _save,
             child: _saving
                 ? const SizedBox(
-                    height: 20, width: 20, child: CircularProgressIndicator(strokeWidth: 2))
-                : const Text('Save', style: TextStyle(color: Colors.white, fontSize: 16)),
+                    height: 20,
+                    width: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Text('Save',
+                    style: TextStyle(color: Colors.white, fontSize: 16)),
           ),
         ],
       ),
@@ -1090,8 +1288,6 @@ class _PostServiceScreenState extends State<_PostServiceScreen> {
                   decoration: _bordered('Postal Code'),
                 ),
                 const SizedBox(height: 16),
-
-                // Images header + add
                 Row(
                   children: [
                     Text(
@@ -1100,141 +1296,120 @@ class _PostServiceScreenState extends State<_PostServiceScreen> {
                     ),
                     const Spacer(),
                     OutlinedButton.icon(
-                      onPressed: _existingImageUrls.length + _pickedImages.length < 5
-                          ? _pickImages
-                          : null,
+                      onPressed:
+                          _existingImageUrls.length + _pickedImages.length < 5
+                              ? _pickImages
+                              : null,
                       icon: const Icon(Icons.add_photo_alternate),
                       label: const Text('Add Images'),
                     ),
                   ],
                 ),
                 const SizedBox(height: 8),
-
-                // Existing images
                 if (_existingImageUrls.isNotEmpty)
                   Padding(
                     padding: const EdgeInsets.only(bottom: 12),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text('Existing Images:',
-                            style: TextStyle(fontWeight: FontWeight.bold)),
-                        const SizedBox(height: 6),
-                        Wrap(
-                          spacing: 8,
-                          runSpacing: 8,
-                          children: _existingImageUrls.map((url) {
-                            return Stack(
-                              children: [
-                                ClipRRect(
-                                  borderRadius: BorderRadius.circular(10),
-                                  child: Image.network(
-                                    url,
+                    child: Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: _existingImageUrls.map((url) {
+                        return Stack(
+                          children: [
+                            ClipRRect(
+                              borderRadius: BorderRadius.circular(10),
+                              child: Image.network(
+                                url,
+                                width: 90,
+                                height: 90,
+                                fit: BoxFit.cover,
+                                loadingBuilder: (context, child, prog) {
+                                  if (prog == null) return child;
+                                  return Container(
                                     width: 90,
                                     height: 90,
-                                    fit: BoxFit.cover,
-                                    loadingBuilder: (context, child, prog) {
-                                      if (prog == null) return child;
-                                      return Container(
-                                        width: 90,
-                                        height: 90,
-                                        color: Colors.grey[300],
-                                        child: const Center(
-                                          child: CircularProgressIndicator(),
-                                        ),
-                                      );
-                                    },
-                                  ),
-                                ),
-                                Positioned(
-                                  right: 0,
-                                  top: 0,
-                                  child: GestureDetector(
-                                    onTap: () => setState(
-                                        () => _existingImageUrls.remove(url)),
-                                    child: Container(
-                                      decoration: BoxDecoration(
-                                        color: Colors.white,
-                                        borderRadius: BorderRadius.circular(12),
-                                        boxShadow: [
-                                          BoxShadow(
-                                            color: Colors.black.withOpacity(0.15),
-                                            blurRadius: 6,
-                                          )
-                                        ],
-                                      ),
-                                      padding: const EdgeInsets.all(2),
-                                      child: const Icon(Icons.close,
-                                          color: Colors.red, size: 18),
+                                    color: Colors.grey[300],
+                                    child: const Center(
+                                      child: CircularProgressIndicator(),
                                     ),
+                                  );
+                                },
+                              ),
+                            ),
+                            Positioned(
+                              right: 0,
+                              top: 0,
+                              child: GestureDetector(
+                                onTap: () => setState(
+                                    () => _existingImageUrls.remove(url)),
+                                child: Container(
+                                  decoration: BoxDecoration(
+                                    color: Colors.white,
+                                    borderRadius: BorderRadius.circular(12),
+                                    boxShadow: [
+                                      BoxShadow(
+                                        color: Colors.black.withOpacity(0.15),
+                                        blurRadius: 6,
+                                      )
+                                    ],
                                   ),
+                                  padding: const EdgeInsets.all(2),
+                                  child: const Icon(Icons.close,
+                                      color: Colors.red, size: 18),
                                 ),
-                              ],
-                            );
-                          }).toList(),
-                        ),
-                      ],
+                              ),
+                            ),
+                          ],
+                        );
+                      }).toList(),
                     ),
                   ),
-
-                // New images
                 if (_pickedImages.isNotEmpty)
                   Padding(
                     padding: const EdgeInsets.only(bottom: 12),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        const Text('New Images:',
-                            style: TextStyle(fontWeight: FontWeight.bold)),
-                        const SizedBox(height: 6),
-                        Wrap(
-                          spacing: 8,
-                          runSpacing: 8,
-                          children: _pickedImages.map((img) {
-                            return Stack(
-                              children: [
-                                ClipRRect(
-                                  borderRadius: BorderRadius.circular(10),
-                                  child: Image.file(
-                                    File(img.path),
-                                    width: 90,
-                                    height: 90,
-                                    fit: BoxFit.cover,
+                    child: Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: _pickedImages.map((img) {
+                        return Stack(
+                          children: [
+                            ClipRRect(
+                              borderRadius: BorderRadius.circular(10),
+                              child: Image.file(
+                                File(img.path),
+                                width: 90,
+                                height: 90,
+                                fit: BoxFit.cover,
+                              ),
+                            ),
+                            Positioned(
+                              right: 0,
+                              top: 0,
+                              child: GestureDetector(
+                                onTap: () =>
+                                    setState(() => _pickedImages.remove(img)),
+                                child: Container(
+                                  decoration: BoxDecoration(
+                                    color: Colors.white,
+                                    borderRadius: BorderRadius.circular(12),
+                                    boxShadow: [
+                                      BoxShadow(
+                                        color: Colors.black.withOpacity(0.15),
+                                        blurRadius: 6,
+                                      )
+                                    ],
                                   ),
+                                  padding: const EdgeInsets.all(2),
+                                  child: const Icon(Icons.close,
+                                      color: Colors.red, size: 18),
                                 ),
-                                Positioned(
-                                  right: 0,
-                                  top: 0,
-                                  child: GestureDetector(
-                                    onTap: () => setState(() => _pickedImages.remove(img)),
-                                    child: Container(
-                                      decoration: BoxDecoration(
-                                        color: Colors.white,
-                                        borderRadius: BorderRadius.circular(12),
-                                        boxShadow: [
-                                          BoxShadow(
-                                            color: Colors.black.withOpacity(0.15),
-                                            blurRadius: 6,
-                                          )
-                                        ],
-                                      ),
-                                      padding: const EdgeInsets.all(2),
-                                      child: const Icon(Icons.close,
-                                          color: Colors.red, size: 18),
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            );
-                          }).toList(),
-                        ),
-                      ],
+                              ),
+                            ),
+                          ],
+                        );
+                      }).toList(),
                     ),
                   ),
-
                 const SizedBox(height: 24),
-
-                // Post button with spinner next to it
                 Row(
                   children: [
                     Expanded(
@@ -1242,7 +1417,9 @@ class _PostServiceScreenState extends State<_PostServiceScreen> {
                         onPressed: _saving ? null : _save,
                         icon: const Icon(Icons.check),
                         label: Text(
-                          widget.existingAd == null ? 'Post Service' : 'Save Changes',
+                          widget.existingAd == null
+                              ? 'Post Service'
+                              : 'Save Changes',
                         ),
                         style: ElevatedButton.styleFrom(
                           backgroundColor: Colors.green,
@@ -1263,12 +1440,12 @@ class _PostServiceScreenState extends State<_PostServiceScreen> {
                       ),
                   ],
                 ),
-
                 const SizedBox(height: 12),
                 SizedBox(
                   width: double.infinity,
                   child: OutlinedButton.icon(
-                    onPressed: _saving ? null : () => Navigator.of(context).pop(false),
+                    onPressed:
+                        _saving ? null : () => Navigator.of(context).pop(false),
                     icon: const Icon(Icons.close),
                     label: const Text('Cancel'),
                     style: OutlinedButton.styleFrom(
