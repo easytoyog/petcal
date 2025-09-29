@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/cupertino.dart' show CupertinoIcons;
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 
@@ -8,6 +9,80 @@ import 'package:inthepark/models/pet_model.dart';
 import 'package:inthepark/utils/image_upload_util.dart';
 import 'package:inthepark/screens/owner_detail_screen.dart';
 import 'package:inthepark/screens/edit_profile_screen.dart';
+import 'dart:io' show Platform;
+import 'package:share_plus/share_plus.dart';
+
+/// ---------- Enticing gradient Share CTA ----------
+class ShareAppCta extends StatelessWidget {
+  const ShareAppCta({super.key, required this.onPressed});
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final isIOS = Platform.isIOS;
+
+    return Material(
+      color: Colors.transparent,
+      child: Ink(
+        decoration: BoxDecoration(
+          gradient: const LinearGradient(
+            colors: [Color(0xFF00E6A8), Color(0xFF00B386)],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
+          borderRadius: BorderRadius.circular(16),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.25),
+              blurRadius: 16,
+              offset: const Offset(0, 8),
+            ),
+          ],
+        ),
+        child: InkWell(
+          onTap: onPressed,
+          borderRadius: BorderRadius.circular(16),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 18),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(
+                  isIOS ? CupertinoIcons.share : Icons.share,
+                  color: Colors.white,
+                  size: 26,
+                ),
+                const SizedBox(width: 10),
+                Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: const [
+                    Text(
+                      'Share In The Park To Your Friends!',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 18,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: 0.2,
+                      ),
+                    ),
+                    SizedBox(height: 2),
+                    Text(
+                      'Invite a friend — it’s free',
+                      style: TextStyle(
+                        color: Colors.white70,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
 
 class ProfileTab extends StatefulWidget {
   const ProfileTab({Key? key}) : super(key: key);
@@ -40,7 +115,22 @@ class _ProfileTabState extends State<ProfileTab> {
   @override
   void initState() {
     super.initState();
+    // auto-uppercase postal code as user types (works in the editor too)
+    postalCodeController.addListener(_autoUppercasePostal);
     _loadOwnerAndPets();
+  }
+
+  void _autoUppercasePostal() {
+    final text = postalCodeController.text;
+    final upper = text.toUpperCase();
+    if (text != upper) {
+      final sel = postalCodeController.selection; // preserve cursor
+      postalCodeController.value = TextEditingValue(
+        text: upper,
+        selection: sel,
+        composing: TextRange.empty,
+      );
+    }
   }
 
   @override
@@ -53,11 +143,27 @@ class _ProfileTabState extends State<ProfileTab> {
     cityController.dispose();
     stateController.dispose();
     countryController.dispose();
+    postalCodeController.removeListener(_autoUppercasePostal);
     postalCodeController.dispose();
     super.dispose();
   }
 
   // ---------- UI helpers ----------
+
+  void _shareApp() {
+    const androidUrl =
+        'https://play.google.com/store/apps/details?id=ca.inthepark&pcampaignid=web_share';
+    const iosUrl = 'https://apps.apple.com/ca/app/in-the-park/id6752841263';
+
+    final link = Platform.isAndroid
+        ? androidUrl
+        : (Platform.isIOS ? iosUrl : '$androidUrl\n$iosUrl');
+
+    Share.share(
+      'Check out In The Park! $link',
+      subject: 'In The Park',
+    );
+  }
 
   InputDecoration _outlinedDecoration(String hint) {
     return InputDecoration(
@@ -148,7 +254,7 @@ class _ProfileTabState extends State<ProfileTab> {
       'city': cityController.text.trim(),
       'state': stateController.text.trim(),
       'country': countryController.text.trim(),
-      'postalCode': postalCodeController.text.trim(),
+      'postalCode': postalCodeController.text.trim().toUpperCase(), // ← here
     };
 
     await FirebaseFirestore.instance.collection('owners').doc(_owner!.uid).set({
@@ -172,7 +278,7 @@ class _ProfileTabState extends State<ProfileTab> {
         city: cityController.text.trim(),
         state: stateController.text.trim(),
         country: countryController.text.trim(),
-        postalCode: postalCodeController.text.trim(),
+        postalCode: postalCodeController.text.trim().toUpperCase(),
       ),
     );
 
@@ -234,6 +340,14 @@ class _ProfileTabState extends State<ProfileTab> {
                   ),
                 ),
                 const SizedBox(height: 24),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    icon: const Icon(Icons.share),
+                    label: const Text('Share this app'),
+                    onPressed: _shareApp,
+                  ),
+                ),
                 ElevatedButton(
                   onPressed: () async {
                     final feedback = feedbackController.text.trim();
@@ -745,9 +859,8 @@ class _ProfileTabState extends State<ProfileTab> {
                       Column(
                         children: _pets.map((pet) {
                           // Safe check for a non-empty URL
-                          final photo = pet.photoUrl ?? ''; // <-- safe coalesce
-                          final hasPhoto =
-                              photo.trim().isNotEmpty; // no null error
+                          final photo = pet.photoUrl ?? '';
+                          final hasPhoto = photo.trim().isNotEmpty;
                           final ImageProvider? petImage =
                               hasPhoto ? NetworkImage(photo) : null;
 
@@ -789,6 +902,8 @@ class _ProfileTabState extends State<ProfileTab> {
                       ),
 
                     const SizedBox(height: 32),
+
+                    // Feedback button
                     ElevatedButton.icon(
                       onPressed: _showFeedbackDialog,
                       icon: const Icon(Icons.feedback),
@@ -799,7 +914,15 @@ class _ProfileTabState extends State<ProfileTab> {
                         minimumSize: const Size.fromHeight(48),
                       ),
                     ),
+
+                    const SizedBox(height: 12),
+
+                    // NEW: Enticing “Share this app” CTA
+                    ShareAppCta(onPressed: _shareApp),
+
                     const SizedBox(height: 20),
+
+                    // Logout
                     Padding(
                       padding: const EdgeInsets.symmetric(vertical: 8.0),
                       child: Center(

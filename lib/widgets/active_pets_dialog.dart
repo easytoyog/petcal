@@ -41,7 +41,7 @@ class ActivePetsDialog extends StatelessWidget {
                         CircleAvatar(backgroundImage: NetworkImage(petPhoto)),
                     title: Text(petName),
                     subtitle: Text(mine
-                        ? "Your pet – Checked in at $checkIn"
+                        ? "Your pet – Checked in for $checkIn"
                         : "Checked in at $checkIn"),
                     trailing: mine
                         ? null

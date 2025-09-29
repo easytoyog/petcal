@@ -391,7 +391,7 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
                     ),
                     const SizedBox(height: 20),
                     Text(
-                      "Pet Calendar",
+                      "Connect, Play, Explore",
                       style: GoogleFonts.nunito(
                         fontSize: 32,
                         fontWeight: FontWeight.bold,

@@ -37,7 +37,8 @@ class _AdBannerState extends State<AdBanner> with WidgetsBindingObserver {
     // Width in logical pixels (Flutter logical px ≈ dp), truncated to int.
     final width = MediaQuery.of(context).size.width.truncate();
 
-    final size = await AdSize.getCurrentOrientationAnchoredAdaptiveBannerAdSize(width);
+    final size =
+        await AdSize.getCurrentOrientationAnchoredAdaptiveBannerAdSize(width);
     if (size == null) {
       debugPrint('Unable to get adaptive banner size.');
       return;
@@ -46,7 +47,7 @@ class _AdBannerState extends State<AdBanner> with WidgetsBindingObserver {
     // Test IDs in debug/profile, real IDs in release.
     final adUnitId = Platform.isAndroid
         ? (kReleaseMode
-            ? 'ca-app-pub-3773871623541431/1452134694' // real Android banner unit
+            ? 'ca-app-pub-3773871623541431/1736402547' // real Android banner unit
             : 'ca-app-pub-3940256099942544/6300978111') // Google test Android banner
         : (kReleaseMode
             ? 'ca-app-pub-3773871623541431/5447708694' // real iOS banner unit

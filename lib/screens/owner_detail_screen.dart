@@ -10,6 +10,19 @@ class OwnerDetailsScreen extends StatefulWidget {
   _OwnerDetailsScreenState createState() => _OwnerDetailsScreenState();
 }
 
+class UpperCaseTextFormatter extends TextInputFormatter {
+  @override
+  TextEditingValue formatEditUpdate(
+    TextEditingValue oldValue,
+    TextEditingValue newValue,
+  ) {
+    return newValue.copyWith(
+      text: newValue.text.toUpperCase(),
+      selection: newValue.selection,
+    );
+  }
+}
+
 class _OwnerDetailsScreenState extends State<OwnerDetailsScreen> {
   final TextEditingController firstNameController = TextEditingController();
   final FocusNode firstNameFocusNode = FocusNode();
@@ -55,8 +68,8 @@ class _OwnerDetailsScreenState extends State<OwnerDetailsScreen> {
 
     try {
       final user = FirebaseAuth.instance.currentUser!;
-      final uid  = user.uid;
-      final ref  = FirebaseFirestore.instance.collection('owners').doc(uid);
+      final uid = user.uid;
+      final ref = FirebaseFirestore.instance.collection('owners').doc(uid);
 
       await FirebaseFirestore.instance.runTransaction((tx) async {
         final snap = await tx.get(ref);
@@ -64,16 +77,16 @@ class _OwnerDetailsScreenState extends State<OwnerDetailsScreen> {
         final base = {
           'email': user.email ?? '',
           'firstName': firstNameController.text.trim(),
-          'lastName' : lastNameController.text.trim(),
-          'phone'    : phoneController.text.trim(),
-          'address'  : {
-            'line1'     : addressLine1Controller.text.trim(),
-            'city'      : cityController.text.trim(),
-            'state'     : stateController.text.trim(),
-            'postalCode': postalCodeController.text.trim(),
-            'country'   : countryController.text.trim(),
+          'lastName': lastNameController.text.trim(),
+          'phone': phoneController.text.trim(),
+          'address': {
+            'line1': addressLine1Controller.text.trim(),
+            'city': cityController.text.trim(),
+            'state': stateController.text.trim(),
+            'postalCode': postalCodeController.text.trim().toUpperCase(),
+            'country': countryController.text.trim(),
           },
-          'active'   : true,
+          'active': true,
         };
 
         if (!snap.exists) {
@@ -103,8 +116,6 @@ class _OwnerDetailsScreenState extends State<OwnerDetailsScreen> {
       );
     }
   }
-
-
 
   InputDecoration _inputDecoration(
       {required String hint, required IconData icon}) {
@@ -145,7 +156,8 @@ class _OwnerDetailsScreenState extends State<OwnerDetailsScreen> {
             ),
           ),
           child: SingleChildScrollView(
-            padding: const EdgeInsets.fromLTRB(24.0, 0, 24.0, 40.0), // <-- Add extra bottom padding
+            padding: const EdgeInsets.fromLTRB(
+                24.0, 0, 24.0, 40.0), // <-- Add extra bottom padding
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               crossAxisAlignment: CrossAxisAlignment.center,
@@ -245,8 +257,14 @@ class _OwnerDetailsScreenState extends State<OwnerDetailsScreen> {
                   controller: postalCodeController,
                   style: const TextStyle(color: Colors.white),
                   cursorColor: Colors.tealAccent,
+                  textCapitalization:
+                      TextCapitalization.characters, // keyboard hint
                   inputFormatters: [
-                    FilteringTextInputFormatter.allow(RegExp(r'[A-Za-z0-9]')),
+                    FilteringTextInputFormatter.allow(RegExp(
+                        r'[A-Za-z0-9 ]')), // allow space if you want "A1A 1A1"
+                    LengthLimitingTextInputFormatter(
+                        7), // fits "A1A 1A1"; use 6 if no space
+                    UpperCaseTextFormatter(), // <-- force caps as you type
                   ],
                   decoration: _inputDecoration(
                     hint: "Postal Code",

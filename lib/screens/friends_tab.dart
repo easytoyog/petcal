@@ -21,8 +21,10 @@ class _FriendsTabState extends State<FriendsTab> {
   List<String> _favoritePetIds = [];
 
   final TextEditingController _searchController = TextEditingController();
+  final FocusNode _searchFocusNode = FocusNode(); // close keyboard/dropdown
   List<Map<String, dynamic>> _searchResults = [];
   bool _isSearching = false;
+  int _searchEpoch = 0; // cancels stale searches
 
   final String? currentUserId = FirebaseAuth.instance.currentUser?.uid;
 
@@ -32,6 +34,13 @@ class _FriendsTabState extends State<FriendsTab> {
     _fetchAllData();
   }
 
+  @override
+  void dispose() {
+    _searchFocusNode.dispose();
+    _searchController.dispose();
+    super.dispose();
+  }
+
   Future<void> _fetchAllData() async {
     setState(() => _isLoading = true);
     await Future.wait([
@@ -39,65 +48,66 @@ class _FriendsTabState extends State<FriendsTab> {
       _fetchActiveParksMapping(),
       _fetchFavorites(),
     ]);
+    if (!mounted) return;
     setState(() => _isLoading = false);
   }
 
   Future<void> _fetchFavorites() async {
     if (currentUserId == null) return;
     try {
-      QuerySnapshot snapshot = await FirebaseFirestore.instance
+      final snapshot = await FirebaseFirestore.instance
           .collection('favorites')
           .doc(currentUserId)
           .collection('pets')
           .get();
-      List<String> favIds = snapshot.docs.map((doc) => doc.id).toList();
-      setState(() {
-        _favoritePetIds = favIds;
-      });
+      final favIds = snapshot.docs.map((doc) => doc.id).toList();
+      if (!mounted) return;
+      setState(() => _favoritePetIds = favIds);
     } catch (e) {
-      print("Error fetching favorites: $e");
+      // ignore but log
+      // print("Error fetching favorites: $e");
     }
   }
 
   Future<void> _fetchFriends() async {
     if (currentUserId == null) return;
     try {
-      QuerySnapshot snapshot = await FirebaseFirestore.instance
+      final snapshot = await FirebaseFirestore.instance
           .collection('friends')
           .doc(currentUserId)
           .collection('userFriends')
           .get();
-      List<String> friendIds = snapshot.docs.map((doc) => doc.id).toList();
-      setState(() {
-        _friendIds = friendIds;
-      });
+      final friendIds = snapshot.docs.map((doc) => doc.id).toList();
+      if (!mounted) return;
+      setState(() => _friendIds = friendIds);
+
       await Future.wait([
         _fetchFriendPetsBatch(friendIds),
         _fetchFriendOwnerNamesBatch(friendIds),
       ]);
     } catch (e) {
-      print("Error fetching friends: $e");
+      // print("Error fetching friends: $e");
     }
   }
 
   // Batch fetch all pets for all friends using whereIn (max 10 per batch)
   Future<void> _fetchFriendPetsBatch(List<String> friendIds) async {
-    Map<String, List<Map<String, dynamic>>> friendPets = {};
+    final friendPets = <String, List<Map<String, dynamic>>>{};
     if (friendIds.isEmpty) {
+      if (!mounted) return;
       setState(() => _friendPets = {});
       return;
     }
-    int chunkSize = 10;
+    const chunkSize = 10;
     for (int i = 0; i < friendIds.length; i += chunkSize) {
-      List<String> batch =
-          friendIds.sublist(i, min(i + chunkSize, friendIds.length));
-      QuerySnapshot petSnapshot = await FirebaseFirestore.instance
+      final batch = friendIds.sublist(i, min(i + chunkSize, friendIds.length));
+      final petSnapshot = await FirebaseFirestore.instance
           .collection('pets')
           .where('ownerId', whereIn: batch)
           .get();
       for (var doc in petSnapshot.docs) {
         final data = doc.data() as Map<String, dynamic>;
-        String ownerId = data['ownerId'];
+        final ownerId = (data['ownerId'] ?? '').toString();
         data['petId'] = doc.id;
         data['name'] = data['name'] ?? 'Unknown Pet';
         data['photoUrl'] =
@@ -106,24 +116,24 @@ class _FriendsTabState extends State<FriendsTab> {
       }
     }
     if (!mounted) return;
-    setState(() {
-      _friendPets = friendPets;
-    });
+    setState(() => _friendPets = friendPets);
   }
 
   // Batch fetch all owner names for friends using whereIn (max 10 per batch)
   Future<void> _fetchFriendOwnerNamesBatch(List<String> friendIds) async {
-    Map<String, String> names = {};
+    final names = <String, String>{};
     if (friendIds.isEmpty) {
+      if (!mounted) return;
       setState(() => _friendOwnerNames = {});
       return;
     }
     final idsToQuery = friendIds.where((id) => id != currentUserId).toList();
     const chunkSize = 10;
     for (int i = 0; i < idsToQuery.length; i += chunkSize) {
-      final chunk = idsToQuery.sublist(i, min(i + chunkSize, idsToQuery.length));
+      final chunk =
+          idsToQuery.sublist(i, min(i + chunkSize, idsToQuery.length));
       final snapshot = await FirebaseFirestore.instance
-          .collection('public_profiles') // 👈 was 'owners'
+          .collection('public_profiles')
           .where(FieldPath.documentId, whereIn: chunk)
           .get();
 
@@ -137,34 +147,40 @@ class _FriendsTabState extends State<FriendsTab> {
     setState(() => _friendOwnerNames = names);
   }
 
-
   // No major optimization here, but you could cache park names if needed
   Future<void> _fetchActiveParksMapping() async {
-    Map<String, String> mapping = {};
+    final mapping = <String, String>{};
     try {
-      QuerySnapshot snapshot = await FirebaseFirestore.instance
+      final snapshot = await FirebaseFirestore.instance
           .collectionGroup('active_users')
           .get();
       for (var doc in snapshot.docs) {
-        String userId = doc.id;
-        DocumentReference? parkRef = doc.reference.parent.parent;
+        final userId = doc.id;
+        final parkRef = doc.reference.parent.parent;
         if (parkRef != null) {
-          DocumentSnapshot parkSnapshot = await parkRef.get();
+          final parkSnapshot = await parkRef.get();
           if (parkSnapshot.exists) {
-            Map<String, dynamic> parkData =
-                parkSnapshot.data() as Map<String, dynamic>;
-            String parkName = parkData['name'] ?? "Unknown Park";
+            final parkData = parkSnapshot.data() as Map<String, dynamic>;
+            final parkName = (parkData['name'] ?? 'Unknown Park').toString();
             mapping[userId] = parkName;
           }
         }
       }
     } catch (e) {
-      print("Error fetching active parks mapping: $e");
+      // print("Error fetching active parks mapping: $e");
     }
     if (!mounted) return;
+    setState(() => _activeParkMapping = mapping);
+  }
+
+  void _closeSearchDropdown() {
     setState(() {
-      _activeParkMapping = mapping;
+      _searchEpoch++; // invalidate any in-flight search
+      _searchResults = [];
+      _isSearching = false;
+      _searchController.clear();
     });
+    _searchFocusNode.unfocus();
   }
 
   Future<void> _searchPets(String query) async {
@@ -172,15 +188,16 @@ class _FriendsTabState extends State<FriendsTab> {
       setState(() => _searchResults = []);
       return;
     }
+
+    final epoch = ++_searchEpoch; // snapshot this search
     setState(() => _isSearching = true);
 
     try {
       final lowerQuery = query.toLowerCase();
 
-      // 1) Read pets (now allowed by rules) and filter by name client-side
-      final petSnapshot = await FirebaseFirestore.instance
-          .collection('pets')
-          .get();
+      // 1) Read pets and filter by name client-side
+      final petSnapshot =
+          await FirebaseFirestore.instance.collection('pets').get();
 
       final pets = petSnapshot.docs.map((d) {
         final m = d.data() as Map<String, dynamic>;
@@ -191,10 +208,9 @@ class _FriendsTabState extends State<FriendsTab> {
         return name.contains(lowerQuery);
       }).toList();
 
-      // 2) Also search owner displayName in public_profiles to find their pets
-      final profilesSnap = await FirebaseFirestore.instance
-          .collection('public_profiles')
-          .get();
+      // 2) Search public profile display names to find their pets
+      final profilesSnap =
+          await FirebaseFirestore.instance.collection('public_profiles').get();
 
       final matchingOwnerIds = <String>{};
       for (final d in profilesSnap.docs) {
@@ -225,7 +241,9 @@ class _FriendsTabState extends State<FriendsTab> {
       final ownerNameCache = <String, String>{};
 
       Future<String> ownerName(String ownerId) async {
-        if (ownerNameCache.containsKey(ownerId)) return ownerNameCache[ownerId]!;
+        if (ownerNameCache.containsKey(ownerId)) {
+          return ownerNameCache[ownerId]!;
+        }
         final doc = await FirebaseFirestore.instance
             .collection('public_profiles')
             .doc(ownerId)
@@ -245,38 +263,49 @@ class _FriendsTabState extends State<FriendsTab> {
         combined.add(p);
       }
 
+      if (!mounted || epoch != _searchEpoch) return; // stale search
       setState(() => _searchResults = combined);
     } catch (e) {
-      print("Error searching pets: $e");
+      if (!mounted || epoch != _searchEpoch) return; // stale search
+      // print("Error searching pets: $e");
     }
 
+    if (!mounted || epoch != _searchEpoch) return; // stale search
     setState(() => _isSearching = false);
   }
 
-
   Future<void> _addFriendFromSearch(Map<String, dynamic> petData) async {
-    String friendId = petData['ownerId'];
-    String ownerName = petData['ownerName'] ?? "Unknown";
-    if (currentUserId == null) return;
+    final friendId = (petData['ownerId'] ?? '').toString();
+    if (currentUserId == null || friendId.isEmpty) return;
+
     try {
-      DocumentSnapshot friendDoc = await FirebaseFirestore.instance
+      final friendDoc = await FirebaseFirestore.instance
           .collection('friends')
           .doc(currentUserId)
           .collection('userFriends')
           .doc(friendId)
           .get();
+
       if (friendDoc.exists) {
+        if (!mounted) return;
         ScaffoldMessenger.of(context)
             .showSnackBar(const SnackBar(content: Text("Already friends.")));
         return;
       }
+
       await _addFriend(friendId, petData['petId']);
+
+      if (!mounted) return;
       ScaffoldMessenger.of(context)
           .showSnackBar(const SnackBar(content: Text("Friend added.")));
-      await _fetchFavorites();
-      await _fetchFriends();
+
+      _closeSearchDropdown(); // close dropdown & keyboard
+
+      // Refresh lists in background
+      await Future.wait([_fetchFavorites(), _fetchFriends()]);
     } catch (e) {
-      print("Error adding friend from search: $e");
+      if (!mounted) return;
+      // print("Error adding friend from search: $e");
       ScaffoldMessenger.of(context)
           .showSnackBar(const SnackBar(content: Text("Error adding friend.")));
     }
@@ -285,21 +314,21 @@ class _FriendsTabState extends State<FriendsTab> {
   Future<void> _addFriend(String friendUserId, String petId) async {
     final currentUser = FirebaseAuth.instance.currentUser;
     if (currentUser == null) return;
+
     try {
-      DocumentSnapshot ownerDoc = await FirebaseFirestore.instance
-          .collection('owners')
+      // Use public profile for display name
+      String ownerName = '';
+      final profileDoc = await FirebaseFirestore.instance
+          .collection('public_profiles')
           .doc(friendUserId)
           .get();
-      String ownerName = "";
-      if (ownerDoc.exists) {
-        final data = ownerDoc.data() as Map<String, dynamic>;
-        String firstName = data['firstName'] ?? data['first_name'] ?? '';
-        String lastName = data['lastName'] ?? data['last_name'] ?? '';
-        ownerName = "$firstName $lastName".trim();
+
+      if (profileDoc.exists) {
+        final data = profileDoc.data() as Map<String, dynamic>;
+        ownerName = (data['displayName'] ?? '').toString().trim();
       }
-      if (ownerName.isEmpty) {
-        ownerName = friendUserId;
-      }
+      if (ownerName.isEmpty) ownerName = friendUserId;
+
       await FirebaseFirestore.instance
           .collection('friends')
           .doc(currentUser.uid)
@@ -310,17 +339,20 @@ class _FriendsTabState extends State<FriendsTab> {
         'ownerName': ownerName,
         'addedAt': FieldValue.serverTimestamp(),
       });
-      await FirebaseFirestore.instance
-          .collection('favorites')
-          .doc(currentUser.uid)
-          .collection('pets')
-          .doc(petId)
-          .set({
-        'petId': petId,
-        'addedAt': FieldValue.serverTimestamp(),
-      });
+
+      if (petId.isNotEmpty) {
+        await FirebaseFirestore.instance
+            .collection('favorites')
+            .doc(currentUser.uid)
+            .collection('pets')
+            .doc(petId)
+            .set({
+          'petId': petId,
+          'addedAt': FieldValue.serverTimestamp(),
+        });
+      }
     } catch (e) {
-      print("Error adding friend: $e");
+      // print("Error adding friend: $e");
       rethrow;
     }
   }
@@ -334,14 +366,16 @@ class _FriendsTabState extends State<FriendsTab> {
           .collection('userFriends')
           .doc(friendUserId)
           .delete();
-      await FirebaseFirestore.instance
-          .collection('favorites')
-          .doc(currentUserId)
-          .collection('pets')
-          .doc(petId)
-          .delete();
+      if (petId.isNotEmpty) {
+        await FirebaseFirestore.instance
+            .collection('favorites')
+            .doc(currentUserId)
+            .collection('pets')
+            .doc(petId)
+            .delete();
+      }
     } catch (e) {
-      print("Error unfriending: $e");
+      // print("Error unfriending: $e");
       rethrow;
     }
   }
@@ -392,6 +426,7 @@ class _FriendsTabState extends State<FriendsTab> {
                     children: [
                       TextField(
                         controller: _searchController,
+                        focusNode: _searchFocusNode,
                         decoration: const InputDecoration(
                           hintText: "Search pet to add as friend",
                           border: OutlineInputBorder(),
@@ -403,9 +438,7 @@ class _FriendsTabState extends State<FriendsTab> {
                           if (value.length >= 2) {
                             _searchPets(value);
                           } else {
-                            setState(() {
-                              _searchResults = [];
-                            });
+                            setState(() => _searchResults = []);
                           }
                         },
                       ),
@@ -422,33 +455,34 @@ class _FriendsTabState extends State<FriendsTab> {
                           ),
                           child: Column(
                             children: _searchResults.map((petData) {
-                              bool alreadyFriend =
-                                  _favoritePetIds.contains(petData['petId']);
+                              final alreadyFriend = _favoritePetIds
+                                  .contains(petData['petId'] as String? ?? "");
                               return ListTile(
                                 leading: CircleAvatar(
                                   backgroundImage: NetworkImage(
-                                    petData['photoUrl'] ??
-                                        'https://via.placeholder.com/100',
+                                    (petData['photoUrl'] ??
+                                            'https://via.placeholder.com/100')
+                                        .toString(),
                                   ),
                                   radius: 18,
                                 ),
-                                title: Text(petData['name'] ?? 'Unknown Pet',
-                                    style: const TextStyle(fontSize: 12)),
+                                title: Text(
+                                  (petData['name'] ?? 'Unknown Pet').toString(),
+                                  style: const TextStyle(fontSize: 12),
+                                ),
                                 subtitle: Text(
-                                    "Owner: ${petData['ownerName'] ?? 'Unknown'}",
-                                    style: const TextStyle(fontSize: 10)),
+                                  "Owner: ${(petData['ownerName'] ?? 'Unknown').toString()}",
+                                  style: const TextStyle(fontSize: 10),
+                                ),
                                 trailing: alreadyFriend
                                     ? const Icon(Icons.favorite,
                                         color: Colors.red, size: 18)
                                     : IconButton(
                                         icon: const Icon(Icons.favorite_border,
                                             color: Colors.red, size: 18),
-                                        onPressed: () {
-                                          _addFriendFromSearch(petData);
-                                          setState(() {
-                                            _searchResults = [];
-                                            _searchController.clear();
-                                          });
+                                        onPressed: () async {
+                                          await _addFriendFromSearch(petData);
+                                          // Dropdown closes inside _addFriendFromSearch on success
                                         },
                                       ),
                               );
@@ -465,8 +499,8 @@ class _FriendsTabState extends State<FriendsTab> {
                           padding: const EdgeInsets.only(bottom: 70),
                           itemCount: filteredFriendIds.length,
                           itemBuilder: (context, index) {
-                            String friendId = filteredFriendIds[index];
-                            String ownerName =
+                            final friendId = filteredFriendIds[index];
+                            final ownerName =
                                 _friendOwnerNames[friendId] ?? "Unknown";
                             final activePark = _activeParkMapping[friendId];
                             final pets = _friendPets[friendId] ?? [];
@@ -486,8 +520,9 @@ class _FriendsTabState extends State<FriendsTab> {
                                     CircleAvatar(
                                       backgroundImage: NetworkImage(
                                         pets.isNotEmpty
-                                            ? pets[0]['photoUrl'] ??
-                                                'https://via.placeholder.com/100'
+                                            ? (pets[0]['photoUrl'] ??
+                                                    'https://via.placeholder.com/100')
+                                                .toString()
                                             : 'https://via.placeholder.com/100',
                                       ),
                                       radius: 30,
@@ -521,8 +556,18 @@ class _FriendsTabState extends State<FriendsTab> {
                                                 friendId, petId),
                                           )
                                         : ElevatedButton(
-                                            onPressed: () =>
-                                                _addFriend(friendId, petId),
+                                            onPressed: () async {
+                                              await _addFriend(friendId, petId);
+                                              if (!mounted) return;
+                                              ScaffoldMessenger.of(context)
+                                                  .showSnackBar(const SnackBar(
+                                                      content: Text(
+                                                          "Friend added.")));
+                                              await Future.wait([
+                                                _fetchFavorites(),
+                                                _fetchFriends()
+                                              ]);
+                                            },
                                             child: const Text("Add Friend",
                                                 style: TextStyle(fontSize: 10)),
                                           ),

@@ -114,6 +114,16 @@ class _ParksTabState extends State<ParksTab> {
     }
   }
 
+  String _checkedInForSince(DateTime since) {
+    final diff = DateTime.now().difference(since);
+    final mins = diff.inMinutes;
+    if (mins < 1) return "< 1 min";
+    if (mins < 60) return "$mins min";
+    final hrs = diff.inHours;
+    final rem = mins - hrs * 60;
+    return rem == 0 ? "$hrs hr" : "$hrs hr $rem min";
+  }
+
   // ---------- Nearby (FAST first, then precise) ----------
   Future<void> _fetchNearbyParksFast() async {
     // Try cached/last-known location for instant results.
@@ -215,11 +225,8 @@ class _ParksTabState extends State<ParksTab> {
     if (uid == null) return;
 
     final db = FirebaseFirestore.instance;
-    final userRef = db
-        .collection('parks')
-        .doc(parkId)
-        .collection('active_users')
-        .doc(uid);
+    final userRef =
+        db.collection('parks').doc(parkId).collection('active_users').doc(uid);
 
     await db.runTransaction((tx) async {
       final snap = await tx.get(userRef);
@@ -233,11 +240,8 @@ class _ParksTabState extends State<ParksTab> {
     if (uid == null) return;
 
     final db = FirebaseFirestore.instance;
-    final userRef = db
-        .collection('parks')
-        .doc(parkId)
-        .collection('active_users')
-        .doc(uid);
+    final userRef =
+        db.collection('parks').doc(parkId).collection('active_users').doc(uid);
 
     await db.runTransaction((tx) async {
       final snap = await tx.get(userRef);
@@ -310,15 +314,15 @@ class _ParksTabState extends State<ParksTab> {
           .get();
 
       // index check-in times by owner
-      final checkInByOwner = <String, String>{};
+      final checkedInForByOwner = <String, String>{};
       for (final u in activeUsersSnapshot.docs) {
         final ts = (u.data()['checkedInAt']);
-        String timeStr = '';
+        String sinceStr = '';
         if (ts != null) {
           final dt = (ts as Timestamp).toDate();
-          timeStr = DateFormat.jm().format(dt);
+          sinceStr = _checkedInForSince(dt);
         }
-        checkInByOwner[u.id] = timeStr;
+        checkedInForByOwner[u.id] = sinceStr;
       }
 
       for (final petDoc in petsSnapshot.docs) {
@@ -329,7 +333,7 @@ class _ParksTabState extends State<ParksTab> {
           'petPhotoUrl': pet['photoUrl'] ?? '',
           'ownerId': ownerId,
           'petId': petDoc.id,
-          'checkInTime': checkInByOwner[ownerId] ?? '',
+          'checkInTime': checkedInForByOwner[ownerId] ?? '',
         });
       }
     }
@@ -371,7 +375,8 @@ class _ParksTabState extends State<ParksTab> {
               if (ownerDoc.exists) {
                 final data = ownerDoc.data() as Map<String, dynamic>;
                 ownerName =
-                    "${data['firstName'] ?? ''} ${data['lastName'] ?? ''}".trim();
+                    "${data['firstName'] ?? ''} ${data['lastName'] ?? ''}"
+                        .trim();
               }
               if (ownerName.isEmpty) ownerName = ownerId;
 
