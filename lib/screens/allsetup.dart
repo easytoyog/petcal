@@ -67,7 +67,7 @@ class AllSetUpScreen extends StatelessWidget {
                     ),
                   ),
                   onPressed: () {
-                    Navigator.pushNamed(context, '/profile');
+                    Navigator.pushReplacementNamed(context, '/profile');
                   },
                   child: const Text(
                     "Let's go In The Park",
