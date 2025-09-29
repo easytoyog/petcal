@@ -500,7 +500,7 @@ class _EventsTabState extends State<EventsTab> {
                 ),
                 const SizedBox(height: 12),
                 if ((e.description ?? '').trim().isNotEmpty)
-                  Text(e.description!.trim(), style: const TextStyle(fontSize: 14)),
+                  Text(e.description.trim(), style: const TextStyle(fontSize: 14)),
                 const SizedBox(height: 16),
                 Row(
                   children: [

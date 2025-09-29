@@ -21,8 +21,8 @@ android {
         applicationId "ca.inthepark"
         minSdkVersion 23
         targetSdkVersion 35
-        versionCode 3
-        versionName "1.0.3"
+        versionCode 5
+        versionName "1.0.5"
     }
 
     compileOptions {
