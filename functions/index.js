@@ -433,3 +433,141 @@ exports.mirrorOwnerToPublicProfile = onDocumentWritten(
     await pubRef.set(publicData, { merge: true });
   }
 );
+
+// Top of file with your other imports:
+const { DateTime } = require("luxon");
+
+// ---- Helpers for timezone day window + formatting ----
+function todayWindowInTz(tz) {
+  const now = DateTime.now().setZone(tz || "UTC");
+  const start = now.startOf("day");
+  const end = start.plus({ days: 1 });
+  return {
+    start: start.toJSDate(),
+    end: end.toJSDate(),
+    todayKey: start.toFormat("yyyy-LL-dd"),
+    now, // keep luxon object for hour/min
+  };
+}
+
+async function sumStepsForUserDay(uid, start, end) {
+  const snap = await db
+    .collection("owners").doc(uid)
+    .collection("walks")
+    .where("endedAt", ">=", start)
+    .where("endedAt", "<", end)
+    .select("steps") // bandwidth-friendly
+    .get();
+
+  let steps = 0;
+  snap.forEach(d => {
+    const n = d.get("steps");
+    if (typeof n === "number" && isFinite(n)) steps += n;
+  });
+  return steps;
+}
+
+async function alreadySentToday(uid, todayKey) {
+  const doc = await db
+    .collection("owners").doc(uid)
+    .collection("stats").doc("dailyStepsNudge")
+    .get();
+  return doc.exists && doc.get("lastSentDay") === todayKey;
+}
+
+async function markSent(uid, todayKey, tz) {
+  await db.collection("owners").doc(uid)
+    .collection("stats").doc("dailyStepsNudge")
+    .set({
+      lastSentDay: todayKey,
+      lastSentAt: admin.firestore.FieldValue.serverTimestamp(),
+      tz: tz || "UTC",
+    }, { merge: true });
+}
+
+function buildMessage(steps) {
+  if (steps > 0) {
+    return `🐶💥 Woohoo! You and your pup crushed ${steps.toLocaleString()} steps today! 🐾 Keep the zoomies going!`;
+  }
+  // Upbeat prompt when there were no walks today
+  return "🐾 You haven’t taken a walk yet today — quick lap time! Even 10 minutes counts. Let’s go! 🐕💨";
+}
+
+// ---- Scheduled sender: every 5 min; deliver at ~9:00–9:09pm local time ----
+exports.sendDailyStepsRecap = onSchedule(
+  { schedule: "every 5 minutes", timeZone: "UTC" },
+  async () => {
+    // Get all owners who can receive pushes and opted in
+    const ownersSnap = await db.collection("owners")
+      .where("fcmToken", "!=", null)           // token present
+      .get();
+
+    const owners = ownersSnap.docs.filter(d => {
+      const data = d.data() || {};
+      // default ON unless explicitly false
+      return data.dailyStepsOptIn !== false && typeof data.fcmToken === "string" && data.fcmToken.trim();
+    });
+
+    // Process in small parallel chunks
+    const chunkSize = 50;
+    for (let i = 0; i < owners.length; i += chunkSize) {
+      const chunk = owners.slice(i, i + chunkSize);
+      await Promise.all(chunk.map(async (doc) => {
+        const uid = doc.id;
+        const data = doc.data() || {};
+        const tz = typeof data.tz === "string" && data.tz ? data.tz : "UTC";
+        const token = data.fcmToken;
+
+        // Determine local time window for this user
+        let win = todayWindowInTz(tz);
+        if (!win.now.isValid) {
+          win = todayWindowInTz("UTC");
+        }
+
+        // Only send between 21:00–21:09 local time, and only once per day
+        if (win.now.hour !== 21 || win.now.minute >= 10) return;
+        if (await alreadySentToday(uid, win.todayKey)) return;
+
+        // Sum today's steps from walks
+        const steps = await sumStepsForUserDay(uid, win.start, win.end);
+
+        // Build and send notification
+        const body = buildMessage(steps);
+        try {
+          await getMessaging().send({
+            token,
+            notification: {
+              title: "🎉 Daily Dog Walk Recap",
+              body,
+            },
+            data: {
+              type: "daily_steps",
+              day: win.todayKey,
+              steps: String(steps),
+              click_action: "FLUTTER_NOTIFICATION_CLICK",
+            },
+            android: {
+              notification: {
+                channelId: "daily_reminders", // create this channel in-app for nicer behavior
+                priority: "HIGH",
+              },
+            },
+            apns: {
+              payload: {
+                aps: {
+                  sound: "default",
+                  badge: 1,
+                },
+              },
+            },
+          });
+          await markSent(uid, win.todayKey, tz);
+        } catch (e) {
+          console.error("Failed sending daily steps to", uid, e);
+          // Don't mark as sent on failure
+        }
+      }));
+    }
+    return null;
+  }
+);

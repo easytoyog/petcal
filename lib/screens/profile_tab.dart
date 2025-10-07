@@ -1003,17 +1003,26 @@ class _ProfileTabState extends State<ProfileTab> {
                       ),
                     const SizedBox(height: 16),
 
-// NEW: Walks button
-                    ElevatedButton.icon(
+                    // NEW: Walks button
+                    ElevatedButton(
                       onPressed: _openWalksList,
-                      icon: const Icon(Icons.directions_walk),
-                      label: const Text("My Walks"),
                       style: ElevatedButton.styleFrom(
                         backgroundColor: Colors.tealAccent,
                         foregroundColor: Colors.black,
                         minimumSize: const Size.fromHeight(48),
                       ),
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.directions_walk),
+                          SizedBox(width: 6),
+                          Icon(Icons.pets), // paw icon
+                          SizedBox(width: 8),
+                          Text("My Walks"),
+                        ],
+                      ),
                     ),
+
                     const SizedBox(height: 32),
 
                     // Feedback button

@@ -41,6 +41,9 @@ import 'package:inthepark/screens/allsetup.dart';
 import 'package:inthepark/screens/forgot_password_screen.dart';
 import 'package:inthepark/screens/wait_screen.dart';
 
+// Saves tz + dailyStepsOptIn + updatedAt (and you can extend it as needed)
+import 'package:inthepark/services/notification_prefs.dart';
+
 bool _appCheckActivated = false;
 
 /// Configure Mobile Ads (test devices in debug, content rating, etc.)
@@ -122,8 +125,17 @@ Future<void> main() async {
       sound: true,
     );
 
+    // Persist FCM token and attach refresh listener if user already signed in
+    await _ensureFcmTokenPersistenceForSignedInUser();
+
     // ✅ Ads consent
     await _gatherConsentIfNeeded();
+
+    // If already signed-in at launch, save tz + opt-in so CF can schedule 9pm push
+    final existing = FirebaseAuth.instance.currentUser;
+    if (existing != null) {
+      await upsertNotificationPrefs();
+    }
   } catch (e, stack) {
     print("🔥 Startup error: $e");
     print("$stack");
@@ -133,6 +145,30 @@ Future<void> main() async {
   runApp(UpdateGateRoot(
     appBuilder: (context) => const MyApp(),
   ));
+}
+
+Future<void> _ensureFcmTokenPersistenceForSignedInUser() async {
+  final user = FirebaseAuth.instance.currentUser;
+  if (user == null) return;
+
+  final messaging = FirebaseMessaging.instance;
+
+  // Save current token
+  final token = await messaging.getToken();
+  if (token != null) {
+    await FirebaseFirestore.instance
+        .collection('owners')
+        .doc(user.uid)
+        .set({'fcmToken': token}, SetOptions(merge: true));
+  }
+
+  // Keep it updated
+  messaging.onTokenRefresh.listen((t) async {
+    await FirebaseFirestore.instance
+        .collection('owners')
+        .doc(user.uid)
+        .set({'fcmToken': t}, SetOptions(merge: true));
+  });
 }
 
 /// ───────────────────────────────────────────────────────────────────────────
@@ -410,9 +446,6 @@ class _SoftUpdateBannerState extends State<_SoftUpdateBanner> {
             kReleaseMode ? const Duration(minutes: 30) : Duration.zero,
       ));
 
-      // Do NOT need to setDefaults again (already set in root), but it's fine if you do:
-      // await rc.setDefaults(...);
-
       await rc.fetchAndActivate();
 
       final recBuild = _getInt(rc, 'recommended_build');
@@ -557,7 +590,7 @@ class _ForceUpdateScreen extends StatelessWidget {
 }
 
 /// ───────────────────────────────────────────────────────────────────────────
-/// Your login screen (unchanged except for context here)
+/// Login
 /// ───────────────────────────────────────────────────────────────────────────
 
 class ModernLoginScreen extends StatefulWidget {
@@ -601,8 +634,8 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
     final messaging = FirebaseMessaging.instance;
     try {
       final settings = await messaging.getNotificationSettings();
-      if (settings.authorizationStatus.name == 'authorized' ||
-          settings.authorizationStatus.name == 'provisional') {
+      if (settings.authorizationStatus == AuthorizationStatus.authorized ||
+          settings.authorizationStatus == AuthorizationStatus.provisional) {
         _tokenSub = messaging.onTokenRefresh.listen((token) async {
           await FirebaseFirestore.instance
               .collection('owners')
@@ -669,6 +702,7 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
         }
 
         await saveUserFcmToken(user);
+        await upsertNotificationPrefs();
 
         if (!mounted) return user;
         Navigator.of(context).pushReplacementNamed('/profile');
@@ -679,14 +713,17 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text("No user found with this email.")),
           );
+          break;
         case "wrong-password":
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text("Incorrect password.")),
           );
+          break;
         default:
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text("Login error: ${e.message}")),
           );
+          break;
       }
     }
     return user;
