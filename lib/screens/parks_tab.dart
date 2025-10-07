@@ -541,7 +541,7 @@ class _ParksTabState extends State<ParksTab> {
     final isCheckedIn = _checkedInParkIds.contains(parkId);
     final isBusy = _mutatingParkId == parkId;
 
-    IconData _serviceIcon(String s) {
+    IconData serviceIcon(String s) {
       if (s == "Off-leash Dog Park") return Icons.pets;
       if (s == "Off-leash Trail") return Icons.terrain;
       if (s == "Off-leash Beach") return Icons.beach_access;
@@ -589,7 +589,7 @@ class _ParksTabState extends State<ParksTab> {
                   children: services.map((s) {
                     return Chip(
                       avatar:
-                          Icon(_serviceIcon(s), size: 16, color: Colors.green),
+                          Icon(serviceIcon(s), size: 16, color: Colors.green),
                       label: Text(s, style: const TextStyle(fontSize: 12)),
                       backgroundColor: Colors.green[50],
                       materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,

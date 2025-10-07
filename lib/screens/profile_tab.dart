@@ -175,7 +175,7 @@ class _ProfileTabState extends State<ProfileTab> {
         .doc('walkStreak')
         .snapshots();
 
-    String _days(int n) => '$n day${n == 1 ? '' : 's'}';
+    String days(int n) => '$n day${n == 1 ? '' : 's'}';
 
     return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
       stream: doc,
@@ -225,13 +225,13 @@ class _ProfileTabState extends State<ProfileTab> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'Current Streak: ${_days(current)}',
+                      'Current Streak: ${days(current)}',
                       style: const TextStyle(
                           fontSize: 16, fontWeight: FontWeight.w800),
                     ),
                     const SizedBox(height: 2),
                     Text(
-                      'Best: ${_days(longest)}',
+                      'Best: ${days(longest)}',
                       style: TextStyle(
                         color: Colors.black.withOpacity(0.7),
                         fontWeight: FontWeight.w600,
@@ -1858,11 +1858,9 @@ class _WalkDetailScreenState extends State<WalkDetailScreen> {
             case 'pee':
               icon = _peeIcon!;
               title = 'Pee';
-              break;
             case 'poop':
               icon = _poopIcon!;
               title = 'Poop';
-              break;
             default:
               icon = _cautionIcon!;
               title = 'Caution';

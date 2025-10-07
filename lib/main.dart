@@ -679,12 +679,10 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text("No user found with this email.")),
           );
-          break;
         case "wrong-password":
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text("Incorrect password.")),
           );
-          break;
         default:
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text("Login error: ${e.message}")),

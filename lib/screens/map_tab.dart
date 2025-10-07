@@ -512,15 +512,12 @@ class _MapTabState extends State<MapTab>
       case 'pee':
         iconBitmap = _peeIcon!;
         title = 'Pee';
-        break;
       case 'poop':
         iconBitmap = _poopIcon!;
         title = 'Poop';
-        break;
       default:
         iconBitmap = _cautionIcon!;
         title = 'Caution';
-        break;
     }
 
     final id = 'note_${_noteSeq++}';
@@ -856,11 +853,9 @@ class _MapTabState extends State<MapTab>
           case 'pee':
             icon = _peeIcon!;
             title = 'Pee';
-            break;
           case 'poop':
             icon = _poopIcon!;
             title = 'Poop';
-            break;
           default:
             icon = _cautionIcon!;
             title = 'Caution';
@@ -1462,8 +1457,7 @@ class _MapTabState extends State<MapTab>
           for (final ownerId in batchIds) {
             final userDoc =
                 usersSnapshot.docs.firstWhere((d) => d.id == ownerId);
-            final checkInTime = (userDoc.data()
-                as Map<String, dynamic>)['checkedInAt'] as Timestamp?;
+            final checkInTime = (userDoc.data())['checkedInAt'] as Timestamp?;
             final ownerPets = petsByOwner[ownerId] ?? [];
 
             final prof = profiles[ownerId];

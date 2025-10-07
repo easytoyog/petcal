@@ -106,7 +106,7 @@ class _FriendsTabState extends State<FriendsTab> {
           .where('ownerId', whereIn: batch)
           .get();
       for (var doc in petSnapshot.docs) {
-        final data = doc.data() as Map<String, dynamic>;
+        final data = doc.data();
         final ownerId = (data['ownerId'] ?? '').toString();
         data['petId'] = doc.id;
         data['name'] = data['name'] ?? 'Unknown Pet';
@@ -138,7 +138,7 @@ class _FriendsTabState extends State<FriendsTab> {
           .get();
 
       for (final doc in snapshot.docs) {
-        final data = doc.data() as Map<String, dynamic>;
+        final data = doc.data();
         final dn = (data['displayName'] ?? '').toString().trim();
         names[doc.id] = dn.isEmpty ? 'Unknown' : dn;
       }
@@ -200,7 +200,7 @@ class _FriendsTabState extends State<FriendsTab> {
           await FirebaseFirestore.instance.collection('pets').get();
 
       final pets = petSnapshot.docs.map((d) {
-        final m = d.data() as Map<String, dynamic>;
+        final m = d.data();
         m['petId'] = d.id;
         return m;
       }).where((m) {
@@ -229,7 +229,7 @@ class _FriendsTabState extends State<FriendsTab> {
             .get();
 
         for (final d in ownerPetsSnap.docs) {
-          final m = d.data() as Map<String, dynamic>;
+          final m = d.data();
           m['petId'] = d.id;
           ownerPetResults.add(m);
         }

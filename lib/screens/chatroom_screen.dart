@@ -469,7 +469,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
         if (petsSnap.docs.isNotEmpty) {
           QueryDocumentSnapshot? mainPet;
           for (final d in petsSnap.docs) {
-            final mp = d.data() as Map<String, dynamic>;
+            final mp = d.data();
             if (mp['isMain'] == true) {
               mainPet = d;
               break;
