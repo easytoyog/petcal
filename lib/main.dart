@@ -1,17 +1,34 @@
 // main.dart
 
 import 'dart:async';
+import 'dart:io';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_app_check/firebase_app_check.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:firebase_remote_config/firebase_remote_config.dart';
 
 import 'package:flutter/foundation.dart' show kReleaseMode;
 import 'package:flutter/material.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:package_info_plus/package_info_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
+
+// Google Mobile Ads (alias to avoid UMP symbol clashes)
+import 'package:google_mobile_ads/google_mobile_ads.dart' as gma
+    show MobileAds, RequestConfiguration, MaxAdContentRating;
+
+// UMP (User Messaging Platform) classes (un-aliased)
+import 'package:google_mobile_ads/google_mobile_ads.dart'
+    show
+        ConsentInformation,
+        ConsentRequestParameters,
+        ConsentForm,
+        ConsentDebugSettings,
+        DebugGeography;
 
 // Screens
 import 'package:inthepark/screens/profile_screen.dart';
@@ -24,23 +41,6 @@ import 'package:inthepark/screens/allsetup.dart';
 import 'package:inthepark/screens/forgot_password_screen.dart';
 import 'package:inthepark/screens/wait_screen.dart';
 
-// Google Mobile Ads: keep SDK import separate to avoid UMP symbol clashes
-import 'package:google_mobile_ads/google_mobile_ads.dart' as gma
-    show MobileAds, RequestConfiguration, MaxAdContentRating;
-
-// UMP (User Messaging Platform) classes (same package, but un-aliased)
-import 'package:google_mobile_ads/google_mobile_ads.dart'
-    show
-        ConsentInformation,
-        ConsentRequestParameters,
-        ConsentForm,
-        ConsentDebugSettings,
-        DebugGeography;
-
-import 'dart:async';
-import 'package:google_mobile_ads/google_mobile_ads.dart'
-    show ConsentInformation, ConsentRequestParameters, ConsentForm;
-
 bool _appCheckActivated = false;
 
 /// Configure Mobile Ads (test devices in debug, content rating, etc.)
@@ -49,7 +49,6 @@ Future<void> _configureMobileAds() async {
     gma.RequestConfiguration(
       testDeviceIds: kReleaseMode ? const <String>[] : const <String>[],
       maxAdContentRating: gma.MaxAdContentRating.pg,
-      // Optionally set child-directed flags here if applicable.
     ),
   );
 }
@@ -58,20 +57,19 @@ Future<void> _gatherConsentIfNeeded() async {
   final completer = Completer<void>();
   final consentInfo = ConsentInformation.instance;
 
-  // ✅ Your API version: callback-based and returns void
   consentInfo.requestConsentInfoUpdate(
     ConsentRequestParameters(
+        // For testing:
         // consentDebugSettings: ConsentDebugSettings(
         //   debugGeography: DebugGeography.debugGeographyEea,
         //   testIdentifiers: ['YOUR-TEST-DEVICE-HASHED-ID'],
         // ),
         ),
     () async {
-      // Success: now load & show if required (also callback-style)
       ConsentForm.loadAndShowConsentFormIfRequired((formError) async {
         if (formError != null) {
-          debugPrint(
-              'UMP form error: ${formError.errorCode}: ${formError.message}');
+          print(
+              '🟠 UMP form error: ${formError.errorCode}: ${formError.message}');
         }
         final canRequest = await consentInfo.canRequestAds();
         if (canRequest) {
@@ -82,8 +80,7 @@ Future<void> _gatherConsentIfNeeded() async {
       });
     },
     (err) async {
-      // Failure path: you might still be allowed to request ads from prior consent
-      debugPrint('Consent update error: ${err.errorCode}: ${err.message}');
+      print('🟠 Consent update error: ${err.errorCode}: ${err.message}');
       final canRequest = await consentInfo.canRequestAds();
       if (canRequest) {
         await _configureMobileAds();
@@ -100,9 +97,7 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   try {
-    // dotenv is optional — tolerate missing file in release
     await dotenv.load(fileName: '.env').catchError((_) {});
-
     await Firebase.initializeApp();
 
     // ✅ App Check
@@ -127,23 +122,29 @@ Future<void> main() async {
       sound: true,
     );
 
-    // ✅ Gather consent first; if allowed, this will init Mobile Ads inside
+    // ✅ Ads consent
     await _gatherConsentIfNeeded();
   } catch (e, stack) {
-    // Don’t block startup if anything above fails
-    debugPrint("🔥 Startup error: $e");
-    debugPrint("$stack");
+    print("🔥 Startup error: $e");
+    print("$stack");
   }
 
-  runApp(const MyApp());
+  // 🔐 Hard gate BEFORE building your app
+  runApp(UpdateGateRoot(
+    appBuilder: (context) => const MyApp(),
+  ));
 }
+
+/// ───────────────────────────────────────────────────────────────────────────
+/// Your app
+/// ───────────────────────────────────────────────────────────────────────────
 
 class MyApp extends StatelessWidget {
   const MyApp({Key? key}) : super(key: key);
 
   @override
   Widget build(BuildContext context) {
-    debugPrint("✅ MyApp is building...");
+    print("✅ MyApp.build");
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
@@ -154,22 +155,23 @@ class MyApp extends StatelessWidget {
         ),
         textTheme: GoogleFonts.nunitoTextTheme(),
       ),
+
+      // Optional: keep a soft-update banner inside the app as well
+      builder: (context, child) => _SoftUpdateBanner(child: child),
+
       home: StreamBuilder<User?>(
         stream: FirebaseAuth.instance.authStateChanges(),
         builder: (context, snapshot) {
-          // Auth stream booting
           if (snapshot.connectionState == ConnectionState.waiting) {
             return const Scaffold(
               body: Center(child: CircularProgressIndicator()),
             );
           }
-          // Logged in
           if (snapshot.hasData) {
             final user = snapshot.data!;
             if (!user.emailVerified) {
               return WaitForEmailVerificationScreen(user: user);
             }
-            // Load profile minimal fields before home
             return FutureBuilder<DocumentSnapshot>(
               future: FirebaseFirestore.instance
                   .collection('owners')
@@ -205,7 +207,6 @@ class MyApp extends StatelessWidget {
               },
             );
           }
-          // Logged out
           return const ModernLoginScreen();
         },
       ),
@@ -226,6 +227,338 @@ class MyApp extends StatelessWidget {
     );
   }
 }
+
+/// ───────────────────────────────────────────────────────────────────────────
+/// HARD gate: blocks the app if build < min_supported_build
+/// (Runs BEFORE your app builds; prints diagnostics)
+/// ───────────────────────────────────────────────────────────────────────────
+
+class UpdateGateRoot extends StatefulWidget {
+  final WidgetBuilder appBuilder;
+  const UpdateGateRoot({super.key, required this.appBuilder});
+
+  @override
+  State<UpdateGateRoot> createState() => _UpdateGateRootState();
+}
+
+class _UpdateGateRootState extends State<UpdateGateRoot> {
+  bool _checking = true;
+  bool _force = false;
+  bool _soft = false;
+  String _msg = 'Please update the app';
+  String? _url; // iOS App Store URL
+
+  @override
+  void initState() {
+    super.initState();
+    _check();
+  }
+
+  int _getInt(FirebaseRemoteConfig rc, String base) {
+    final unified = rc.getValue(base);
+    if (unified.source != ValueSource.valueDefault) return unified.asInt();
+    return rc.getInt('${base}_ios'); // fallback if you created *_ios keys
+  }
+
+  String _getStr(FirebaseRemoteConfig rc, String base) {
+    final unified = rc.getValue(base);
+    if (unified.source != ValueSource.valueDefault) {
+      return unified.asString().trim();
+    }
+    return rc.getString('${base}_ios').trim();
+  }
+
+  Future<void> _check() async {
+    try {
+      final info = await PackageInfo.fromPlatform();
+      final currentBuild = int.tryParse(info.buildNumber) ?? 0;
+
+      final rc = FirebaseRemoteConfig.instance;
+      await rc.setConfigSettings(RemoteConfigSettings(
+        fetchTimeout: const Duration(seconds: 10),
+        minimumFetchInterval:
+            kReleaseMode ? const Duration(minutes: 30) : Duration.zero,
+      ));
+      await rc.setDefaults(const {
+        'min_supported_build': 0,
+        'recommended_build': 0,
+        'latest_store_url': '',
+        'update_message': 'Please update the app',
+        // Optional fallbacks if you kept ios-suffixed params:
+        'min_supported_build_ios': 0,
+        'recommended_build_ios': 0,
+        'latest_store_url_ios': '',
+        'update_message_ios': 'Please update the app',
+      });
+
+      final fetched = await rc.fetchAndActivate();
+
+      print('🔧 projectId: ${Firebase.app().options.projectId}');
+      print('🔧 fetched=$fetched lastFetch=${rc.lastFetchTime}');
+
+      final minBuild = _getInt(rc, 'min_supported_build');
+      final recBuild = _getInt(rc, 'recommended_build');
+      final url = _getStr(rc, 'latest_store_url');
+      final msg = _getStr(rc, 'update_message');
+
+      print('🔧 buildNumber(current)=$currentBuild');
+      print('🔧 values -> min=$minBuild rec=$recBuild url="$url" msg="$msg"');
+
+      final force = currentBuild < minBuild;
+      final soft = !force && currentBuild < recBuild;
+
+      setState(() {
+        _checking = false;
+        _force = force;
+        _soft = soft;
+        _url = url.isEmpty ? null : url;
+        _msg = msg.isEmpty ? _msg : msg;
+      });
+
+      print('🔧 computed -> force=$_force soft=$_soft url=$_url');
+    } catch (e, st) {
+      print('⚠️ UpdateGateRoot error: $e\n$st');
+      setState(() => _checking = false); // fail-open on RC error
+    }
+  }
+
+  Future<void> _openStore() async {
+    if (Platform.isIOS) {
+      if (_url == null) return;
+      final itms = Uri.parse(_url!.replaceFirst('https://', 'itms-apps://'));
+      final https = Uri.parse(_url!);
+      if (await canLaunchUrl(itms)) {
+        await launchUrl(itms, mode: LaunchMode.externalApplication);
+      } else {
+        await launchUrl(https, mode: LaunchMode.externalApplication);
+      }
+      return;
+    }
+    final pkg = (await PackageInfo.fromPlatform()).packageName;
+    final market = Uri.parse('market://details?id=$pkg');
+    final web = Uri.parse('https://play.google.com/store/apps/details?id=$pkg');
+    if (await canLaunchUrl(market)) {
+      await launchUrl(market, mode: LaunchMode.externalApplication);
+    } else {
+      await launchUrl(web, mode: LaunchMode.externalApplication);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_checking) {
+      return const MaterialApp(
+        home: Scaffold(body: Center(child: CircularProgressIndicator())),
+      );
+    }
+    if (_force) {
+      return MaterialApp(
+        home: _ForceUpdateScreen(message: _msg, onUpdate: _openStore),
+      );
+    }
+    // Pass-through to your real app (soft banner handled inside MyApp)
+    return widget.appBuilder(context);
+  }
+}
+
+/// ───────────────────────────────────────────────────────────────────────────
+/// SOFT banner inside your app (non-blocking)
+/// ───────────────────────────────────────────────────────────────────────────
+
+class _SoftUpdateBanner extends StatefulWidget {
+  final Widget? child;
+  const _SoftUpdateBanner({this.child});
+
+  @override
+  State<_SoftUpdateBanner> createState() => _SoftUpdateBannerState();
+}
+
+class _SoftUpdateBannerState extends State<_SoftUpdateBanner> {
+  bool _show = false;
+  String _message = 'A new version is available.';
+  String? _url;
+
+  int _getInt(FirebaseRemoteConfig rc, String base) {
+    final unified = rc.getValue(base);
+    if (unified.source != ValueSource.valueDefault) return unified.asInt();
+    return rc.getInt('${base}_ios');
+  }
+
+  String _getStr(FirebaseRemoteConfig rc, String base) {
+    final unified = rc.getValue(base);
+    if (unified.source != ValueSource.valueDefault) {
+      return unified.asString().trim();
+    }
+    return rc.getString('${base}_ios').trim();
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _checkSoft();
+  }
+
+  Future<void> _checkSoft() async {
+    try {
+      final info = await PackageInfo.fromPlatform();
+      final currentBuild = int.tryParse(info.buildNumber) ?? 0;
+
+      final rc = FirebaseRemoteConfig.instance;
+      await rc.setConfigSettings(RemoteConfigSettings(
+        fetchTimeout: const Duration(seconds: 10),
+        minimumFetchInterval:
+            kReleaseMode ? const Duration(minutes: 30) : Duration.zero,
+      ));
+
+      // Do NOT need to setDefaults again (already set in root), but it's fine if you do:
+      // await rc.setDefaults(...);
+
+      await rc.fetchAndActivate();
+
+      final recBuild = _getInt(rc, 'recommended_build');
+      final url = _getStr(rc, 'latest_store_url');
+      final msg = _getStr(rc, 'update_message');
+
+      final soft = currentBuild < recBuild;
+
+      if (!mounted) return;
+      setState(() {
+        _show = soft && url.isNotEmpty;
+        _url = url.isEmpty ? null : url;
+        _message = msg.isEmpty ? _message : msg;
+      });
+
+      print('🔔 softBanner -> current=$currentBuild rec=$recBuild show=$_show');
+    } catch (e) {
+      // ignore banner errors
+    }
+  }
+
+  Future<void> _openStore() async {
+    if (_url == null) return;
+    final uri = Uri.parse(_url!);
+    if (await canLaunchUrl(uri)) {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final child = widget.child ?? const SizedBox.shrink();
+    if (!_show) return child;
+
+    return Stack(
+      children: [
+        child,
+        SafeArea(
+          child: Align(
+            alignment: Alignment.topCenter,
+            child: Material(
+              elevation: 6,
+              color: Colors.orange.shade700,
+              borderRadius:
+                  const BorderRadius.vertical(bottom: Radius.circular(12)),
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.system_update, color: Colors.white),
+                    const SizedBox(width: 10),
+                    Flexible(
+                      child: Text(
+                        _message,
+                        style: const TextStyle(
+                            color: Colors.white, fontWeight: FontWeight.w600),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    TextButton(
+                      onPressed: _openStore,
+                      child: const Text('Update',
+                          style: TextStyle(color: Colors.white)),
+                    ),
+                    TextButton(
+                      onPressed: () => setState(() => _show = false),
+                      child: const Text('Later',
+                          style: TextStyle(color: Colors.white70)),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+/// ───────────────────────────────────────────────────────────────────────────
+/// Shared Force Update screen
+/// ───────────────────────────────────────────────────────────────────────────
+
+class _ForceUpdateScreen extends StatelessWidget {
+  final String message;
+  final VoidCallback onUpdate;
+  const _ForceUpdateScreen({required this.message, required this.onUpdate});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Container(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            colors: [Color(0xFF567D46), Color(0xFF365A38)],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
+        ),
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 420),
+            child: Card(
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16)),
+              margin: const EdgeInsets.all(24),
+              child: Padding(
+                padding: const EdgeInsets.all(20),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.system_update, size: 64),
+                    const SizedBox(height: 12),
+                    Text('Update Required',
+                        style: Theme.of(context).textTheme.headlineSmall),
+                    const SizedBox(height: 8),
+                    Text(
+                      message,
+                      textAlign: TextAlign.center,
+                      style: const TextStyle(fontSize: 16),
+                    ),
+                    const SizedBox(height: 16),
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton(
+                        onPressed: onUpdate,
+                        child: const Text('Update Now'),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// ───────────────────────────────────────────────────────────────────────────
+/// Your login screen (unchanged except for context here)
+/// ───────────────────────────────────────────────────────────────────────────
 
 class ModernLoginScreen extends StatefulWidget {
   const ModernLoginScreen({Key? key}) : super(key: key);
@@ -259,7 +592,6 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
         password: passwordController.text,
         context: context,
       );
-      // If login navigates away, the setState below won't run (that's fine).
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
@@ -286,10 +618,10 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
               .set({'fcmToken': token}, SetOptions(merge: true));
         }
       } else {
-        debugPrint('User declined or has not accepted notification permission');
+        print('🔕 Notifications permission not granted');
       }
     } catch (e) {
-      debugPrint('FCM token error: $e');
+      print('🟠 FCM token error: $e');
     }
   }
 
@@ -365,7 +697,7 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
   @override
   Widget build(BuildContext context) {
     final screenWidth = MediaQuery.of(context).size.width;
-    debugPrint("✅ ModernLoginScreen is building...");
+    print("✅ ModernLoginScreen.build");
     return Scaffold(
       body: Stack(
         children: [
@@ -450,7 +782,7 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
                           ),
                         ),
                       ),
-                      onSubmitted: (_) => _attemptLogin(), // enter-to-login
+                      onSubmitted: (_) => _attemptLogin(),
                       textInputAction: TextInputAction.done,
                     ),
                     const SizedBox(height: 10),
@@ -526,7 +858,6 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
             ),
           ),
 
-          // Loading overlay
           if (_isLoading) ...[
             const ModalBarrier(dismissible: false, color: Colors.black38),
             const Center(child: CircularProgressIndicator()),

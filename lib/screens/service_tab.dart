@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'dart:math' as math;
 
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
@@ -10,8 +11,8 @@ import 'package:inthepark/models/owner_model.dart';
 import 'package:inthepark/models/service_ad_model.dart';
 import 'package:inthepark/utils/image_upload_util.dart';
 import 'package:location/location.dart' as loc;
-import 'package:url_launcher/url_launcher.dart';
 import 'package:profanity_filter/profanity_filter.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 class ServiceTab extends StatefulWidget {
   const ServiceTab({super.key});
@@ -65,7 +66,9 @@ class ReportsService {
   }
 }
 
-class _ServiceTabState extends State<ServiceTab> {
+class _ServiceTabState extends State<ServiceTab>
+    with AutomaticKeepAliveClientMixin<ServiceTab> {
+  // ---------- config / filters ----------
   final _types = const [
     'All',
     'Walker',
@@ -75,44 +78,548 @@ class _ServiceTabState extends State<ServiceTab> {
     'Trainer',
     'Other',
   ];
-
   String _selectedType = 'All';
-  List<ServiceAd> _ads = [];
-  double? userLat;
-  double? userLng;
-  bool _isLoading = true;
-
   bool _showOnlyMine = false;
 
+  // ---------- data ----------
   final _firestore = FirebaseFirestore.instance;
   final _reports = ReportsService();
+  final ProfanityFilter _filter = ProfanityFilter();
 
+  List<ServiceAd> _ads = []; // full dataset (paged)
+  List<ServiceAd> _filtered = []; // derived from _ads + filters
   Set<String> _myReportedServiceIds = <String>{};
 
-  final ProfanityFilter _filter = ProfanityFilter();
+  // ---------- location ----------
+  double? userLat;
+  double? userLng;
+
+  // ---------- ui state ----------
+  bool _isLoading = true;
+
+  // ---------- paging ----------
+  DocumentSnapshot? _lastDoc;
+  bool _hasMore = true;
+  bool _paging = false;
+
+  // ---------- request staleness token ----------
+  int _loadSeq = 0;
+
+  // ---------- scrolling ----------
+  late final ScrollController _scrollController;
+
+  @override
+  bool get wantKeepAlive => true;
 
   @override
   void initState() {
     super.initState();
-    _loadLocationAndAds();
+
+    _scrollController = ScrollController()
+      ..addListener(() {
+        if (_scrollController.position.pixels >
+            _scrollController.position.maxScrollExtent - 600) {
+          _fetchMore(); // infinite scroll
+        }
+      });
+
+    _initialLoad();
   }
 
-  Future<void> _loadLocationAndAds() async {
-    setState(() => _isLoading = true);
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  // ---------- loading orchestration ----------
+  Future<void> _initialLoad() async {
+    final seq = ++_loadSeq;
+
+    // Paint something fast: load services first (no location)
+    setState(() {
+      _isLoading = true;
+      _resetPaging();
+    });
+
+    await _fetchMore(seq: seq); // prime first page
+    if (seq != _loadSeq) return;
+
+    // In parallel, get location and enrich with distances
+    _loadLocationAndEnrich(seq: seq);
+
+    // Also fetch my previously reported services (for flags)
+    await _refreshMyReportedServices(seq: seq);
+
+    if (!mounted || seq != _loadSeq) return;
+    setState(() => _isLoading = false);
+  }
+
+  void _resetPaging() {
+    _ads = [];
+    _filtered = [];
+    _lastDoc = null;
+    _hasMore = true;
+    _paging = false;
+  }
+
+  Future<void> _refreshMyReportedServices({int? seq}) async {
+    final set = await _reports.fetchMyReportedServiceIds();
+    if (!mounted || (seq != null && seq != _loadSeq)) return;
+    setState(() => _myReportedServiceIds = set);
+  }
+
+  Future<void> _loadLocationAndEnrich({int? seq}) async {
     try {
       final location = loc.Location();
+      // Don’t block UI; permission prompts could appear.
       final locData = await location.getLocation();
+      if (seq != null && seq != _loadSeq) return;
+
       userLat = locData.latitude;
       userLng = locData.longitude;
-    } catch (_) {}
-    await _fetchAds();
-    await _refreshMyReportedServices();
-    if (mounted) setState(() => _isLoading = false);
+
+      if (userLat != null && userLng != null && _ads.isNotEmpty) {
+        // Compute distances without re-querying Firestore
+        for (var ad in _ads) {
+          ad.distanceFromUser =
+              _calculateDistance(userLat!, userLng!, ad.latitude, ad.longitude);
+        }
+        if (!mounted || (seq != null && seq != _loadSeq)) return;
+        _applyFilters(); // update visible list with distances
+      }
+    } catch (_) {
+      // location optional; ignore failures
+    }
   }
 
-  Future<void> _refreshMyReportedServices() async {
-    final set = await _reports.fetchMyReportedServiceIds();
-    if (mounted) setState(() => _myReportedServiceIds = set);
+  // Paged fetch
+  Future<void> _fetchMore({int? seq}) async {
+    if (_paging || !_hasMore) return;
+    _paging = true;
+    try {
+      Query q = _firestore
+          .collection('services')
+          .orderBy('createdAt', descending: true)
+          .limit(20);
+
+      if (_lastDoc != null) q = q.startAfterDocument(_lastDoc!);
+
+      final qs = await q.get();
+      if (!mounted || (seq != null && seq != _loadSeq)) return;
+
+      final more = qs.docs.map((d) => ServiceAd.fromFirestore(d)).toList();
+
+      if (userLat != null && userLng != null) {
+        for (final ad in more) {
+          ad.distanceFromUser =
+              _calculateDistance(userLat!, userLng!, ad.latitude, ad.longitude);
+        }
+      }
+
+      setState(() {
+        _ads.addAll(more);
+        if (qs.docs.isNotEmpty) _lastDoc = qs.docs.last;
+        _hasMore = qs.docs.length == 20;
+      });
+
+      _applyFilters();
+    } catch (e) {
+      if (!mounted || (seq != null && seq != _loadSeq)) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to load services: $e')),
+      );
+    } finally {
+      _paging = false;
+    }
+  }
+
+  // Pull-to-refresh: restart pagination and reload from scratch
+  Future<void> _hardRefresh() async {
+    final seq = ++_loadSeq;
+    setState(() {
+      _isLoading = true;
+      _resetPaging();
+    });
+    await _fetchMore(seq: seq);
+    if (seq != _loadSeq) return;
+    await _refreshMyReportedServices(seq: seq);
+    if (!mounted || seq != _loadSeq) return;
+    setState(() => _isLoading = false);
+  }
+
+  // ---------- filtering ----------
+  void _applyFilters() {
+    final current = FirebaseAuth.instance.currentUser;
+    var list = _selectedType == 'All'
+        ? _ads
+        : _ads.where((a) => a.type == _selectedType).toList();
+
+    if (_showOnlyMine && current != null) {
+      list = list.where((a) => a.ownerId == current.uid).toList();
+    }
+
+    setState(() => _filtered = list);
+  }
+
+  void _onTapMyPostsQuickFilter() {
+    final current = FirebaseAuth.instance.currentUser;
+    if (current == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Sign in to view your posts.')),
+      );
+      return;
+    }
+
+    final myCount = _ads.where((a) => a.ownerId == current.uid).length;
+    if (myCount == 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("You haven't created any services yet")),
+      );
+      return;
+    }
+
+    setState(() => _showOnlyMine = !_showOnlyMine);
+    _applyFilters();
+  }
+
+  // ---------- helpers ----------
+  double _calculateDistance(
+      double lat1, double lon1, double lat2, double lon2) {
+    const p = 0.017453292519943295;
+    double c(double x) => math.cos(x);
+    final a = 0.5 -
+        c((lat2 - lat1) * p) / 2 +
+        c(lat1 * p) * c(lat2 * p) * (1 - c((lon2 - lon1) * p)) / 2;
+    return 12742 * math.asin(math.sqrt(a));
+  }
+
+  // ---------- UI ----------
+  @override
+  Widget build(BuildContext context) {
+    super.build(context);
+
+    final current = FirebaseAuth.instance.currentUser;
+
+    return Scaffold(
+      body: Column(
+        children: [
+          // Top filter chips
+          Container(
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.grey.withOpacity(0.2),
+                  spreadRadius: 1,
+                  blurRadius: 2,
+                  offset: const Offset(0, 1),
+                ),
+              ],
+            ),
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              child: Row(
+                children: _types.map((type) {
+                  final isSelected = _selectedType == type;
+                  return Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 4),
+                    child: ChoiceChip(
+                      label: Text(type),
+                      selected: isSelected,
+                      onSelected: (selected) {
+                        if (selected) {
+                          setState(() => _selectedType = type);
+                          _applyFilters();
+                        }
+                      },
+                      backgroundColor: Colors.grey[200],
+                      selectedColor: Colors.green[100],
+                      labelStyle: TextStyle(
+                        color: isSelected ? Colors.green[800] : Colors.black,
+                        fontWeight:
+                            isSelected ? FontWeight.bold : FontWeight.normal,
+                      ),
+                    ),
+                  );
+                }).toList(),
+              ),
+            ),
+          ),
+
+          if (_showOnlyMine && current != null)
+            Container(
+              width: double.infinity,
+              color: Colors.green.shade50,
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              child: const Text(
+                'Showing only your services',
+                style:
+                    TextStyle(color: Colors.green, fontWeight: FontWeight.w600),
+              ),
+            ),
+
+          // List
+          Expanded(
+            child: _isLoading
+                ? const Center(child: CircularProgressIndicator())
+                : _filtered.isEmpty
+                    ? Center(
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(Icons.search_off,
+                                size: 64, color: Colors.grey[400]),
+                            const SizedBox(height: 16),
+                            Text(
+                              'No services found'
+                              '${_selectedType != "All" ? ' for $_selectedType' : ''}'
+                              '${_showOnlyMine ? ' (your posts)' : ''}',
+                              style: TextStyle(
+                                  color: Colors.grey[600], fontSize: 16),
+                            ),
+                          ],
+                        ),
+                      )
+                    : RefreshIndicator(
+                        onRefresh: _hardRefresh,
+                        child: ListView.builder(
+                          key: const PageStorageKey('services_list'),
+                          controller: _scrollController,
+                          cacheExtent: 1200,
+                          padding: const EdgeInsets.only(top: 8, bottom: 120),
+                          itemCount: _filtered.length + 1,
+                          itemBuilder: (context, index) {
+                            if (index == _filtered.length) {
+                              // paging footer
+                              if (_hasMore) {
+                                return const Padding(
+                                  padding: EdgeInsets.symmetric(vertical: 24),
+                                  child: Center(
+                                      child: CircularProgressIndicator()),
+                                );
+                              } else {
+                                return const SizedBox(height: 48);
+                              }
+                            }
+                            return _buildAdCard(_filtered[index]);
+                          },
+                        ),
+                      ),
+          ),
+        ],
+      ),
+      floatingActionButton: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          FloatingActionButton.extended(
+            heroTag: 'fab_my_posts',
+            onPressed: _onTapMyPostsQuickFilter,
+            backgroundColor: _showOnlyMine
+                ? const Color(0xFF2E7D32)
+                : const Color(0xFF66BB6A),
+            icon: const Icon(Icons.filter_list, color: Colors.white),
+            label:
+                const Text('My posts', style: TextStyle(color: Colors.white)),
+          ),
+          const SizedBox(height: 12),
+          FloatingActionButton(
+            heroTag: 'fab_add',
+            onPressed: () => _openPostScreen(),
+            backgroundColor: Colors.green,
+            child: const Icon(Icons.add),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ---------- Cards & navigation ----------
+  Widget _buildAdCard(ServiceAd ad) {
+    final user = FirebaseAuth.instance.currentUser;
+    final isOwner = user != null && ad.ownerId == user.uid;
+    final isReported = _myReportedServiceIds.contains(ad.id);
+
+    return Card(
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      elevation: 2,
+      child: InkWell(
+        onTap: () => _openServiceDetailsFullScreen(ad),
+        borderRadius: BorderRadius.circular(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (ad.images.isNotEmpty)
+              ClipRRect(
+                borderRadius: const BorderRadius.only(
+                  topLeft: Radius.circular(12),
+                  topRight: Radius.circular(12),
+                ),
+                child: AspectRatio(
+                  aspectRatio: 16 / 9,
+                  child: CachedNetworkImage(
+                    imageUrl: ad.images.first,
+                    fit: BoxFit.cover,
+                    memCacheWidth: 800,
+                    placeholder: (_, __) =>
+                        const Center(child: CircularProgressIndicator()),
+                    errorWidget: (_, __, ___) =>
+                        const Center(child: Icon(Icons.broken_image)),
+                  ),
+                ),
+              ),
+            Padding(
+              padding: const EdgeInsets.all(12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          ad.title,
+                          style: const TextStyle(
+                              fontSize: 18, fontWeight: FontWeight.bold),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+
+                      // flag only for non-owners
+                      if (!isOwner)
+                        IconButton(
+                          tooltip: isReported
+                              ? 'You flagged this'
+                              : 'Report this service',
+                          icon: Icon(
+                            isReported ? Icons.flag : Icons.flag_outlined,
+                            color: isReported ? Colors.red : Colors.grey[700],
+                          ),
+                          onPressed: isReported
+                              ? null
+                              : () => _reportServiceDialog(ad),
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(),
+                        ),
+
+                      const SizedBox(width: 4),
+
+                      if (isOwner)
+                        IconButton(
+                          icon: const Icon(Icons.edit, size: 20),
+                          onPressed: () => _openPostScreen(existingAd: ad),
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(),
+                        ),
+                      if (isOwner) const SizedBox(width: 8),
+                      if (isOwner)
+                        IconButton(
+                          icon: const Icon(Icons.delete, size: 20),
+                          onPressed: () async {
+                            final confirm = await showDialog<bool>(
+                              context: context,
+                              builder: (c) => AlertDialog(
+                                title: const Text('Delete Service'),
+                                content: const Text(
+                                  'Are you sure you want to delete this service?',
+                                ),
+                                actions: [
+                                  TextButton(
+                                    onPressed: () => Navigator.of(c).pop(false),
+                                    child: const Text('Cancel'),
+                                  ),
+                                  TextButton(
+                                    onPressed: () => Navigator.of(c).pop(true),
+                                    child: const Text('Delete',
+                                        style: TextStyle(color: Colors.red)),
+                                  ),
+                                ],
+                              ),
+                            );
+
+                            if (confirm == true) {
+                              try {
+                                await FirebaseFirestore.instance
+                                    .collection('services')
+                                    .doc(ad.id)
+                                    .delete();
+                                await _hardRefresh();
+                                if (!mounted) return;
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(
+                                    content:
+                                        Text('Service deleted successfully!'),
+                                    backgroundColor: Colors.red,
+                                  ),
+                                );
+                              } catch (e) {
+                                if (!mounted) return;
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(
+                                    content: Text('Couldn\'t delete: $e'),
+                                    backgroundColor: Colors.red,
+                                  ),
+                                );
+                              }
+                            }
+                          },
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(),
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    ad.type,
+                    style: TextStyle(
+                      color: Colors.grey[700],
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    ad.description,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                  const SizedBox(height: 8),
+                  if (ad.distanceFromUser != null)
+                    Row(
+                      children: [
+                        const Icon(Icons.location_on,
+                            size: 16, color: Colors.grey),
+                        const SizedBox(width: 4),
+                        Text(
+                          '${ad.distanceFromUser!.toStringAsFixed(1)} km away',
+                          style:
+                              TextStyle(fontSize: 12, color: Colors.grey[600]),
+                        ),
+                        const Spacer(),
+                        if (ad.images.length > 1)
+                          Row(
+                            children: [
+                              const Icon(Icons.photo_library,
+                                  size: 16, color: Colors.grey),
+                              const SizedBox(width: 4),
+                              Text(
+                                '${ad.images.length} photos',
+                                style: TextStyle(
+                                    fontSize: 12, color: Colors.grey[600]),
+                              ),
+                            ],
+                          ),
+                      ],
+                    ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   Future<void> _reportServiceDialog(ServiceAd ad) async {
@@ -207,43 +714,6 @@ class _ServiceTabState extends State<ServiceTab> {
     }
   }
 
-  double _calculateDistance(
-      double lat1, double lon1, double lat2, double lon2) {
-    const p = 0.017453292519943295;
-    double c(double x) => math.cos(x);
-    final a = 0.5 -
-        c((lat2 - lat1) * p) / 2 +
-        c(lat1 * p) * c(lat2 * p) * (1 - c((lon2 - lon1) * p)) / 2;
-    return 12742 * math.asin(math.sqrt(a));
-  }
-
-  Future<void> _fetchAds() async {
-    try {
-      final snapshot = await _firestore
-          .collection('services')
-          .orderBy('createdAt', descending: true)
-          .get();
-
-      final ads =
-          snapshot.docs.map((doc) => ServiceAd.fromFirestore(doc)).toList();
-
-      for (var ad in ads) {
-        if (userLat != null && userLng != null) {
-          ad.distanceFromUser =
-              _calculateDistance(userLat!, userLng!, ad.latitude, ad.longitude);
-        }
-      }
-
-      if (!mounted) return;
-      setState(() => _ads = ads);
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Failed to load services: $e')),
-      );
-    }
-  }
-
   Future<void> _openPostScreen({ServiceAd? existingAd}) async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) {
@@ -280,7 +750,7 @@ class _ServiceTabState extends State<ServiceTab> {
     );
 
     if (result == true && mounted) {
-      await _fetchAds();
+      await _hardRefresh();
     }
   }
 
@@ -295,348 +765,9 @@ class _ServiceTabState extends State<ServiceTab> {
           },
           onEditRequested: () => _openPostScreen(existingAd: ad),
           onDeleted: () async {
-            await _fetchAds();
+            await _hardRefresh();
           },
         ),
-      ),
-    );
-  }
-
-  Widget _buildAdCard(ServiceAd ad) {
-    final user = FirebaseAuth.instance.currentUser;
-    final isOwner = user != null && ad.ownerId == user.uid;
-    final isReported = _myReportedServiceIds.contains(ad.id);
-
-    return Card(
-      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      elevation: 2,
-      child: InkWell(
-        onTap: () => _openServiceDetailsFullScreen(ad),
-        borderRadius: BorderRadius.circular(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            if (ad.images.isNotEmpty)
-              ClipRRect(
-                borderRadius: const BorderRadius.only(
-                  topLeft: Radius.circular(12),
-                  topRight: Radius.circular(12),
-                ),
-                child: AspectRatio(
-                  aspectRatio: 16 / 9,
-                  child: Image.network(
-                    ad.images.first,
-                    fit: BoxFit.cover,
-                    loadingBuilder: (context, child, prog) {
-                      if (prog == null) return child;
-                      return Center(
-                        child: CircularProgressIndicator(
-                          value: (prog.expectedTotalBytes != null)
-                              ? prog.cumulativeBytesLoaded /
-                                  prog.expectedTotalBytes!
-                              : null,
-                        ),
-                      );
-                    },
-                  ),
-                ),
-              ),
-            Padding(
-              padding: const EdgeInsets.all(12),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          ad.title,
-                          style: const TextStyle(
-                              fontSize: 18, fontWeight: FontWeight.bold),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-
-                      // flag only for non-owners
-                      if (!isOwner)
-                        IconButton(
-                          tooltip: isReported
-                              ? 'You flagged this'
-                              : 'Report this service',
-                          icon: Icon(
-                            isReported ? Icons.flag : Icons.flag_outlined,
-                            color: isReported ? Colors.red : Colors.grey[700],
-                          ),
-                          onPressed: isReported
-                              ? null
-                              : () => _reportServiceDialog(ad),
-                          padding: EdgeInsets.zero,
-                          constraints: const BoxConstraints(),
-                        ),
-
-                      const SizedBox(width: 4),
-
-                      if (isOwner)
-                        IconButton(
-                          icon: const Icon(Icons.edit, size: 20),
-                          onPressed: () => _openPostScreen(existingAd: ad),
-                          padding: EdgeInsets.zero,
-                          constraints: const BoxConstraints(),
-                        ),
-                      if (isOwner) const SizedBox(width: 8),
-                      if (isOwner)
-                        IconButton(
-                          icon: const Icon(Icons.delete, size: 20),
-                          onPressed: () async {
-                            final confirm = await showDialog<bool>(
-                              context: context,
-                              builder: (c) => AlertDialog(
-                                title: const Text('Delete Service'),
-                                content: const Text(
-                                  'Are you sure you want to delete this service?',
-                                ),
-                                actions: [
-                                  TextButton(
-                                    onPressed: () => Navigator.of(c).pop(false),
-                                    child: const Text('Cancel'),
-                                  ),
-                                  TextButton(
-                                    onPressed: () => Navigator.of(c).pop(true),
-                                    child: const Text('Delete',
-                                        style: TextStyle(color: Colors.red)),
-                                  ),
-                                ],
-                              ),
-                            );
-
-                            if (confirm == true) {
-                              try {
-                                await FirebaseFirestore.instance
-                                    .collection('services')
-                                    .doc(ad.id)
-                                    .delete();
-                                await _fetchAds();
-                                if (!mounted) return;
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(
-                                    content:
-                                        Text('Service deleted successfully!'),
-                                    backgroundColor: Colors.red,
-                                  ),
-                                );
-                              } catch (e) {
-                                if (!mounted) return;
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  SnackBar(
-                                    content: Text('Couldn\'t delete: $e'),
-                                    backgroundColor: Colors.red,
-                                  ),
-                                );
-                              }
-                            }
-                          },
-                          padding: EdgeInsets.zero,
-                          constraints: const BoxConstraints(),
-                        ),
-                    ],
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    ad.type,
-                    style: TextStyle(
-                      color: Colors.grey[700],
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    ad.description,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  const SizedBox(height: 8),
-                  if (ad.distanceFromUser != null)
-                    Row(
-                      children: [
-                        const Icon(Icons.location_on,
-                            size: 16, color: Colors.grey),
-                        const SizedBox(width: 4),
-                        Text(
-                          '${ad.distanceFromUser!.toStringAsFixed(1)} km away',
-                          style:
-                              TextStyle(fontSize: 12, color: Colors.grey[600]),
-                        ),
-                        const Spacer(),
-                        if (ad.images.length > 1)
-                          Row(
-                            children: [
-                              const Icon(Icons.photo_library,
-                                  size: 16, color: Colors.grey),
-                              const SizedBox(width: 4),
-                              Text(
-                                '${ad.images.length} photos',
-                                style: TextStyle(
-                                    fontSize: 12, color: Colors.grey[600]),
-                              ),
-                            ],
-                          ),
-                      ],
-                    ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  void _onTapMyPostsQuickFilter() {
-    final current = FirebaseAuth.instance.currentUser;
-    if (current == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Sign in to view your posts.')),
-      );
-      return;
-    }
-
-    final myCount = _ads.where((a) => a.ownerId == current.uid).length;
-    if (myCount == 0) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("You haven't created any services yet")),
-      );
-      return;
-    }
-
-    setState(() => _showOnlyMine = !_showOnlyMine);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final current = FirebaseAuth.instance.currentUser;
-
-    List<ServiceAd> filteredAds = _selectedType == 'All'
-        ? _ads
-        : _ads.where((ad) => ad.type == _selectedType).toList();
-
-    if (_showOnlyMine && current != null) {
-      filteredAds =
-          filteredAds.where((ad) => ad.ownerId == current.uid).toList();
-    }
-
-    return Scaffold(
-      body: Column(
-        children: [
-          Container(
-            padding: const EdgeInsets.symmetric(vertical: 8),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.grey.withOpacity(0.2),
-                  spreadRadius: 1,
-                  blurRadius: 2,
-                  offset: const Offset(0, 1),
-                ),
-              ],
-            ),
-            child: SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              padding: const EdgeInsets.symmetric(horizontal: 8),
-              child: Row(
-                children: _types.map((type) {
-                  final isSelected = _selectedType == type;
-                  return Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 4),
-                    child: ChoiceChip(
-                      label: Text(type),
-                      selected: isSelected,
-                      onSelected: (selected) {
-                        if (selected) setState(() => _selectedType = type);
-                      },
-                      backgroundColor: Colors.grey[200],
-                      selectedColor: Colors.green[100],
-                      labelStyle: TextStyle(
-                        color: isSelected ? Colors.green[800] : Colors.black,
-                        fontWeight:
-                            isSelected ? FontWeight.bold : FontWeight.normal,
-                      ),
-                    ),
-                  );
-                }).toList(),
-              ),
-            ),
-          ),
-          if (_showOnlyMine)
-            Container(
-              width: double.infinity,
-              color: Colors.green.shade50,
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-              child: const Text(
-                'Showing only your services',
-                style:
-                    TextStyle(color: Colors.green, fontWeight: FontWeight.w600),
-              ),
-            ),
-          Expanded(
-            child: _isLoading
-                ? const Center(child: CircularProgressIndicator())
-                : filteredAds.isEmpty
-                    ? Center(
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Icon(Icons.search_off,
-                                size: 64, color: Colors.grey[400]),
-                            const SizedBox(height: 16),
-                            Text(
-                              'No services found'
-                              '${_selectedType != 'All' ? ' for $_selectedType' : ''}'
-                              '${_showOnlyMine ? ' (your posts)' : ''}',
-                              style: TextStyle(
-                                  color: Colors.grey[600], fontSize: 16),
-                            ),
-                          ],
-                        ),
-                      )
-                    : RefreshIndicator(
-                        onRefresh: () async {
-                          await _fetchAds();
-                          await _refreshMyReportedServices();
-                        },
-                        child: ListView.builder(
-                          padding: const EdgeInsets.only(top: 8, bottom: 120),
-                          itemCount: filteredAds.length,
-                          itemBuilder: (context, index) =>
-                              _buildAdCard(filteredAds[index]),
-                        ),
-                      ),
-          ),
-        ],
-      ),
-      floatingActionButton: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          FloatingActionButton.extended(
-            heroTag: 'fab_my_posts',
-            onPressed: _onTapMyPostsQuickFilter,
-            backgroundColor: _showOnlyMine
-                ? const Color(0xFF2E7D32)
-                : const Color(0xFF66BB6A),
-            icon: const Icon(Icons.filter_list, color: Colors.white),
-            label:
-                const Text('My posts', style: TextStyle(color: Colors.white)),
-          ),
-          const SizedBox(height: 12),
-          FloatingActionButton(
-            heroTag: 'fab_add',
-            onPressed: () => _openPostScreen(),
-            backgroundColor: Colors.green,
-            child: const Icon(Icons.add),
-          ),
-        ],
       ),
     );
   }
@@ -877,20 +1008,14 @@ class _ServiceDetailsScreenState extends State<ServiceDetailsScreen> {
                     onPageChanged: (i) => setState(() => _currentPage = i),
                     itemBuilder: (context, idx) => ClipRRect(
                       borderRadius: BorderRadius.circular(8),
-                      child: Image.network(
-                        widget.ad.images[idx],
+                      child: CachedNetworkImage(
+                        imageUrl: widget.ad.images[idx],
                         fit: BoxFit.cover,
-                        loadingBuilder: (context, child, prog) {
-                          if (prog == null) return child;
-                          return Center(
-                            child: CircularProgressIndicator(
-                              value: (prog.expectedTotalBytes != null)
-                                  ? prog.cumulativeBytesLoaded /
-                                      prog.expectedTotalBytes!
-                                  : null,
-                            ),
-                          );
-                        },
+                        memCacheWidth: 1200,
+                        placeholder: (_, __) =>
+                            const Center(child: CircularProgressIndicator()),
+                        errorWidget: (_, __, ___) =>
+                            const Center(child: Icon(Icons.broken_image)),
                       ),
                     ),
                   ),
@@ -1317,22 +1442,27 @@ class _PostServiceScreenState extends State<_PostServiceScreen> {
                           children: [
                             ClipRRect(
                               borderRadius: BorderRadius.circular(10),
-                              child: Image.network(
-                                url,
+                              child: CachedNetworkImage(
+                                imageUrl: url,
                                 width: 90,
                                 height: 90,
                                 fit: BoxFit.cover,
-                                loadingBuilder: (context, child, prog) {
-                                  if (prog == null) return child;
-                                  return Container(
-                                    width: 90,
-                                    height: 90,
-                                    color: Colors.grey[300],
-                                    child: const Center(
-                                      child: CircularProgressIndicator(),
-                                    ),
-                                  );
-                                },
+                                memCacheWidth: 300,
+                                placeholder: (_, __) => Container(
+                                  width: 90,
+                                  height: 90,
+                                  color: Colors.grey[300],
+                                  child: const Center(
+                                    child: CircularProgressIndicator(),
+                                  ),
+                                ),
+                                errorWidget: (_, __, ___) => Container(
+                                  width: 90,
+                                  height: 90,
+                                  color: Colors.grey[300],
+                                  child:
+                                      const Icon(Icons.broken_image, size: 18),
+                                ),
                               ),
                             ),
                             Positioned(

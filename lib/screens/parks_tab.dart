@@ -48,6 +48,21 @@ class _ParksTabState extends State<ParksTab> {
   // ---------- Helpers ----------
   String _parkIdOf(Park p) => generateParkID(p.latitude, p.longitude, p.name);
 
+  @override
+  void initState() {
+    super.initState();
+    _bootstrap();
+  }
+
+  Future<void> _bootstrap() async {
+    // Run in parallel; each function internally guards null/current user
+    await Future.wait([
+      _fetchFavoriteParks(),
+      _refreshCheckedInSet(),
+      _fetchNearbyParksFast(), // cached/last-known first for faster paint
+    ]);
+  }
+
   Future<void> _ensureParkDoc(String parkId, Park p) async {
     final ref = FirebaseFirestore.instance.collection('parks').doc(parkId);
     final snap = await ref.get();
@@ -62,42 +77,32 @@ class _ParksTabState extends State<ParksTab> {
     }
   }
 
-  @override
-  void initState() {
-    super.initState();
-    _bootstrap();
-  }
-
-  Future<void> _bootstrap() async {
-    // Kick off in parallel for better perceived speed.
-    await Future.wait([
-      _fetchFavoriteParks(),
-      _refreshCheckedInSet(),
-      _fetchNearbyParksFast(), // fast path uses cached/last known location if available
-    ]);
-  }
-
   // ---------- Favorites ----------
   Future<void> _fetchFavoriteParks() async {
-    if (_currentUserId == null) return;
+    final uid = _currentUserId;
+    if (uid == null) return;
     try {
       final likedSnapshot = await FirebaseFirestore.instance
           .collection('owners')
-          .doc(_currentUserId)
+          .doc(uid)
           .collection('likedParks')
           .get();
 
       final parkIds = likedSnapshot.docs.map((d) => d.id).toList();
       _favoriteParkIds = parkIds.toSet();
 
-      // Fetch park docs in chunks
+      // Fetch park docs in chunks of 10 (whereIn limit)
       final List<Park> parks = [];
       for (var i = 0; i < parkIds.length; i += 10) {
-        final chunk = parkIds.sublist(i, (i + 10).clamp(0, parkIds.length));
+        final end = (i + 10).clamp(0, parkIds.length);
+        final chunk = parkIds.sublist(i, end);
+        if (chunk.isEmpty) continue;
+
         final qs = await FirebaseFirestore.instance
             .collection('parks')
             .where(FieldPath.documentId, whereIn: chunk)
             .get();
+
         parks.addAll(qs.docs.map((d) => Park.fromFirestore(d)));
         _hydrateMetaFromDocs(qs.docs);
         _hydratedMeta.addAll(qs.docs.map((d) => d.id));
@@ -107,10 +112,8 @@ class _ParksTabState extends State<ParksTab> {
       setState(() {
         _favoriteParks = parks;
       });
-
-      // If no favorites, nearby fast-path may still fill the UI.
     } catch (_) {
-      // ignore
+      // silently ignore to avoid UX regressions
     }
   }
 
@@ -126,18 +129,31 @@ class _ParksTabState extends State<ParksTab> {
 
   // ---------- Nearby (FAST first, then precise) ----------
   Future<void> _fetchNearbyParksFast() async {
-    // Try cached/last-known location for instant results.
     final cached = await _locationService.getUserLocationOrCached();
-    if (cached == null) return; // no cached fix -> leave CTA flow as-is
-
+    if (cached == null) return;
     await _fetchNearbyParksAt(cached.latitude, cached.longitude);
   }
 
   Future<void> _fetchNearbyParks() async {
-    setState(() => _isSearching = true);
+    if (mounted) setState(() => _isSearching = true);
     try {
-      // Precise GPS if user taps CTA.
-      final l = await loc.Location().getLocation();
+      final permission = loc.Location();
+      // Make sure permission is requested (avoid platform exceptions).
+      final hasService = await permission.serviceEnabled() ||
+          await permission.requestService();
+      if (!hasService) return;
+
+      var status = await permission.hasPermission();
+      if (status == loc.PermissionStatus.denied) {
+        status = await permission.requestPermission();
+      }
+      if (status != loc.PermissionStatus.granted &&
+          status != loc.PermissionStatus.grantedLimited) {
+        return;
+      }
+
+      final l = await permission.getLocation();
+      if (l.latitude == null || l.longitude == null) return;
       await _fetchNearbyParksAt(l.latitude!, l.longitude!);
     } catch (_) {
       // ignore
@@ -147,14 +163,11 @@ class _ParksTabState extends State<ParksTab> {
   }
 
   Future<void> _fetchNearbyParksAt(double lat, double lng) async {
-    setState(() {
-      _isSearching = true;
-    });
-
+    if (mounted) setState(() => _isSearching = true);
     try {
       final parks = await _locationService.findNearbyParks(lat, lng);
 
-      // Hydrate meta for any parks we haven't hydrated yet (batched).
+      // Hydrate meta for any parks we haven't hydrated yet (batched by 10)
       final ids = parks.map(_parkIdOf).toList();
       final toHydrate = ids.where((id) => !_hydratedMeta.contains(id)).toList();
       if (toHydrate.isNotEmpty) {
@@ -189,7 +202,10 @@ class _ParksTabState extends State<ParksTab> {
     // Batch whereIn queries of up to 10 IDs.
     final futures = <Future<void>>[];
     for (var i = 0; i < parkIds.length; i += 10) {
-      final chunk = parkIds.sublist(i, (i + 10).clamp(0, parkIds.length));
+      final end = (i + 10).clamp(0, parkIds.length);
+      final chunk = parkIds.sublist(i, end);
+      if (chunk.isEmpty) continue;
+
       futures.add(FirebaseFirestore.instance
           .collection('parks')
           .where(FieldPath.documentId, whereIn: chunk)
@@ -203,19 +219,22 @@ class _ParksTabState extends State<ParksTab> {
   // ---------- Checked-in set ----------
   Future<void> _refreshCheckedInSet() async {
     _checkedInParkIds.clear();
-    if (_currentUserId == null) return;
+    final uid = _currentUserId;
+    if (uid == null) return;
+
     try {
       final snaps = await FirebaseFirestore.instance
           .collectionGroup('active_users')
-          .where(FieldPath.documentId, isEqualTo: _currentUserId)
+          .where('uid', isEqualTo: uid)
           .get();
+
       for (final doc in snaps.docs) {
         final parkRef = doc.reference.parent.parent; // parks/{parkId}
         if (parkRef != null) _checkedInParkIds.add(parkRef.id);
       }
       if (mounted) setState(() {});
-    } catch (_) {
-      // ignore
+    } catch (e) {
+      // optional: log e
     }
   }
 
@@ -253,7 +272,7 @@ class _ParksTabState extends State<ParksTab> {
     });
   }
 
-  // Clear any other check-ins (batch delete). No userCount mutations.
+  // Clear any other check-ins (batch delete). No userCount server mutations.
   Future<void> _checkOutFromAllParks() async {
     final uid = _currentUserId;
     if (uid == null) return;
@@ -263,6 +282,8 @@ class _ParksTabState extends State<ParksTab> {
           .collectionGroup('active_users')
           .where('uid', isEqualTo: uid)
           .get();
+
+      if (snaps.docs.isEmpty) return;
 
       final wb = FirebaseFirestore.instance.batch();
       for (final d in snaps.docs) {
@@ -283,7 +304,34 @@ class _ParksTabState extends State<ParksTab> {
     }
   }
 
-  // ---------- Active pets dialog (unchanged behavior; on-demand loads) ----------
+  // ---------- Pets query (string vs reference resilient) ----------
+  Future<QuerySnapshot<Map<String, dynamic>>> _queryPetsByOwnerIds(
+    List<String> ownerIds,
+  ) async {
+    final petsCol = FirebaseFirestore.instance.collection('pets');
+
+    // Guard: whereIn cannot be empty
+    if (ownerIds.isEmpty) {
+      // Return a guaranteed-empty result with a no-op query
+      return petsCol
+          .where(FieldPath.documentId, isEqualTo: '__none__')
+          .limit(0)
+          .get();
+    }
+
+    try {
+      // Attempt 1: ownerId is stored as STRING
+      return await petsCol.where('ownerId', whereIn: ownerIds).get();
+    } on FirebaseException catch (_) {
+      // Attempt 2: ownerId is stored as DocumentReference
+      final ownerRefs = ownerIds
+          .map((id) => FirebaseFirestore.instance.collection('owners').doc(id))
+          .toList();
+      return await petsCol.where('ownerId', whereIn: ownerRefs).get();
+    }
+  }
+
+  // ---------- Active pets dialog (on-demand loads) ----------
   Future<void> _showActiveUsersDialog(String parkId) async {
     final currentUser = FirebaseAuth.instance.currentUser;
     if (currentUser == null) return;
@@ -304,30 +352,32 @@ class _ParksTabState extends State<ParksTab> {
         .get();
     final userIds = activeUsersSnapshot.docs.map((d) => d.id).toList();
 
-    // Load all pets for these owners in chunks of 10
+    // Index check-in times by owner
+    final checkedInForByOwner = <String, String>{};
+    for (final u in activeUsersSnapshot.docs) {
+      final ts = (u.data()['checkedInAt']);
+      if (ts != null) {
+        final dt = (ts as Timestamp).toDate();
+        checkedInForByOwner[u.id] = _checkedInForSince(dt);
+      } else {
+        checkedInForByOwner[u.id] = '';
+      }
+    }
+
+    // Load all pets for these owners in chunks of 10; resilient to field type
     final List<Map<String, dynamic>> activePets = [];
     for (var i = 0; i < userIds.length; i += 10) {
-      final chunk = userIds.sublist(i, (i + 10).clamp(0, userIds.length));
-      final petsSnapshot = await FirebaseFirestore.instance
-          .collection('pets')
-          .where('ownerId', whereIn: chunk)
-          .get();
+      final end = (i + 10).clamp(0, userIds.length);
+      final chunk = userIds.sublist(i, end);
+      if (chunk.isEmpty) continue;
 
-      // index check-in times by owner
-      final checkedInForByOwner = <String, String>{};
-      for (final u in activeUsersSnapshot.docs) {
-        final ts = (u.data()['checkedInAt']);
-        String sinceStr = '';
-        if (ts != null) {
-          final dt = (ts as Timestamp).toDate();
-          sinceStr = _checkedInForSince(dt);
-        }
-        checkedInForByOwner[u.id] = sinceStr;
-      }
+      final petsSnapshot = await _queryPetsByOwnerIds(chunk);
 
       for (final petDoc in petsSnapshot.docs) {
         final pet = petDoc.data();
-        final ownerId = pet['ownerId'] as String? ?? '';
+        final ownerId = (pet['ownerId'] is DocumentReference)
+            ? (pet['ownerId'] as DocumentReference).id
+            : (pet['ownerId'] as String? ?? '');
         activePets.add({
           'petName': pet['name'] ?? 'Unknown Pet',
           'petPhotoUrl': pet['photoUrl'] ?? '',
@@ -415,8 +465,7 @@ class _ParksTabState extends State<ParksTab> {
   // ---------- Like / unlike ----------
   Future<void> _toggleLike(Park park) async {
     final parkId = _parkIdOf(park);
-    // Defer ensure to mutation points instead of doing it for every nearby park.
-    await _ensureParkDoc(parkId, park);
+    await _ensureParkDoc(parkId, park); // ensure doc only on mutation
 
     if (_favoriteParkIds.contains(parkId)) {
       await _fs.unlikePark(parkId);
@@ -434,12 +483,13 @@ class _ParksTabState extends State<ParksTab> {
 
   // ---------- Check-in / out ----------
   Future<void> _toggleCheckIn(Park park) async {
-    if (_currentUserId == null) return;
+    final uid = _currentUserId;
+    if (uid == null) return;
+
     final parkId = _parkIdOf(park);
-    setState(() => _mutatingParkId = parkId);
+    if (mounted) setState(() => _mutatingParkId = parkId);
 
     try {
-      // Ensure park doc exists only when we actually need to write under it.
       await _ensureParkDoc(parkId, park);
 
       final isCheckedIn = _checkedInParkIds.contains(parkId);
@@ -491,12 +541,18 @@ class _ParksTabState extends State<ParksTab> {
     final isCheckedIn = _checkedInParkIds.contains(parkId);
     final isBusy = _mutatingParkId == parkId;
 
+    IconData _serviceIcon(String s) {
+      if (s == "Off-leash Dog Park") return Icons.pets;
+      if (s == "Off-leash Trail") return Icons.terrain;
+      if (s == "Off-leash Beach") return Icons.beach_access;
+      return Icons.park;
+    }
+
     return Card(
       color: isFavorite ? Colors.green.shade50 : null,
       margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       child: InkWell(
         onTap: () async {
-          // Ensure park doc only on interaction
           await _ensureParkDoc(parkId, park);
           _showActiveUsersDialog(parkId);
         },
@@ -531,15 +587,9 @@ class _ParksTabState extends State<ParksTab> {
                   spacing: 6,
                   runSpacing: -6,
                   children: services.map((s) {
-                    final icon = s == "Off-leash Dog Park"
-                        ? Icons.pets
-                        : s == "Off-leash Trail"
-                            ? Icons.terrain
-                            : s == "Off-leash Beach"
-                                ? Icons.beach_access
-                                : Icons.park;
                     return Chip(
-                      avatar: Icon(icon, size: 16, color: Colors.green),
+                      avatar:
+                          Icon(_serviceIcon(s), size: 16, color: Colors.green),
                       label: Text(s, style: const TextStyle(fontSize: 12)),
                       backgroundColor: Colors.green[50],
                       materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,

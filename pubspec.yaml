@@ -3,7 +3,7 @@ description: A new Flutter project.
 
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 
-version: 1.0.0+1
+version: 1.0.6+8
 
 environment:
   sdk: ^3.1.1
@@ -43,6 +43,13 @@ dependencies:
   flutter_image_compress: ^2.3.0 
   image: ^4.2.0    
   share_plus: ^12.0.0
+  pedometer: ^4.0.1
+  confetti: ^0.7.0
+  cached_network_image: ^3.3.1
+  package_info_plus: ^8.0.0
+  firebase_remote_config: ^5.0.0
+  path_provider: ^2.1.4
+  in_app_update: ^4.2.2 
 
 flutter_launcher_icons:
   ios: true
@@ -64,3 +71,4 @@ flutter:
     - .env
     - lib/legal/termsandconditions.html
     - lib/legal/privacy.html
+    - assets/icon/
