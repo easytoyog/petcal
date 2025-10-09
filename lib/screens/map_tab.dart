@@ -2,24 +2,28 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:ui' as ui;
+import 'dart:io' show Platform;
+import 'dart:math' as math;
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart' show rootBundle;
+import 'package:flutter/services.dart' show rootBundle, PlatformException;
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:location/location.dart' as loc;
+import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:inthepark/widgets/interstitial_ad_manager.dart';
 import 'package:inthepark/features/add_event_sheet.dart';
 import 'package:inthepark/features/celebration_dialog.dart';
 import 'package:inthepark/features/walk_manager.dart';
 import 'package:inthepark/models/park_model.dart';
+import 'package:inthepark/screens/chatroom_screen.dart';
 import 'package:inthepark/services/firestore_service.dart';
 import 'package:inthepark/services/location_service.dart';
 import 'package:inthepark/utils/utils.dart';
+import 'package:inthepark/widgets/interstitial_ad_manager.dart';
 
 // ---------- Filter Option ----------
 class _FilterOption {
@@ -57,11 +61,27 @@ class _MapTabState extends State<MapTab>
   LatLng _currentMapCenter = const LatLng(43.7615, -79.4111);
   bool _isMapReady = false;
 
+  // ---- Smooth polyline state (avoid rebuilding whole route each frame) ----
+  final List<LatLng> _drawnRoute = [];
+  int _lastSyncedIdx = 0;
+  DateTime _lastPolylineUpdate = DateTime.fromMillisecondsSinceEpoch(0);
+  Set<Polyline> _livePolylineSet = {}; // what we feed to GoogleMap
+
+  // Tuning knobs
+  static const int _polylineUpdateMs = 400; // throttle redraws (~2–3 fps)
+  static const double _minRoutePointMeters = 5; // drop near points
+  static const int _simplifyEveryNPoints = 300; // run DP every N new points
+  static const double _simplifyToleranceMeters = 4.0;
+
   // Park state
   final Set<String> _existingParkIds = {};
   final Map<String, Marker> _markersMap = {}; // keyed by parkId
   final Map<String, List<String>> _parkServicesById = {}; // cache per parkId
   List<Park> _allParks = []; // current parks list
+
+  // Precomputed visible sets (don’t rebuild in build())
+  Set<Marker> _visibleMarkers = {};
+  Set<Polyline> _visiblePolylines = {};
 
   // Filters
   final List<_FilterOption> _filterOptions = const [
@@ -84,20 +104,21 @@ class _MapTabState extends State<MapTab>
   // Debounces & listeners
   Timer? _locationSaveDebounce;
   Timer? _filterDebounce;
+  Timer? _parksUiDebounce; // debounce UI after Firestore snapshot bursts
   final List<StreamSubscription<QuerySnapshot>> _parksSubs = [];
-  String _parksListenerKey = ''; // to avoid rebuilding identical listeners
+  String _parksListenerKey = '';
 
-  // --- UI ticker so the timer text updates every second immediately ---
+  // --- Timer text without rebuilding map ---
+  final ValueNotifier<String> _elapsedText = ValueNotifier('00:00');
   Timer? _uiTicker;
   void _startUiTicker() {
     _uiTicker?.cancel();
     _uiTicker = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (!mounted) return;
       if (!_walk.isActive) {
         _stopUiTicker();
         return;
       }
-      setState(() {}); // refresh elapsed text
+      _elapsedText.value = _formatElapsed();
     });
   }
 
@@ -106,17 +127,229 @@ class _MapTabState extends State<MapTab>
     _uiTicker = null;
   }
 
-  Future<LatLng?> _getFreshUserLatLng({
-    Duration freshTimeout = const Duration(milliseconds: 2500),
-    double minAccuracyMeters = 50, // accept up to 50m accuracy
-  }) async {
-    // 1) If walking and the last point is fresh, reuse it.
-    if (_walk.points.isNotEmpty) {
-      final last = _walk.points.last;
-      return last;
+  double _metersBetween(LatLng a, LatLng b) {
+    const earth = 6371000.0;
+    final dLat = _deg2rad(b.latitude - a.latitude);
+    final dLng = _deg2rad(b.longitude - a.longitude);
+    final la1 = _deg2rad(a.latitude);
+    final la2 = _deg2rad(b.latitude);
+    final h = math.sin(dLat / 2) * math.sin(dLat / 2) +
+        math.cos(la1) * math.cos(la2) * math.sin(dLng / 2) * math.sin(dLng / 2);
+    return 2 * earth * math.asin(math.min(1.0, math.sqrt(h)));
+  }
+
+  double _deg2rad(double d) => d * math.pi / 180.0;
+
+  void _resetLiveRoute() {
+    _drawnRoute.clear();
+    _lastSyncedIdx = 0;
+    _livePolylineSet = {};
+    _lastPolylineUpdate = DateTime.fromMillisecondsSinceEpoch(0);
+    _recomputeVisiblePolylines();
+  }
+
+  // --- Douglas-Peucker simplification (meters tolerance) ---
+  // Keeps endpoints; recursively prunes points whose perpendicular distance
+  // from the baseline is < tolerance.
+  List<LatLng> _simplifyRoute(List<LatLng> pts, double tolMeters) {
+    if (pts.length <= 2) return pts;
+    final keep = List<bool>.filled(pts.length, false);
+    keep[0] = true;
+    keep[pts.length - 1] = true;
+
+    final stack = <List<int>>[
+      [0, pts.length - 1]
+    ];
+
+    while (stack.isNotEmpty) {
+      final seg = stack.removeLast();
+      int start = seg[0], end = seg[1];
+      double maxDist = -1;
+      int index = -1;
+
+      for (int i = start + 1; i < end; i++) {
+        final d = _perpDistanceMeters(pts[i], pts[start], pts[end]);
+        if (d > maxDist) {
+          maxDist = d;
+          index = i;
+        }
+      }
+
+      if (maxDist > tolMeters && index != -1) {
+        keep[index] = true;
+        stack.add([start, index]);
+        stack.add([index, end]);
+      }
     }
 
-    // 2) Try to get a *fresh* GPS fix with high accuracy, then restore default.
+    final out = <LatLng>[];
+    for (int i = 0; i < pts.length; i++) {
+      if (keep[i]) out.add(pts[i]);
+    }
+    return out;
+  }
+
+  double _perpDistanceMeters(LatLng p, LatLng a, LatLng b) {
+    // Convert to a projected local plane around 'a' to approximate meters
+    // (fine for small segments). Equirectangular projection:
+    final latRad = _deg2rad(a.latitude);
+    final mPerDegLat = 111132.92 - 559.82 * math.cos(2 * latRad) + 1.175 * math.cos(4 * latRad);
+    final mPerDegLng = 111412.84 * math.cos(latRad) - 93.5 * math.cos(3 * latRad);
+
+    final ax = 0.0;
+    final ay = 0.0;
+    final bx = (b.longitude - a.longitude) * mPerDegLng;
+    final by = (b.latitude - a.latitude) * mPerDegLat;
+    final px = (p.longitude - a.longitude) * mPerDegLng;
+    final py = (p.latitude - a.latitude) * mPerDegLat;
+
+    final dx = bx - ax;
+    final dy = by - ay;
+    if (dx == 0 && dy == 0) {
+      // a==b
+      return math.sqrt((px - ax) * (px - ax) + (py - ay) * (py - ay));
+    }
+    final t = ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy);
+    final projx = ax + t * dx;
+    final projy = ay + t * dy;
+    return math.sqrt((px - projx) * (px - projx) + (py - projy) * (py - projy));
+  }
+
+  /// Syncs _walk.points -> _drawnRoute (distance filter + throttle).
+  /// Returns true when the visible polyline actually changed.
+  bool _syncPolylineIfNeeded() {
+    final pts = _walk.points;
+    if (pts.isEmpty) {
+      if (_drawnRoute.isEmpty && _livePolylineSet.isEmpty) return false;
+      _resetLiveRoute();
+      return true;
+    }
+
+    // throttle
+    final now = DateTime.now();
+    if (now.difference(_lastPolylineUpdate).inMilliseconds < _polylineUpdateMs) {
+      return false;
+    }
+
+    bool appended = false;
+    for (var i = _lastSyncedIdx; i < pts.length; i++) {
+      final p = pts[i];
+      if (_drawnRoute.isEmpty ||
+          _metersBetween(_drawnRoute.last, p) >= _minRoutePointMeters) {
+        _drawnRoute.add(p);
+        appended = true;
+      }
+    }
+    _lastSyncedIdx = pts.length;
+
+    if (!appended) {
+      _lastPolylineUpdate = now;
+      return false;
+    }
+
+    // Simplify occasionally to keep Android draw cheap
+    if (_drawnRoute.length > 2 && (_drawnRoute.length % _simplifyEveryNPoints == 0)) {
+      final simplified = _simplifyRoute(_drawnRoute, _simplifyToleranceMeters);
+      _drawnRoute
+        ..clear()
+        ..addAll(simplified);
+    }
+
+    // rebuild the single live polyline (geodesic off on Android for perf)
+    final useGeodesic = !Platform.isAndroid;
+    _livePolylineSet = {
+      Polyline(
+        polylineId: const PolylineId('current_walk'),
+        points: List<LatLng>.from(_drawnRoute),
+        width: 6,
+        color: Colors.blueAccent,
+        geodesic: useGeodesic,
+        startCap: Cap.roundCap,
+        endCap: Cap.roundCap,
+        jointType: JointType.round,
+      ),
+    };
+    _lastPolylineUpdate = now;
+    _recomputeVisiblePolylines();
+    return true;
+  }
+
+  Future<bool> _explainAndRequestBackgroundLocation(BuildContext context) async {
+    if (!Platform.isAndroid) return true;
+
+    final whenInUse = await Permission.location.status;
+    final bg = await Permission.locationAlways.status;
+    if (whenInUse.isGranted && bg.isGranted) return true;
+
+    final proceed = await showDialog<bool>(
+          context: context,
+          barrierDismissible: false,
+          builder: (ctx) => AlertDialog(
+            title: const Text('Enable background location'),
+            content: Text.rich(
+              const TextSpan(children: [
+                TextSpan(text: 'To keep tracking your walk when the screen is off, Android requires you to choose '),
+                TextSpan(text: 'Allow all the time', style: TextStyle(fontWeight: FontWeight.w700)),
+                TextSpan(text: ' for Location. We only use your location while a walk is active, and you can stop anytime.'),
+              ]),
+            ),
+            actions: [
+              TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('Not now')),
+              ElevatedButton(onPressed: () => Navigator.of(ctx).pop(true), child: const Text('Continue')),
+            ],
+          ),
+        ) ??
+        false;
+
+    if (!proceed) return false;
+
+    if (!whenInUse.isGranted) {
+      final r = await Permission.location.request();
+      if (!r.isGranted) return false;
+    }
+
+    var bg2 = await Permission.locationAlways.status;
+    if (!bg2.isGranted) bg2 = await Permission.locationAlways.request();
+    if (bg2.isGranted) return true;
+
+    final open = await showDialog<bool>(
+          context: context,
+          barrierDismissible: false,
+          builder: (ctx) => AlertDialog(
+            title: const Text('Turn on “Allow all the time”'),
+            content: const Text(
+                "Background location is currently off. To enable it:\n\n"
+                "Settings → Apps → InThePark → Permissions → Location → Allow all the time."),
+            actions: [
+              TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('Cancel')),
+              ElevatedButton(onPressed: () => Navigator.of(ctx).pop(true), child: const Text('Open Settings')),
+            ],
+          ),
+        ) ??
+        false;
+
+    if (open) {
+      await openAppSettings();
+      final bgAfter = await Permission.locationAlways.status;
+      if (bgAfter.isGranted) return true;
+    }
+    return false;
+  }
+
+  Future<void> _ensureNotifPermission() async {
+    if (!Platform.isAndroid) return;
+    final status = await Permission.notification.status;
+    if (status.isDenied || status.isPermanentlyDenied) {
+      await Permission.notification.request();
+    }
+  }
+
+  Future<LatLng?> _getFreshUserLatLng({
+    Duration freshTimeout = const Duration(milliseconds: 2500),
+    double minAccuracyMeters = 50,
+  }) async {
+    if (_walk.points.isNotEmpty) return _walk.points.last;
+
     try {
       await _location.changeSettings(
         accuracy: loc.LocationAccuracy.high,
@@ -126,47 +359,36 @@ class _MapTabState extends State<MapTab>
 
       final fresh = await _location.onLocationChanged.firstWhere((l) {
         final acc = l.accuracy ?? double.infinity;
-        return l.latitude != null &&
-            l.longitude != null &&
-            acc <= minAccuracyMeters;
+        return l.latitude != null && l.longitude != null && acc <= minAccuracyMeters;
       }).timeout(freshTimeout);
 
       if (fresh.latitude != null && fresh.longitude != null) {
         return LatLng(fresh.latitude!, fresh.longitude!);
       }
     } catch (_) {
-      // Ignore and fall through to cached sources.
     } finally {
-      // Restore to a saner default to save battery.
       try {
-        await _location.changeSettings(
-          accuracy: loc.LocationAccuracy.balanced,
-        );
+        await _location.changeSettings(accuracy: loc.LocationAccuracy.balanced);
       } catch (_) {}
     }
 
-    // 3) Fall back to the instant reading (may be cached by the OS).
     try {
-      final l = await _location
-          .getLocation()
-          .timeout(const Duration(milliseconds: 800));
+      final l = await _location.getLocation().timeout(const Duration(milliseconds: 800));
       if (l.latitude != null && l.longitude != null) {
         return LatLng(l.latitude!, l.longitude!);
       }
     } catch (_) {}
 
-    // 4) Fall back to your saved/cached app location.
     final saved = await _locationService.getUserLocationOrCached();
     if (saved != null) return saved;
 
-    // 5) Last resort: current camera center (never null here).
     return _currentMapCenter;
   }
 
   // --- Assets -> Bitmap ---
   Future<BitmapDescriptor> _bitmapFromAsset(
     String assetPath, {
-    int width = 64, // target logical px
+    int width = 64,
   }) async {
     final data = await rootBundle.load(assetPath);
     final codec = await ui.instantiateImageCodec(
@@ -175,8 +397,7 @@ class _MapTabState extends State<MapTab>
       targetHeight: width,
     );
     final frame = await codec.getNextFrame();
-    final byteData =
-        await frame.image.toByteData(format: ui.ImageByteFormat.png);
+    final byteData = await frame.image.toByteData(format: ui.ImageByteFormat.png);
     return BitmapDescriptor.fromBytes(byteData!.buffer.asUint8List());
   }
 
@@ -196,14 +417,12 @@ class _MapTabState extends State<MapTab>
   }
 
   String _dayKeyLocal(DateTime dt) {
-    final d = DateTime(dt.year, dt.month, dt.day); // local midnight
+    final d = DateTime(dt.year, dt.month, dt.day);
     final mm = d.month.toString().padLeft(2, '0');
     final dd = d.day.toString().padLeft(2, '0');
-    return '${d.year}-$mm-$dd'; // e.g. 2025-01-31
+    return '${d.year}-$mm-$dd';
   }
 
-  /// Atomically update the user's daily walk streak.
-  /// Path: owners/{uid}/stats/walkStreak
   Future<_StreakResult> _updateDailyStreak() async {
     final uid = FirebaseAuth.instance.currentUser?.uid;
     if (uid == null) {
@@ -222,7 +441,6 @@ class _MapTabState extends State<MapTab>
         .collection('stats')
         .doc('walkStreak');
 
-    // DST-safe "today" and "yesterday"
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
     final todayKey = _dayKeyLocal(today);
@@ -348,7 +566,6 @@ class _MapTabState extends State<MapTab>
     return BitmapDescriptor.fromBytes(byteData!.buffer.asUint8List());
   }
 
-  // --- Encouragements (used by celebration dialog) ---
   static const _encouragements = <String>[
     "Way to go!",
     "Good job!",
@@ -365,7 +582,6 @@ class _MapTabState extends State<MapTab>
   static const _kParksCacheTsKey = 'map.parks_cache_ts.v2';
   static const Duration _cacheTtl = Duration(hours: 3);
 
-  // Helper to format the timer text (reads from _walk.elapsed)
   String _formatElapsed() {
     final s = _walk.elapsed.inSeconds;
     final hh = (s ~/ 3600).toString().padLeft(2, '0');
@@ -378,7 +594,7 @@ class _MapTabState extends State<MapTab>
   bool get wantKeepAlive => true;
 
   // ======== Walk persistence state ========
-  String? _currentWalkId; // Firestore owners/{uid}/walks/{walkId}
+  String? _currentWalkId;
   bool _persistingWalk = false;
 
   // in-memory notes to be saved at end
@@ -405,18 +621,19 @@ class _MapTabState extends State<MapTab>
 
     _walk = WalkManager(location: _location);
     _walkListener = () {
-      if (mounted) setState(() {}); // WalkManager internal changes
+      final changed = _syncPolylineIfNeeded();
+      if (changed && mounted) setState(() {});
+      // timer chip:
+      _elapsedText.value = _formatElapsed();
     };
     _walk.addListener(_walkListener);
     _walk.restoreIfAny();
 
-    // Ads: create manager & preload one ad up front
     _adManager = InterstitialAdManager(cooldownSeconds: 60);
     _adManager.preload();
 
     _loadSavedLocationAndSetMap();
 
-    // Try to restore cached parks immediately for instant UI
     _restoreCachedParks();
 
     WidgetsBinding.instance.addPostFrameCallback((_) async {
@@ -425,6 +642,7 @@ class _MapTabState extends State<MapTab>
         _moveCameraTo(_finalPosition!, zoom: 17);
       }
     });
+
     // Prewarm icons (best-effort)
     // ignore: discarded_futures
     _ensureNoteIcons();
@@ -436,9 +654,7 @@ class _MapTabState extends State<MapTab>
     if (_finalPosition != null) return _finalPosition!;
     final cached = _currentMapCenter;
     try {
-      final l = await _location
-          .getLocation()
-          .timeout(const Duration(milliseconds: 400));
+      final l = await _location.getLocation().timeout(const Duration(milliseconds: 400));
       if (l.latitude != null && l.longitude != null) {
         return LatLng(l.latitude!, l.longitude!);
       }
@@ -455,10 +671,8 @@ class _MapTabState extends State<MapTab>
       return;
     }
 
-    // Ensure icons exist BEFORE creating markers so they show instantly
     await _ensureNoteIcons();
 
-    // For caution, collect a message
     String? noteMsg;
     if (type == 'caution') {
       final input = await showDialog<String>(
@@ -479,7 +693,7 @@ class _MapTabState extends State<MapTab>
             ),
             actions: [
               TextButton(
-                onPressed: () => Navigator.of(ctx).pop(null), // cancel
+                onPressed: () => Navigator.of(ctx).pop(null),
                 child: const Text('Cancel'),
               ),
               ElevatedButton(
@@ -490,7 +704,6 @@ class _MapTabState extends State<MapTab>
           );
         },
       );
-
       if (input == null) return;
       noteMsg = input.trim();
       if (noteMsg.isEmpty) return;
@@ -505,16 +718,17 @@ class _MapTabState extends State<MapTab>
       return;
     }
 
-    // pick icon + title
     late final BitmapDescriptor iconBitmap;
     late final String title;
     switch (type) {
       case 'pee':
         iconBitmap = _peeIcon!;
         title = 'Pee';
+        break;
       case 'poop':
         iconBitmap = _poopIcon!;
         title = 'Poop';
+        break;
       default:
         iconBitmap = _cautionIcon!;
         title = 'Caution';
@@ -532,15 +746,15 @@ class _MapTabState extends State<MapTab>
 
     setState(() {
       _noteMeta[id] = {'type': type, 'message': noteMsg};
-      _noteMarkers[id] = m; // shows immediately
+      _noteMarkers[id] = m;
+      _recomputeVisibleMarkers();
     });
 
-    // Record for persistence
     final recIndex = _noteRecords.length;
     _noteIndexById[id] = recIndex;
     _noteRecords.add({
       'id': id,
-      'type': type, // pee | poop | caution
+      'type': type,
       'message': noteMsg,
       'lat': here.latitude,
       'lng': here.longitude,
@@ -554,6 +768,7 @@ class _MapTabState extends State<MapTab>
     final updated = existing.copyWith(positionParam: newPos);
     setState(() {
       _noteMarkers[id] = updated;
+      _recomputeVisibleMarkers();
     });
 
     final i = _noteIndexById[id];
@@ -574,6 +789,14 @@ class _MapTabState extends State<MapTab>
 
   @override
   void dispose() {
+    // best-effort to relax settings before teardown
+    () async {
+      try {
+        await _location.enableBackgroundMode(enable: false);
+        await _location.changeSettings(accuracy: loc.LocationAccuracy.balanced);
+      } catch (_) {}
+    }();
+
     WidgetsBinding.instance.removeObserver(this);
     for (final s in _parksSubs) {
       s.cancel();
@@ -581,6 +804,7 @@ class _MapTabState extends State<MapTab>
     _parksSubs.clear();
     _locationSaveDebounce?.cancel();
     _filterDebounce?.cancel();
+    _parksUiDebounce?.cancel();
     _uiTicker?.cancel();
     _adManager.dispose();
     _mapController?.dispose();
@@ -594,19 +818,23 @@ class _MapTabState extends State<MapTab>
     // no-op: WalkManager manages its own timers
   }
 
-  // --------------- Walk: start/stop + persistence ---------------
   Future<void> _toggleWalk() async {
     if (_walk.isActive) {
-      // Disable button immediately and show loader
       if (!_finishingWalk) setState(() => _finishingWalk = true);
 
-      // END walk
       await _walk.stop();
       _stopUiTicker();
 
-      // WalkManager decides if it's long enough
+      try {
+        await _location.enableBackgroundMode(enable: false);
+        await _location.changeSettings(accuracy: loc.LocationAccuracy.balanced);
+      } catch (e) {
+        debugPrint('disable BG mode failed: $e');
+      }
+
       if (!_walk.meetsMinimum) {
         await _discardCurrentWalk();
+        _resetLiveRoute();
         if (mounted) {
           setState(() => _finishingWalk = false);
           ScaffoldMessenger.of(context).showSnackBar(
@@ -616,26 +844,21 @@ class _MapTabState extends State<MapTab>
         return;
       }
 
-      // Long enough — persist + celebrate
-      final saved = await _persistWalkSession(); // save route + notes
+      final saved = await _persistWalkSession();
 
-      // Get streak BEFORE showing the dialog so we can render it inside
       _StreakResult? streak;
       if (saved) {
         streak = await _updateDailyStreak();
       }
 
-// Capture values NOW; don't read from _walk later.
       final steps_ = _walk.steps;
       final meters_ = _walk.meters;
       final streakCurrent_ = streak?.current;
       final streakLongest_ = streak?.longest;
       final streakIsNewRecord_ = streak?.isNewRecord ?? false;
 
-// Re-enable button BEFORE showing the dialog.
       if (mounted) setState(() => _finishingWalk = false);
 
-// Show dialog on the next frame to avoid platform-view jank.
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
         _showCelebrationDialog(
@@ -646,28 +869,60 @@ class _MapTabState extends State<MapTab>
           streakIsNewRecord: streakIsNewRecord_,
         );
       });
-
-      // Re-enable after dialog/ads
-      if (mounted) setState(() => _finishingWalk = false);
     } else {
-      // START walk
       if (!await _ensureLocationPermission()) {
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text("Location permission is required to start a walk."),
-          ),
+          const SnackBar(content: Text("Location permission is required to start a walk.")),
         );
         return;
       }
-      final startFuture =
-          _walk.start(); // fire-and-forget; start sets isActive synchronously
-      if (mounted) setState(() {}); // flip UI to "End Walk" immediately
-      _startUiTicker(); // start ticking right away
-      _startWalkSession(); // create Firestore doc, clear local notes
 
-// Optional: surface errors without crashing UX
+      await _ensureNotifPermission();
+
+      final ok = await _explainAndRequestBackgroundLocation(context);
+      if (!ok) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text("Background location is required to track with the screen off.")),
+          );
+        }
+        return;
+      }
+
+      bool bgOk = false;
+      try {
+        bgOk = await _location.enableBackgroundMode(enable: true);
+      } on PlatformException catch (e) {
+        debugPrint('enable BG mode failed: $e');
+      }
+      if (!bgOk) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text("Couldn’t enable background mode. Make sure 'Allow all the time' is on in Settings.")),
+          );
+        }
+        return;
+      }
+
+      await _location.changeSettings(
+        accuracy: loc.LocationAccuracy.high,
+        interval: 2000,
+        distanceFilter: 3,
+      );
+
+      final startFuture = _walk.start();
+      if (mounted) setState(() {});
+      _startUiTicker();
+      _startWalkSession();
+
       startFuture.catchError((e, _) {
+        () async {
+          try {
+            await _location.enableBackgroundMode(enable: false);
+            await _location.changeSettings(accuracy: loc.LocationAccuracy.balanced);
+          } catch (_) {}
+        }();
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text("Couldn't start walk: $e")),
@@ -686,6 +941,8 @@ class _MapTabState extends State<MapTab>
     _noteMeta.clear();
     _noteRecords.clear();
     _noteIndexById.clear();
+    _resetLiveRoute();
+    _recomputeVisibleMarkers();
 
     final currentUid = FirebaseAuth.instance.currentUser?.uid;
     if (currentUid == null) {
@@ -698,17 +955,16 @@ class _MapTabState extends State<MapTab>
         .doc(currentUid)
         .collection('walks');
 
-    final docRef = walksCol.doc(); // id generated locally
+    final docRef = walksCol.doc();
     _currentWalkId = docRef.id;
 
-    // Fire-and-forget; no await here
-    docRef.set({
-      'status': 'active',
-      'startedAt': FieldValue.serverTimestamp(),
-      'createdAt': FieldValue.serverTimestamp(),
-    }, SetOptions(merge: true)).catchError((e) {
-      debugPrint('walk session set() failed: $e');
-    });
+    docRef
+        .set({
+          'status': 'active',
+          'startedAt': FieldValue.serverTimestamp(),
+          'createdAt': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true))
+        .catchError((e) => debugPrint('walk session set() failed: $e'));
   }
 
   Future<void> _discardCurrentWalk() async {
@@ -777,11 +1033,14 @@ class _MapTabState extends State<MapTab>
       }
 
       _currentWalkId = null;
+      _resetLiveRoute();
+      _recomputeVisibleMarkers();
       return true;
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text("Error saving walk: $e")));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("Error saving walk: $e")),
+        );
       }
       return false;
     } finally {
@@ -835,6 +1094,7 @@ class _MapTabState extends State<MapTab>
                 jointType: JointType.round,
               ),
             };
+      _recomputeVisiblePolylines();
 
       _historicNoteMarkers.clear();
       final notesSnap = await walkRef.collection('notes').get();
@@ -853,9 +1113,11 @@ class _MapTabState extends State<MapTab>
           case 'pee':
             icon = _peeIcon!;
             title = 'Pee';
+            break;
           case 'poop':
             icon = _poopIcon!;
             title = 'Poop';
+            break;
           default:
             icon = _cautionIcon!;
             title = 'Caution';
@@ -869,6 +1131,7 @@ class _MapTabState extends State<MapTab>
           infoWindow: InfoWindow(title: title, snippet: msg),
         );
       }
+      _recomputeVisibleMarkers();
 
       if (pts.isNotEmpty) {
         await _moveCameraTo(pts.first, zoom: 16);
@@ -903,7 +1166,7 @@ class _MapTabState extends State<MapTab>
         });
 
         if (_mapController != null) {
-          await _moveCameraTo(userLocation, zoom: 17);
+          _moveCameraTo(userLocation, zoom: 17);
         }
 
         await _loadNearbyParks(userLocation);
@@ -934,13 +1197,11 @@ class _MapTabState extends State<MapTab>
       await _hydrateServicesForParks(nearbyParks);
       _rebuildParksListeners();
 
-      // Cache the full parks list (fast resume)
       await _cacheParksAndServices(nearbyParks);
 
       if (!mounted) return;
       setState(() => _isSearching = false);
 
-      // Check-in prompt if at a park
       final currentPark = await _locationService.isUserAtPark(
         position.latitude,
         position.longitude,
@@ -1008,6 +1269,7 @@ class _MapTabState extends State<MapTab>
         _markersMap
           ..clear()
           ..addAll(nextMarkers);
+        _recomputeVisibleMarkers();
       });
     } catch (e) {
       debugPrint('restore cache failed: $e');
@@ -1031,15 +1293,13 @@ class _MapTabState extends State<MapTab>
   // ---- Services hydrator ----
   Future<void> _hydrateServicesForParks(List<Park> parks) async {
     final ids = parks.map((p) => p.id).toList().chunked(10);
-    for (final chunk in ids) {
-      final qs = await FirebaseFirestore.instance
-          .collection('parks')
-          .where(FieldPath.documentId, whereIn: chunk)
-          .get();
-
+    final snaps = await Future.wait(ids.map((chunk) => FirebaseFirestore.instance
+        .collection('parks')
+        .where(FieldPath.documentId, whereIn: chunk)
+        .get()));
+    for (final qs in snaps) {
       for (final d in qs.docs) {
-        final svcs =
-            (d.data()['services'] as List?)?.cast<String>() ?? const [];
+        final svcs = (d.data()['services'] as List?)?.cast<String>() ?? const [];
         _parkServicesById[d.id] = svcs;
       }
     }
@@ -1062,15 +1322,14 @@ class _MapTabState extends State<MapTab>
       _markersMap
         ..clear()
         ..addAll(next);
+      _recomputeVisibleMarkers();
     });
   }
 
   void _rebuildParksListeners() {
     final ids = _markersMap.keys.toList()..sort();
     final newKey = ids.join(',');
-    if (newKey == _parksListenerKey) {
-      return; // no change to listener set
-    }
+    if (newKey == _parksListenerKey) return;
     _parksListenerKey = newKey;
 
     for (final s in _parksSubs) {
@@ -1101,7 +1360,6 @@ class _MapTabState extends State<MapTab>
             final oldMarker = _markersMap[parkId]!;
             final newSnippet = count > 0 ? 'Users: $count' : null;
 
-            // Compare actual visible change instead of object equality
             final oldSnippet = oldMarker.infoWindow.snippet;
             if (oldSnippet != newSnippet) {
               _markersMap[parkId] = oldMarker.copyWith(
@@ -1121,13 +1379,20 @@ class _MapTabState extends State<MapTab>
           }
         }
 
-        if ((changedInfo || servicesChanged) && mounted) {
-          setState(() {});
-          if (servicesChanged && _selectedFilters.isNotEmpty) {
-            _filterDebounce?.cancel();
-            _filterDebounce =
-                Timer(const Duration(milliseconds: 120), _applyFilters);
-          }
+        if ((changedInfo || servicesChanged)) {
+          // Debounce UI updates to avoid rapid map rebuilds on Android
+          _parksUiDebounce?.cancel();
+          _parksUiDebounce = Timer(const Duration(milliseconds: 150), () {
+            if (!mounted) return;
+            setState(() {
+              _recomputeVisibleMarkers();
+            });
+            if (servicesChanged && _selectedFilters.isNotEmpty) {
+              _filterDebounce?.cancel();
+              _filterDebounce =
+                  Timer(const Duration(milliseconds: 120), _applyFilters);
+            }
+          });
         }
       });
 
@@ -1154,9 +1419,8 @@ class _MapTabState extends State<MapTab>
     }
     _currentMapCenter = _finalPosition ?? const LatLng(43.7615, -79.4111);
 
-    // Ensure immediate, reliable focusing when map is first created.
     if (_finalPosition != null) {
-      await _moveCameraTo(_finalPosition!, zoom: 17);
+      _moveCameraTo(_finalPosition!, zoom: 17);
     }
   }
 
@@ -1172,16 +1436,8 @@ class _MapTabState extends State<MapTab>
   }
 
   Future<void> _moveCameraTo(LatLng pos, {double zoom = 17}) async {
-    // Always use the completer to ensure readiness
     final ctl = await _mapCtlCompleter.future;
-
-    // Perform a reliable two-step move then animate, with small frame delay
-    await ctl.moveCamera(CameraUpdate.newCameraPosition(
-      CameraPosition(target: pos, zoom: zoom),
-    ));
-    await Future.delayed(const Duration(milliseconds: 50));
     await ctl.animateCamera(CameraUpdate.newLatLngZoom(pos, zoom));
-
     _lastCameraMove = DateTime.now();
   }
 
@@ -1231,10 +1487,9 @@ class _MapTabState extends State<MapTab>
       _finalPosition = user;
       _currentMapCenter = user;
 
-      // Two-step move for reliability (instant place, then smooth settle).
       await _moveCameraTo(user, zoom: 17);
 
-      // Update cache + nearby parks asynchronously (don’t interfere with camera)
+      // async updates
       // ignore: discarded_futures
       _locationService.saveUserLocation(user.latitude, user.longitude);
       // ignore: discarded_futures
@@ -1274,7 +1529,6 @@ class _MapTabState extends State<MapTab>
       }
       _existingParkIds.add(parkId);
     } catch (e) {
-      // best-effort
       debugPrint('ensureParkDocExists error: $e');
     }
   }
@@ -1294,8 +1548,7 @@ class _MapTabState extends State<MapTab>
     if (isCheckedIn) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-            content: Text("You are already checked in to this park.")),
+        const SnackBar(content: Text("You are already checked in to this park.")),
       );
       return;
     }
@@ -1310,12 +1563,10 @@ class _MapTabState extends State<MapTab>
           builder: (context, setStateDialog) {
             return AlertDialog(
               title: const Text("Check In"),
-              content:
-                  Text("You are at ${park.name}. Do you want to check in?"),
+              content: Text("You are at ${park.name}. Do you want to check in?"),
               actions: [
                 TextButton(
-                  onPressed:
-                      isProcessing ? null : () => Navigator.of(context).pop(),
+                  onPressed: isProcessing ? null : () => Navigator.of(context).pop(),
                   child: const Text("No"),
                 ),
                 ElevatedButton(
@@ -1385,7 +1636,6 @@ class _MapTabState extends State<MapTab>
     );
 
     try {
-      // Best-effort ensure the park doc exists when opening details
       await _ensureParkDocExists(parkId, parkName, parkLatitude, parkLongitude);
 
       final fs = FirestoreService();
@@ -1470,9 +1720,8 @@ class _MapTabState extends State<MapTab>
                 'ownerName': ownerName,
                 'petName': pet['name'] ?? 'Unknown Pet',
                 'petPhotoUrl': pet['photoUrl'] ?? '',
-                'checkInTime': checkInTime != null
-                    ? _checkedInForSince(checkInTime.toDate())
-                    : '',
+                'checkInTime':
+                    checkInTime != null ? _checkedInForSince(checkInTime.toDate()) : '',
               });
             }
           }
@@ -1499,8 +1748,7 @@ class _MapTabState extends State<MapTab>
                   StreamBuilder<QuerySnapshot>(
                     stream: likesCol.snapshots(),
                     builder: (context, snap) {
-                      final likeCount =
-                          snap.hasData ? snap.data!.docs.length : 0;
+                      final likeCount = snap.hasData ? snap.data!.docs.length : 0;
 
                       return Row(
                         children: [
@@ -1523,8 +1771,7 @@ class _MapTabState extends State<MapTab>
                                   await likesCol.doc(currentUser.uid).delete();
                                   if (context.mounted) {
                                     ScaffoldMessenger.of(context).showSnackBar(
-                                      const SnackBar(
-                                          content: Text("Removed park like")),
+                                      const SnackBar(content: Text("Removed park like")),
                                     );
                                   }
                                 } else {
@@ -1535,8 +1782,7 @@ class _MapTabState extends State<MapTab>
                                   });
                                   if (context.mounted) {
                                     ScaffoldMessenger.of(context).showSnackBar(
-                                      const SnackBar(
-                                          content: Text("Park liked!")),
+                                      const SnackBar(content: Text("Park liked!")),
                                     );
                                   }
                                 }
@@ -1544,17 +1790,13 @@ class _MapTabState extends State<MapTab>
                               } catch (e) {
                                 if (context.mounted) {
                                   ScaffoldMessenger.of(context).showSnackBar(
-                                    SnackBar(
-                                        content:
-                                            Text("Error updating like: $e")),
+                                    SnackBar(content: Text("Error updating like: $e")),
                                   );
                                 }
                               }
                             },
                             icon: Icon(
-                              isLiked
-                                  ? Icons.thumb_up
-                                  : Icons.thumb_up_outlined,
+                              isLiked ? Icons.thumb_up : Icons.thumb_up_outlined,
                             ),
                           ),
                         ],
@@ -1588,8 +1830,7 @@ class _MapTabState extends State<MapTab>
                                       size: 18,
                                       color: Colors.green,
                                     ),
-                                    label: Text(service,
-                                        style: const TextStyle(fontSize: 12)),
+                                    label: Text(service, style: const TextStyle(fontSize: 12)),
                                     backgroundColor: Colors.green[50],
                                   ),
                                 )),
@@ -1599,7 +1840,164 @@ class _MapTabState extends State<MapTab>
                       ),
                     ),
                   ),
-                  // ... rest of the dialog body
+                  // Users list
+                  Expanded(
+                    child: ListView.separated(
+                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                      itemCount: userList.length,
+                      separatorBuilder: (_, __) => const SizedBox(height: 6),
+                      itemBuilder: (ctx, i) {
+                        final petData = userList[i];
+                        final ownerId   = petData['ownerId'] as String? ?? '';
+                        final petId     = petData['petId'] as String? ?? '';
+                        final petName   = petData['petName'] as String? ?? '';
+                        final petPhoto  = petData['petPhotoUrl'] as String? ?? '';
+                        final checkIn   = petData['checkInTime'] as String? ?? '';
+                        final ownerName = (petData['ownerName'] as String? ?? '').trim();
+                        final mine      = (ownerId == currentUser.uid);
+
+                        return ListTile(
+                          leading: (petPhoto.isNotEmpty)
+                              ? ClipOval(
+                                  child: Image.network(
+                                    petPhoto,
+                                    width: 40,
+                                    height: 40,
+                                    fit: BoxFit.cover,
+                                    filterQuality: FilterQuality.low,
+                                    cacheWidth: 120, // hint smaller decode
+                                  ),
+                                )
+                              : const CircleAvatar(
+                                  backgroundColor: Colors.brown,
+                                  child: Icon(Icons.pets, color: Colors.white),
+                                ),
+                          title: Text(petName),
+                          subtitle: Text(
+                            [
+                              if (ownerName.isNotEmpty && !mine) ownerName,
+                              if (mine) "Your pet",
+                              if (checkIn.isNotEmpty) "– Checked in for $checkIn",
+                            ].whereType<String>().join(' '),
+                          ),
+                          trailing: _favoritePetIds.contains(petId)
+                              ? IconButton(
+                                  tooltip: "Remove Favorite",
+                                  onPressed: () => _unfriend(ownerId, petId),
+                                  icon: const Icon(Icons.favorite, color: Colors.redAccent),
+                                )
+                              : IconButton(
+                                  tooltip: "Add Favorite",
+                                  onPressed: () => _addFriend(ownerId, petId),
+                                  icon: const Icon(Icons.favorite_border),
+                                ),
+                        );
+                      },
+                    ),
+                  ),
+
+                  // Row 1: Check In/Out + Park Chat
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(12, 8, 12, 6),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: _BigActionButton(
+                            label: isCheckedIn ? "Check Out" : "Check In",
+                            backgroundColor: isCheckedIn ? Colors.red : const Color(0xFF567D46),
+                            onPressed: () async {
+                              showDialog(
+                                context: context,
+                                barrierDismissible: false,
+                                builder: (_) => const AlertDialog(
+                                  content: SizedBox(
+                                    height: 120,
+                                    child: Center(child: CircularProgressIndicator()),
+                                  ),
+                                ),
+                              );
+
+                              try {
+                                if (isCheckedIn) {
+                                  await activeDocRef.delete();
+                                  if (context.mounted) {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      const SnackBar(content: Text("Checked out of park")),
+                                    );
+                                  }
+                                } else {
+                                  await _locationService.uploadUserToActiveUsersTable(
+                                    parkLatitude,
+                                    parkLongitude,
+                                    parkName,
+                                  );
+                                  if (context.mounted) {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      const SnackBar(content: Text("Checked in to park")),
+                                    );
+                                  }
+                                }
+                              } catch (e) {
+                                if (context.mounted) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(content: Text("Error: $e")),
+                                  );
+                                }
+                              } finally {
+                                if (context.mounted) {
+                                  Navigator.of(context, rootNavigator: true).pop(); // spinner
+                                  Navigator.of(context).pop(); // close the park dialog
+                                }
+                              }
+                            },
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: _BigActionButton(
+                            label: "Park Chat",
+                            onPressed: () {
+                              Navigator.of(context).pop();
+                              Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (_) => ChatRoomScreen(parkId: parkId),
+                                ),
+                              );
+                            },
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+
+                  // Row 2: Show Events + Add Event
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(12, 0, 12, 16),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: _BigActionButton(
+                            label: "Show Events",
+                            onPressed: () {
+                              Navigator.of(context).pop();
+                              widget.onShowEvents(parkId);
+                            },
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: _BigActionButton(
+                            label: "Add Event",
+                            onPressed: () {
+                              Navigator.of(context).pop();
+                              _addEvent(parkId, parkLatitude, parkLongitude);
+                            },
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
                 ],
               ),
             );
@@ -1634,8 +2032,8 @@ class _MapTabState extends State<MapTab>
       }
 
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text("Checked in successfully")));
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text("Checked in successfully")));
       }
     } catch (e) {
       debugPrint("Error checking in: $e");
@@ -1683,8 +2081,7 @@ class _MapTabState extends State<MapTab>
     try {
       final snaps = await FirebaseFirestore.instance
           .collectionGroup('active_users')
-          .where('uid',
-              isEqualTo: currentUser.uid) // <-- type must match schema
+          .where('uid', isEqualTo: currentUser.uid)
           .get();
 
       final wb = FirebaseFirestore.instance.batch();
@@ -1714,7 +2111,6 @@ class _MapTabState extends State<MapTab>
   }
 
   Future<Marker> _createParkMarker(Park park) async {
-    // No Firestore writes here — keep marker creation lightweight.
     return Marker(
       markerId: MarkerId(park.id),
       position: LatLng(park.latitude, park.longitude),
@@ -1743,7 +2139,6 @@ class _MapTabState extends State<MapTab>
       await _hydrateServicesForParks(nearbyParks);
       _rebuildParksListeners();
 
-      // refresh cache too
       await _cacheParksAndServices(nearbyParks);
 
       if (!mounted) return;
@@ -1755,8 +2150,8 @@ class _MapTabState extends State<MapTab>
       debugPrint("Error searching nearby parks: $e");
       if (mounted) {
         setState(() => _isSearching = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text("Error searching for parks: $e")));
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text("Error searching for parks: $e")));
       }
     }
   }
@@ -1803,8 +2198,8 @@ class _MapTabState extends State<MapTab>
     } catch (e) {
       debugPrint("Error adding friend: $e");
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text("Error adding friend.")));
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text("Error adding friend.")));
       }
     }
   }
@@ -1833,8 +2228,8 @@ class _MapTabState extends State<MapTab>
     } catch (e) {
       debugPrint("Error unfriending: $e");
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text("Error removing friend.")));
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text("Error removing friend.")));
       }
     }
   }
@@ -1844,15 +2239,31 @@ class _MapTabState extends State<MapTab>
     super.didChangeDependencies();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      final stale = DateTime.now().difference(_lastCameraMove) >
-          const Duration(seconds: 5);
+      final stale =
+          DateTime.now().difference(_lastCameraMove) > const Duration(seconds: 5);
       if (stale && _finalPosition != null && _mapController != null) {
         _moveCameraTo(_finalPosition!, zoom: 17);
       }
     });
   }
 
-  // --------------- Build ---------------
+  // ---------- Precomputed visible sets ----------
+  void _recomputeVisibleMarkers() {
+    _visibleMarkers = {
+      ..._markersMap.values,
+      ..._noteMarkers.values,
+      ..._historicNoteMarkers.values,
+    };
+  }
+
+  void _recomputeVisiblePolylines() {
+    _visiblePolylines = {
+      ..._livePolylineSet,
+      ..._historicPolylines,
+    };
+  }
+
+  // ---------- Build ----------
   @override
   Widget build(BuildContext context) {
     super.build(context);
@@ -1891,26 +2302,16 @@ class _MapTabState extends State<MapTab>
           Expanded(
             child: Stack(
               children: [
-                GoogleMap(
+                // Map is isolated to avoid rebuilds from overlays/ticker
+                MapSurface(
                   onMapCreated: _onMapCreated,
                   onCameraMove: _onCameraMove,
-                  initialCameraPosition: CameraPosition(
-                    target: _currentMapCenter,
-                    zoom: 14,
-                  ),
-                  markers: {
-                    ..._markersMap.values, // park markers
-                    ..._noteMarkers.values, // live walk notes
-                    ..._historicNoteMarkers.values, // loaded past-walk notes
-                  }.toSet(),
-                  polylines: {
-                    ..._walkPolylines, // live walk
-                    ..._historicPolylines, // loaded past walk
-                  },
+                  initialTarget: _currentMapCenter,
+                  markers: _visibleMarkers,
+                  polylines: _visiblePolylines,
                   myLocationEnabled: true,
-                  myLocationButtonEnabled: false,
-                  compassEnabled: true,
                 ),
+
                 _buildFilterBar(),
 
                 if (_isSearching)
@@ -2000,9 +2401,8 @@ class _MapTabState extends State<MapTab>
                   bottom: 16,
                   child: ElevatedButton(
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: _walk.isActive
-                          ? Colors.redAccent
-                          : const Color(0xFF567D46),
+                      backgroundColor:
+                          _walk.isActive ? Colors.redAccent : const Color(0xFF567D46),
                       foregroundColor: Colors.white,
                       shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(18)),
@@ -2024,11 +2424,11 @@ class _MapTabState extends State<MapTab>
                             mainAxisAlignment: MainAxisAlignment.center,
                             children: [
                               if (_walk.isActive)
-                                const Icon(Icons.flag, size: 24)
+                                const Icon(Icons.flag, size: 24, color: Colors.white)
                               else ...[
-                                const Icon(Icons.directions_walk, size: 24),
+                                const Icon(Icons.directions_walk, size: 24, color: Colors.white),
                                 const SizedBox(width: 6),
-                                const Icon(Icons.pets, size: 22),
+                                const Icon(Icons.pets, size: 22, color: Colors.white),
                               ],
                               const SizedBox(width: 10),
                               Text(
@@ -2045,11 +2445,14 @@ class _MapTabState extends State<MapTab>
                                     color: Colors.white.withOpacity(0.15),
                                     borderRadius: BorderRadius.circular(12),
                                   ),
-                                  child: Text(
-                                    _formatElapsed(),
-                                    style: const TextStyle(
-                                        color: Colors.white,
-                                        fontWeight: FontWeight.w800),
+                                  child: ValueListenableBuilder<String>(
+                                    valueListenable: _elapsedText,
+                                    builder: (_, t, __) => Text(
+                                      t,
+                                      style: const TextStyle(
+                                          color: Colors.white,
+                                          fontWeight: FontWeight.w800),
+                                    ),
                                   ),
                                 ),
                               ],
@@ -2066,6 +2469,40 @@ class _MapTabState extends State<MapTab>
   }
 
   // ---------- Filter bar ----------
+  Widget _filterShell({required Widget child}) {
+    // Avoid heavy blur over platform view on Android
+    if (Platform.isAndroid) {
+      return Container(
+        decoration: BoxDecoration(
+          color: Colors.white.withOpacity(0.92),
+          borderRadius: BorderRadius.circular(22),
+          boxShadow: const [
+            BoxShadow(color: Colors.black12, blurRadius: 12, offset: Offset(0, 4)),
+          ],
+        ),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        child: child,
+      );
+    }
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(22),
+      child: BackdropFilter(
+        filter: ui.ImageFilter.blur(sigmaX: 8, sigmaY: 8), // gentler than 12
+        child: Container(
+          decoration: BoxDecoration(
+            color: Colors.white.withOpacity(0.85),
+            borderRadius: BorderRadius.circular(22),
+            boxShadow: const [
+              BoxShadow(color: Colors.black12, blurRadius: 12, offset: Offset(0, 4)),
+            ],
+          ),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          child: child,
+        ),
+      ),
+    );
+  }
+
   Widget _buildFilterBar() {
     final hasSelection = _selectedFilters.isNotEmpty;
 
@@ -2074,48 +2511,29 @@ class _MapTabState extends State<MapTab>
         alignment: Alignment.topCenter,
         child: Padding(
           padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(22),
-            child: BackdropFilter(
-              filter: ui.ImageFilter.blur(sigmaX: 12, sigmaY: 12),
-              child: Container(
-                decoration: BoxDecoration(
-                  color: Colors.white.withOpacity(0.85),
-                  borderRadius: BorderRadius.circular(22),
-                  boxShadow: const [
-                    BoxShadow(
-                      color: Colors.black12,
-                      blurRadius: 12,
-                      offset: Offset(0, 4),
+          child: _filterShell(
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                children: [
+                  ..._filterOptions.map(_modernFilterChip),
+                  if (hasSelection) ...[
+                    const SizedBox(width: 6),
+                    TextButton.icon(
+                      style: TextButton.styleFrom(
+                        foregroundColor: Colors.green.shade800,
+                        padding: const EdgeInsets.symmetric(horizontal: 10),
+                        shape: const StadiumBorder(),
+                      ),
+                      onPressed: () {
+                        setState(() => _selectedFilters.clear());
+                        _applyFilters();
+                      },
+                      icon: const Icon(Icons.close_rounded, size: 16),
+                      label: const Text('Clear'),
                     ),
                   ],
-                ),
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                child: SingleChildScrollView(
-                  scrollDirection: Axis.horizontal,
-                  child: Row(
-                    children: [
-                      ..._filterOptions.map(_modernFilterChip),
-                      if (hasSelection) ...[
-                        const SizedBox(width: 6),
-                        TextButton.icon(
-                          style: TextButton.styleFrom(
-                            foregroundColor: Colors.green.shade800,
-                            padding: const EdgeInsets.symmetric(horizontal: 10),
-                            shape: const StadiumBorder(),
-                          ),
-                          onPressed: () {
-                            setState(() => _selectedFilters.clear());
-                            _applyFilters();
-                          },
-                          icon: const Icon(Icons.close_rounded, size: 16),
-                          label: const Text('Clear'),
-                        ),
-                      ],
-                    ],
-                  ),
-                ),
+                ],
               ),
             ),
           ),
@@ -2193,7 +2611,7 @@ class _MapTabState extends State<MapTab>
 
     await showDialog(
       context: context,
-      useRootNavigator: true, // 👈 IMPORTANT
+      useRootNavigator: true,
       barrierDismissible: true,
       builder: (_) => CelebrationDialog(
         steps: steps,
@@ -2206,7 +2624,6 @@ class _MapTabState extends State<MapTab>
     );
 
     if (!mounted) return;
-    // Schedule ad AFTER the dialog has popped and on a fresh frame
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       try {
         await _adManager.show(onUnavailable: _adManager.preload);
@@ -2214,23 +2631,6 @@ class _MapTabState extends State<MapTab>
         _adManager.preload();
       }
     });
-  }
-
-  // ---------- Utils ----------
-  Set<Polyline> get _walkPolylines {
-    if (_walk.points.isEmpty) return {};
-    return {
-      Polyline(
-        polylineId: const PolylineId('current_walk'),
-        points: _walk.points,
-        width: 6,
-        color: Colors.blueAccent,
-        geodesic: true,
-        startCap: Cap.roundCap,
-        endCap: Cap.roundCap,
-        jointType: JointType.round,
-      ),
-    };
   }
 }
 
@@ -2289,4 +2689,75 @@ class _StreakResult {
     required this.current,
     required this.longest,
   });
+}
+
+class _BigActionButton extends StatelessWidget {
+  final String label;
+  final VoidCallback onPressed;
+  final Color? backgroundColor;
+
+  const _BigActionButton({
+    Key? key,
+    required this.label,
+    required this.onPressed,
+    this.backgroundColor,
+  }) : super(key: key);
+
+  @override
+  Widget build(BuildContext context) {
+    return ElevatedButton(
+      style: ElevatedButton.styleFrom(
+        backgroundColor: backgroundColor ?? const Color(0xFF567D46),
+        foregroundColor: Colors.white,
+        minimumSize: const Size.fromHeight(56),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+        textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+        padding: const EdgeInsets.symmetric(vertical: 16),
+      ),
+      onPressed: onPressed,
+      child: Text(label),
+    );
+  }
+}
+
+// ---------- MapSurface: isolates the GoogleMap from frequent rebuilds ----------
+class MapSurface extends StatefulWidget {
+  final void Function(GoogleMapController) onMapCreated;
+  final void Function(CameraPosition) onCameraMove;
+  final LatLng initialTarget;
+  final Set<Marker> markers;
+  final Set<Polyline> polylines;
+  final bool myLocationEnabled;
+
+  const MapSurface({
+    Key? key,
+    required this.onMapCreated,
+    required this.onCameraMove,
+    required this.initialTarget,
+    required this.markers,
+    required this.polylines,
+    required this.myLocationEnabled,
+  }) : super(key: key);
+
+  @override
+  State<MapSurface> createState() => _MapSurfaceState();
+}
+
+class _MapSurfaceState extends State<MapSurface> {
+  @override
+  Widget build(BuildContext context) {
+    return GoogleMap(
+      onMapCreated: widget.onMapCreated,
+      onCameraMove: widget.onCameraMove,
+      initialCameraPosition: CameraPosition(
+        target: widget.initialTarget,
+        zoom: 14,
+      ),
+      markers: widget.markers,
+      polylines: widget.polylines,
+      myLocationEnabled: widget.myLocationEnabled,
+      myLocationButtonEnabled: false,
+      compassEnabled: true,
+    );
+  }
 }

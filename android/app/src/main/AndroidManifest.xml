@@ -1,12 +1,18 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
     <!-- Location permissions -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
-    <uses-permission android:name="android.permission.ACCESS_BACKGROUND_LOCATION" />
+    <!-- Scoped to Android 10+ so the merger/tooling behaves nicely -->
+    <uses-permission
+        android:name="android.permission.ACCESS_BACKGROUND_LOCATION"
+        tools:targetApi="q" />
 
     <!-- Foreground service (base + Android 14+ location type) -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
 
     <!-- Network -->
     <uses-permission android:name="android.permission.INTERNET" />
@@ -18,6 +24,9 @@
     <!-- Android 13+ notification runtime permission (needed to show FGS notification) -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- Optional: if you plan to show a prompt to disable battery optimizations -->
+    <!-- <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" /> -->
+
     <!-- Optional: declare step sensors (not required for install) -->
     <uses-feature android:name="android.hardware.sensor.stepcounter" android:required="false" />
     <uses-feature android:name="android.hardware.sensor.stepdetector" android:required="false" />
@@ -27,10 +36,19 @@
         android:name="${applicationName}"
         android:icon="@mipmap/launcher_icon">
 
+        <!-- ✅ Ensure the location plugin runs as a LOCATION Foreground Service -->
+        <service
+            android:name="com.lyokone.location.LocationService"
+            android:exported="false"
+            android:foregroundServiceType="location"
+            android:stopWithTask="false"
+            tools:node="merge"
+            tools:replace="android:foregroundServiceType" />
+
         <!-- ✅ AdMob App ID -->
         <meta-data
             android:name="com.google.android.gms.ads.APPLICATION_ID"
-            android:value="ca-app-pub-3773871623541431~8626595595"/>
+            android:value="ca-app-pub-3773871623541431~8626595595" />
 
         <activity
             android:name=".MainActivity"

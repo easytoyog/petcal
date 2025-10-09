@@ -11,7 +11,6 @@ import 'package:inthepark/services/firestore_service.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:inthepark/widgets/ad_banner.dart';
 import 'package:inthepark/widgets/active_pets_dialog.dart';
-import 'package:intl/intl.dart';
 
 class ParksTab extends StatefulWidget {
   final void Function(String parkId) onShowEvents;
@@ -48,6 +47,10 @@ class _ParksTabState extends State<ParksTab> {
   // ---------- Helpers ----------
   String _parkIdOf(Park p) => generateParkID(p.latitude, p.longitude, p.name);
 
+  // Filtered nearby list (favorites excluded)
+  List<Park> get _nearbyParksVisible =>
+      _nearbyParks.where((p) => !_favoriteParkIds.contains(_parkIdOf(p))).toList();
+
   @override
   void initState() {
     super.initState();
@@ -55,11 +58,10 @@ class _ParksTabState extends State<ParksTab> {
   }
 
   Future<void> _bootstrap() async {
-    // Run in parallel; each function internally guards null/current user
     await Future.wait([
       _fetchFavoriteParks(),
       _refreshCheckedInSet(),
-      _fetchNearbyParksFast(), // cached/last-known first for faster paint
+      _fetchNearbyParksFast(),
     ]);
   }
 
@@ -89,7 +91,6 @@ class _ParksTabState extends State<ParksTab> {
           .get();
 
       final parkIds = likedSnapshot.docs.map((d) => d.id).toList();
-      _favoriteParkIds = parkIds.toSet();
 
       // Fetch park docs in chunks of 10 (whereIn limit)
       final List<Park> parks = [];
@@ -110,10 +111,11 @@ class _ParksTabState extends State<ParksTab> {
 
       if (!mounted) return;
       setState(() {
+        _favoriteParkIds = parkIds.toSet(); // <- ensure rebuild with fav IDs
         _favoriteParks = parks;
       });
     } catch (_) {
-      // silently ignore to avoid UX regressions
+      // silently ignore
     }
   }
 
@@ -138,7 +140,6 @@ class _ParksTabState extends State<ParksTab> {
     if (mounted) setState(() => _isSearching = true);
     try {
       final permission = loc.Location();
-      // Make sure permission is requested (avoid platform exceptions).
       final hasService = await permission.serviceEnabled() ||
           await permission.requestService();
       if (!hasService) return;
@@ -177,7 +178,7 @@ class _ParksTabState extends State<ParksTab> {
 
       if (!mounted) return;
       setState(() {
-        _nearbyParks = parks;
+        _nearbyParks = parks; // we keep raw list; UI filters out favorites
         _hasFetchedNearby = true;
       });
     } catch (_) {
@@ -199,7 +200,6 @@ class _ParksTabState extends State<ParksTab> {
   }
 
   Future<void> _hydrateMetaForIds(List<String> parkIds) async {
-    // Batch whereIn queries of up to 10 IDs.
     final futures = <Future<void>>[];
     for (var i = 0; i < parkIds.length; i += 10) {
       final end = (i + 10).clamp(0, parkIds.length);
@@ -272,7 +272,6 @@ class _ParksTabState extends State<ParksTab> {
     });
   }
 
-  // Clear any other check-ins (batch delete). No userCount server mutations.
   Future<void> _checkOutFromAllParks() async {
     final uid = _currentUserId;
     if (uid == null) return;
@@ -309,10 +308,7 @@ class _ParksTabState extends State<ParksTab> {
     List<String> ownerIds,
   ) async {
     final petsCol = FirebaseFirestore.instance.collection('pets');
-
-    // Guard: whereIn cannot be empty
     if (ownerIds.isEmpty) {
-      // Return a guaranteed-empty result with a no-op query
       return petsCol
           .where(FieldPath.documentId, isEqualTo: '__none__')
           .limit(0)
@@ -320,10 +316,8 @@ class _ParksTabState extends State<ParksTab> {
     }
 
     try {
-      // Attempt 1: ownerId is stored as STRING
       return await petsCol.where('ownerId', whereIn: ownerIds).get();
     } on FirebaseException catch (_) {
-      // Attempt 2: ownerId is stored as DocumentReference
       final ownerRefs = ownerIds
           .map((id) => FirebaseFirestore.instance.collection('owners').doc(id))
           .toList();
@@ -331,12 +325,11 @@ class _ParksTabState extends State<ParksTab> {
     }
   }
 
-  // ---------- Active pets dialog (on-demand loads) ----------
+  // ---------- Active pets dialog ----------
   Future<void> _showActiveUsersDialog(String parkId) async {
     final currentUser = FirebaseAuth.instance.currentUser;
     if (currentUser == null) return;
 
-    // Load favorites once
     final favPetsSnap = await FirebaseFirestore.instance
         .collection('favorites')
         .doc(currentUser.uid)
@@ -344,7 +337,6 @@ class _ParksTabState extends State<ParksTab> {
         .get();
     final favoritePetIds = favPetsSnap.docs.map((d) => d.id).toSet();
 
-    // Who's active?
     final activeUsersSnapshot = await FirebaseFirestore.instance
         .collection('parks')
         .doc(parkId)
@@ -352,7 +344,6 @@ class _ParksTabState extends State<ParksTab> {
         .get();
     final userIds = activeUsersSnapshot.docs.map((d) => d.id).toList();
 
-    // Index check-in times by owner
     final checkedInForByOwner = <String, String>{};
     for (final u in activeUsersSnapshot.docs) {
       final ts = (u.data()['checkedInAt']);
@@ -364,7 +355,6 @@ class _ParksTabState extends State<ParksTab> {
       }
     }
 
-    // Load all pets for these owners in chunks of 10; resilient to field type
     final List<Map<String, dynamic>> activePets = [];
     for (var i = 0; i < userIds.length; i += 10) {
       final end = (i + 10).clamp(0, userIds.length);
@@ -478,7 +468,7 @@ class _ParksTabState extends State<ParksTab> {
         _favoriteParks.add(park);
       }
     }
-    if (mounted) setState(() {});
+    if (mounted) setState(() {}); // rebuild -> nearby list auto-filters
   }
 
   // ---------- Check-in / out ----------
@@ -660,6 +650,8 @@ class _ParksTabState extends State<ParksTab> {
   // ---------- Build ----------
   @override
   Widget build(BuildContext context) {
+    final nearbyVisible = _nearbyParksVisible;
+
     return Scaffold(
       body: Stack(
         children: [
@@ -687,7 +679,7 @@ class _ParksTabState extends State<ParksTab> {
               ),
 
               // CTA to fetch nearby (only shows if we didn’t have a cached fix)
-              if (!_hasFetchedNearby && !_isSearching && _nearbyParks.isEmpty)
+              if (!_hasFetchedNearby && !_isSearching && nearbyVisible.isEmpty)
                 Padding(
                   padding:
                       const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
@@ -703,8 +695,8 @@ class _ParksTabState extends State<ParksTab> {
                   child: Center(child: CircularProgressIndicator()),
                 ),
 
-              // Nearby list (from cached or precise location)
-              ..._nearbyParks.map((p) => _buildParkCard(p, isFavorite: false)),
+              // Nearby list (favorites excluded)
+              ...nearbyVisible.map((p) => _buildParkCard(p, isFavorite: false)),
             ],
           ),
           const Positioned(

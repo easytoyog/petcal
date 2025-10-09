@@ -2,7 +2,6 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:inthepark/screens/owner_detail_screen.dart';
-// Or your next screen
 
 class WaitForEmailVerificationScreen extends StatefulWidget {
   final User user;
@@ -29,20 +28,25 @@ class _WaitForEmailVerificationScreenState
 
   void _startVerificationCheck() {
     _timer = Timer.periodic(const Duration(seconds: 3), (timer) async {
-      await widget.user.reload();
-      final refreshedUser = FirebaseAuth.instance.currentUser;
-      if (refreshedUser != null && refreshedUser.emailVerified) {
-        setState(() {
-          _isVerified = true;
-        });
-        _timer?.cancel();
-        // Navigate to the sign up screen
-        Navigator.pushReplacement(
-          context,
-          MaterialPageRoute(
-            builder: (_) => OwnerDetailsScreen(),
-          ),
-        );
+      try {
+        await widget.user.reload();
+        final refreshedUser = FirebaseAuth.instance.currentUser;
+        if (!mounted) return;
+        if (refreshedUser != null && refreshedUser.emailVerified) {
+          setState(() {
+            _isVerified = true;
+          });
+          _timer?.cancel();
+          // Navigate to the next step after verification
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(
+              builder: (_) => OwnerDetailsScreen(),
+            ),
+          );
+        }
+      } catch (_) {
+        // swallow errors to avoid user-facing noise; will retry next tick
       }
     });
   }
@@ -53,6 +57,7 @@ class _WaitForEmailVerificationScreenState
     });
     _resendTimer?.cancel();
     _resendTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!mounted) return;
       if (_resendCooldown > 0) {
         setState(() {
           _resendCooldown--;
@@ -61,6 +66,22 @@ class _WaitForEmailVerificationScreenState
         _resendTimer?.cancel();
       }
     });
+  }
+
+  Future<void> _logout() async {
+    try {
+      _timer?.cancel();
+      _resendTimer?.cancel();
+      await FirebaseAuth.instance.signOut();
+      if (!mounted) return;
+      // Go to your main page. Adjust route name if different.
+      Navigator.of(context).pushNamedAndRemoveUntil('/', (route) => false);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Sign out failed: $e')),
+      );
+    }
   }
 
   @override
@@ -73,7 +94,16 @@ class _WaitForEmailVerificationScreenState
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text("Verify Your Email")),
+      appBar: AppBar(
+        title: const Text("Verify Your Email"),
+        actions: [
+          IconButton(
+            tooltip: 'Log out',
+            icon: const Icon(Icons.logout),
+            onPressed: _logout,
+          ),
+        ],
+      ),
       body: Center(
         child: Padding(
           padding: const EdgeInsets.all(24.0),
@@ -107,16 +137,33 @@ class _WaitForEmailVerificationScreenState
                 onPressed: (_resendCooldown > 0)
                     ? null
                     : () async {
-                        await widget.user.sendEmailVerification();
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                              content: Text("Verification email resent.")),
-                        );
-                        _startResendCooldown();
+                        try {
+                          await widget.user.sendEmailVerification();
+                          if (!mounted) return;
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                                content: Text("Verification email resent.")),
+                          );
+                          _startResendCooldown();
+                        } catch (e) {
+                          if (!mounted) return;
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                                content: Text(
+                                    "Couldn't resend verification email: $e")),
+                          );
+                        }
                       },
                 child: (_resendCooldown > 0)
                     ? Text("Resend in $_resendCooldown s")
                     : const Text("Resend Verification Email"),
+              ),
+              const SizedBox(height: 8),
+              // Optional: a visible logout button in the body as well
+              OutlinedButton.icon(
+                onPressed: _logout,
+                icon: const Icon(Icons.logout),
+                label: const Text('Log out'),
               ),
             ],
           ),
