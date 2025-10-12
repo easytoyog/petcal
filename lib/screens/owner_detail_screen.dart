@@ -10,34 +10,15 @@ class OwnerDetailsScreen extends StatefulWidget {
   _OwnerDetailsScreenState createState() => _OwnerDetailsScreenState();
 }
 
-class UpperCaseTextFormatter extends TextInputFormatter {
-  @override
-  TextEditingValue formatEditUpdate(
-    TextEditingValue oldValue,
-    TextEditingValue newValue,
-  ) {
-    return newValue.copyWith(
-      text: newValue.text.toUpperCase(),
-      selection: newValue.selection,
-    );
-  }
-}
-
 class _OwnerDetailsScreenState extends State<OwnerDetailsScreen> {
   final TextEditingController firstNameController = TextEditingController();
   final FocusNode firstNameFocusNode = FocusNode();
   final TextEditingController lastNameController = TextEditingController();
   final TextEditingController phoneController = TextEditingController();
-  final TextEditingController addressLine1Controller = TextEditingController();
-  final TextEditingController cityController = TextEditingController();
-  final TextEditingController stateController = TextEditingController();
-  final TextEditingController postalCodeController = TextEditingController();
-  final TextEditingController countryController = TextEditingController();
 
   @override
   void initState() {
     super.initState();
-    // Auto-focus after build
     WidgetsBinding.instance.addPostFrameCallback((_) {
       firstNameFocusNode.requestFocus();
     });
@@ -49,11 +30,6 @@ class _OwnerDetailsScreenState extends State<OwnerDetailsScreen> {
     firstNameFocusNode.dispose();
     lastNameController.dispose();
     phoneController.dispose();
-    addressLine1Controller.dispose();
-    cityController.dispose();
-    stateController.dispose();
-    postalCodeController.dispose();
-    countryController.dispose();
     super.dispose();
   }
 
@@ -74,30 +50,29 @@ class _OwnerDetailsScreenState extends State<OwnerDetailsScreen> {
       await FirebaseFirestore.instance.runTransaction((tx) async {
         final snap = await tx.get(ref);
 
+        // address intentionally empty
         final base = {
           'email': user.email ?? '',
           'firstName': firstNameController.text.trim(),
           'lastName': lastNameController.text.trim(),
           'phone': phoneController.text.trim(),
           'address': {
-            'line1': addressLine1Controller.text.trim(),
-            'city': cityController.text.trim(),
-            'state': stateController.text.trim(),
-            'postalCode': postalCodeController.text.trim().toUpperCase(),
-            'country': countryController.text.trim(),
+            'line1': '',
+            'city': '',
+            'state': '',
+            'postalCode': '',
+            'country': '',
           },
           'active': true,
         };
 
         if (!snap.exists) {
-          // CREATE path
           tx.set(ref, {
             ...base,
             'createdAt': FieldValue.serverTimestamp(),
             'updatedAt': FieldValue.serverTimestamp(),
           });
         } else {
-          // UPDATE path
           tx.update(ref, {
             ...base,
             'updatedAt': FieldValue.serverTimestamp(),
@@ -117,8 +92,10 @@ class _OwnerDetailsScreenState extends State<OwnerDetailsScreen> {
     }
   }
 
-  InputDecoration _inputDecoration(
-      {required String hint, required IconData icon}) {
+  InputDecoration _inputDecoration({
+    required String hint,
+    required IconData icon,
+  }) {
     return InputDecoration(
       filled: true,
       fillColor: Colors.white.withOpacity(0.1),
@@ -131,35 +108,33 @@ class _OwnerDetailsScreenState extends State<OwnerDetailsScreen> {
       ),
       focusedBorder: OutlineInputBorder(
         borderRadius: BorderRadius.circular(12),
-        borderSide: const BorderSide(
-          color: Colors.tealAccent,
-          width: 2,
-        ),
+        borderSide: const BorderSide(color: Colors.tealAccent, width: 2),
       ),
     );
   }
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text("Owner Details"),
-        backgroundColor: const Color(0xFF567D46),
+    // Draw gradient behind the entire screen (fixes white area at bottom)
+    return Container(
+      decoration: const BoxDecoration(
+        gradient: LinearGradient(
+          colors: [Color(0xFF567D46), Color(0xFF365A38)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
       ),
-      body: SafeArea(
-        child: Container(
-          decoration: const BoxDecoration(
-            gradient: LinearGradient(
-              colors: [Color(0xFF567D46), Color(0xFF365A38)],
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-            ),
-          ),
+      child: Scaffold(
+        backgroundColor: Colors
+            .transparent, // important so the gradient shows everywhere (no white gap)
+        appBar: AppBar(
+          title: const Text("Owner Details"),
+          backgroundColor: const Color(0xFF567D46),
+        ),
+        body: SafeArea(
           child: SingleChildScrollView(
-            padding: const EdgeInsets.fromLTRB(
-                24.0, 0, 24.0, 40.0), // <-- Add extra bottom padding
+            padding: const EdgeInsets.fromLTRB(24.0, 0, 24.0, 40.0),
             child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
                 const Icon(Icons.person, size: 100, color: Colors.tealAccent),
@@ -173,33 +148,41 @@ class _OwnerDetailsScreenState extends State<OwnerDetailsScreen> {
                   ),
                 ),
                 const SizedBox(height: 30),
+
+                // First name (icon: person)
                 TextField(
                   controller: firstNameController,
                   focusNode: firstNameFocusNode,
+                  textInputAction: TextInputAction.next,
                   style: const TextStyle(color: Colors.white),
                   cursorColor: Colors.tealAccent,
                   decoration: _inputDecoration(
                     hint: "First Name (Required)",
-                    icon: Icons.account_circle,
+                    icon: Icons.person, // nicer for first name
                   ),
                 ),
                 const SizedBox(height: 20),
+
+                // Last name (auto-capitalize words, icon: badge)
                 TextField(
                   controller: lastNameController,
+                  textInputAction: TextInputAction.next,
+                  textCapitalization: TextCapitalization
+                      .words, // auto-capitalize last name as you type
                   style: const TextStyle(color: Colors.white),
                   cursorColor: Colors.tealAccent,
                   decoration: _inputDecoration(
                     hint: "Last Name (Required)",
-                    icon: Icons.account_circle_outlined,
+                    icon: Icons.account_circle, // clearer for surname/identity
                   ),
                 ),
                 const SizedBox(height: 20),
+
+                // Phone
                 TextField(
                   controller: phoneController,
-                  keyboardType: TextInputType.number,
-                  inputFormatters: [
-                    FilteringTextInputFormatter.digitsOnly,
-                  ],
+                  keyboardType: TextInputType.phone,
+                  inputFormatters: [FilteringTextInputFormatter.digitsOnly],
                   style: const TextStyle(color: Colors.white),
                   cursorColor: Colors.tealAccent,
                   decoration: _inputDecoration(
@@ -207,81 +190,8 @@ class _OwnerDetailsScreenState extends State<OwnerDetailsScreen> {
                     icon: Icons.phone,
                   ),
                 ),
-                const SizedBox(height: 20),
-                const Align(
-                  alignment: Alignment.centerLeft,
-                  child: Text(
-                    "Address (Optional)",
-                    style: TextStyle(color: Colors.white70, fontSize: 16),
-                  ),
-                ),
-                const Align(
-                  alignment: Alignment.centerLeft,
-                  child: Text(
-                    "Don't worry, your address will not be visible to other users.",
-                    style: TextStyle(color: Colors.white54, fontSize: 12),
-                  ),
-                ),
-                const SizedBox(height: 10),
-                TextField(
-                  controller: addressLine1Controller,
-                  style: const TextStyle(color: Colors.white),
-                  cursorColor: Colors.tealAccent,
-                  decoration: _inputDecoration(
-                    hint: "Address Line 1",
-                    icon: Icons.home,
-                  ),
-                ),
-                const SizedBox(height: 20),
-                TextField(
-                  controller: cityController,
-                  style: const TextStyle(color: Colors.white),
-                  cursorColor: Colors.tealAccent,
-                  decoration: _inputDecoration(
-                    hint: "City",
-                    icon: Icons.location_city,
-                  ),
-                ),
-                const SizedBox(height: 20),
-                TextField(
-                  controller: stateController,
-                  style: const TextStyle(color: Colors.white),
-                  cursorColor: Colors.tealAccent,
-                  decoration: _inputDecoration(
-                    hint: "State/Province",
-                    icon: Icons.map,
-                  ),
-                ),
-                const SizedBox(height: 20),
-                TextField(
-                  controller: postalCodeController,
-                  style: const TextStyle(color: Colors.white),
-                  cursorColor: Colors.tealAccent,
-                  textCapitalization:
-                      TextCapitalization.characters, // keyboard hint
-                  inputFormatters: [
-                    FilteringTextInputFormatter.allow(RegExp(
-                        r'[A-Za-z0-9 ]')), // allow space if you want "A1A 1A1"
-                    LengthLimitingTextInputFormatter(
-                        7), // fits "A1A 1A1"; use 6 if no space
-                    UpperCaseTextFormatter(), // <-- force caps as you type
-                  ],
-                  decoration: _inputDecoration(
-                    hint: "Postal Code",
-                    icon: Icons.local_post_office,
-                  ),
-                ),
-                const SizedBox(height: 20),
-                TextField(
-                  controller: countryController,
-                  style: const TextStyle(color: Colors.white),
-                  cursorColor: Colors.tealAccent,
-                  decoration: _inputDecoration(
-                    hint: "Country",
-                    icon: Icons.public,
-                  ),
-                ),
                 const SizedBox(height: 30),
+
                 SizedBox(
                   width: MediaQuery.of(context).size.width / 2,
                   child: ElevatedButton(
@@ -294,8 +204,10 @@ class _OwnerDetailsScreenState extends State<OwnerDetailsScreen> {
                       ),
                     ),
                     onPressed: saveOwnerDetails,
-                    child: const Text("Next Add Pets",
-                        style: TextStyle(fontSize: 18)),
+                    child: const Text(
+                      "Next Add Pets",
+                      style: TextStyle(fontSize: 18),
+                    ),
                   ),
                 ),
                 const SizedBox(height: 30),

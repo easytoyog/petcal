@@ -4,8 +4,10 @@ import 'dart:convert';
 import 'dart:ui' as ui;
 import 'dart:io' show Platform;
 import 'dart:math' as math;
+import 'package:flutter/services.dart'; // PlatformException
+import 'package:cloud_firestore/cloud_firestore.dart'; // FirebaseException
+import 'dart:developer' as dev;
 
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show rootBundle, PlatformException;
@@ -46,7 +48,7 @@ class _MapTabState extends State<MapTab>
   // --- Map Controller + Completer (for reliable camera ops) ---
   GoogleMapController? _mapController;
   final Completer<GoogleMapController> _mapCtlCompleter = Completer();
-
+  bool _manualFinishing = false;
   final loc.Location _location = loc.Location();
   late final LocationService _locationService;
 
@@ -149,8 +151,6 @@ class _MapTabState extends State<MapTab>
   }
 
   // --- Douglas-Peucker simplification (meters tolerance) ---
-  // Keeps endpoints; recursively prunes points whose perpendicular distance
-  // from the baseline is < tolerance.
   List<LatLng> _simplifyRoute(List<LatLng> pts, double tolMeters) {
     if (pts.length <= 2) return pts;
     final keep = List<bool>.filled(pts.length, false);
@@ -190,11 +190,12 @@ class _MapTabState extends State<MapTab>
   }
 
   double _perpDistanceMeters(LatLng p, LatLng a, LatLng b) {
-    // Convert to a projected local plane around 'a' to approximate meters
-    // (fine for small segments). Equirectangular projection:
     final latRad = _deg2rad(a.latitude);
-    final mPerDegLat = 111132.92 - 559.82 * math.cos(2 * latRad) + 1.175 * math.cos(4 * latRad);
-    final mPerDegLng = 111412.84 * math.cos(latRad) - 93.5 * math.cos(3 * latRad);
+    final mPerDegLat = 111132.92 -
+        559.82 * math.cos(2 * latRad) +
+        1.175 * math.cos(4 * latRad);
+    final mPerDegLng =
+        111412.84 * math.cos(latRad) - 93.5 * math.cos(3 * latRad);
 
     final ax = 0.0;
     final ay = 0.0;
@@ -206,7 +207,6 @@ class _MapTabState extends State<MapTab>
     final dx = bx - ax;
     final dy = by - ay;
     if (dx == 0 && dy == 0) {
-      // a==b
       return math.sqrt((px - ax) * (px - ax) + (py - ay) * (py - ay));
     }
     final t = ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy);
@@ -225,9 +225,9 @@ class _MapTabState extends State<MapTab>
       return true;
     }
 
-    // throttle
     final now = DateTime.now();
-    if (now.difference(_lastPolylineUpdate).inMilliseconds < _polylineUpdateMs) {
+    if (now.difference(_lastPolylineUpdate).inMilliseconds <
+        _polylineUpdateMs) {
       return false;
     }
 
@@ -247,15 +247,14 @@ class _MapTabState extends State<MapTab>
       return false;
     }
 
-    // Simplify occasionally to keep Android draw cheap
-    if (_drawnRoute.length > 2 && (_drawnRoute.length % _simplifyEveryNPoints == 0)) {
+    if (_drawnRoute.length > 2 &&
+        (_drawnRoute.length % _simplifyEveryNPoints == 0)) {
       final simplified = _simplifyRoute(_drawnRoute, _simplifyToleranceMeters);
       _drawnRoute
         ..clear()
         ..addAll(simplified);
     }
 
-    // rebuild the single live polyline (geodesic off on Android for perf)
     final useGeodesic = !Platform.isAndroid;
     _livePolylineSet = {
       Polyline(
@@ -274,7 +273,8 @@ class _MapTabState extends State<MapTab>
     return true;
   }
 
-  Future<bool> _explainAndRequestBackgroundLocation(BuildContext context) async {
+  Future<bool> _explainAndRequestBackgroundLocation(
+      BuildContext context) async {
     if (!Platform.isAndroid) return true;
 
     final whenInUse = await Permission.location.status;
@@ -288,14 +288,24 @@ class _MapTabState extends State<MapTab>
             title: const Text('Enable background location'),
             content: Text.rich(
               const TextSpan(children: [
-                TextSpan(text: 'To keep tracking your walk when the screen is off, Android requires you to choose '),
-                TextSpan(text: 'Allow all the time', style: TextStyle(fontWeight: FontWeight.w700)),
-                TextSpan(text: ' for Location. We only use your location while a walk is active, and you can stop anytime.'),
+                TextSpan(
+                    text:
+                        'To keep tracking your walk when the screen is off, Android requires you to choose '),
+                TextSpan(
+                    text: 'Allow all the time',
+                    style: TextStyle(fontWeight: FontWeight.w700)),
+                TextSpan(
+                    text:
+                        ' for Location. We only use your location while a walk is active, and you can stop anytime.'),
               ]),
             ),
             actions: [
-              TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('Not now')),
-              ElevatedButton(onPressed: () => Navigator.of(ctx).pop(true), child: const Text('Continue')),
+              TextButton(
+                  onPressed: () => Navigator.of(ctx).pop(false),
+                  child: const Text('Not now')),
+              ElevatedButton(
+                  onPressed: () => Navigator.of(ctx).pop(true),
+                  child: const Text('Continue')),
             ],
           ),
         ) ??
@@ -321,8 +331,12 @@ class _MapTabState extends State<MapTab>
                 "Background location is currently off. To enable it:\n\n"
                 "Settings → Apps → InThePark → Permissions → Location → Allow all the time."),
             actions: [
-              TextButton(onPressed: () => Navigator.of(ctx).pop(false), child: const Text('Cancel')),
-              ElevatedButton(onPressed: () => Navigator.of(ctx).pop(true), child: const Text('Open Settings')),
+              TextButton(
+                  onPressed: () => Navigator.of(ctx).pop(false),
+                  child: const Text('Cancel')),
+              ElevatedButton(
+                  onPressed: () => Navigator.of(ctx).pop(true),
+                  child: const Text('Open Settings')),
             ],
           ),
         ) ??
@@ -359,7 +373,9 @@ class _MapTabState extends State<MapTab>
 
       final fresh = await _location.onLocationChanged.firstWhere((l) {
         final acc = l.accuracy ?? double.infinity;
-        return l.latitude != null && l.longitude != null && acc <= minAccuracyMeters;
+        return l.latitude != null &&
+            l.longitude != null &&
+            acc <= minAccuracyMeters;
       }).timeout(freshTimeout);
 
       if (fresh.latitude != null && fresh.longitude != null) {
@@ -373,7 +389,9 @@ class _MapTabState extends State<MapTab>
     }
 
     try {
-      final l = await _location.getLocation().timeout(const Duration(milliseconds: 800));
+      final l = await _location
+          .getLocation()
+          .timeout(const Duration(milliseconds: 800));
       if (l.latitude != null && l.longitude != null) {
         return LatLng(l.latitude!, l.longitude!);
       }
@@ -397,7 +415,8 @@ class _MapTabState extends State<MapTab>
       targetHeight: width,
     );
     final frame = await codec.getNextFrame();
-    final byteData = await frame.image.toByteData(format: ui.ImageByteFormat.png);
+    final byteData =
+        await frame.image.toByteData(format: ui.ImageByteFormat.png);
     return BitmapDescriptor.fromBytes(byteData!.buffer.asUint8List());
   }
 
@@ -611,6 +630,9 @@ class _MapTabState extends State<MapTab>
   // track last explicit camera move to help refocus on appear
   DateTime _lastCameraMove = DateTime.fromMillisecondsSinceEpoch(0);
 
+  // ★ NEW: we remember previous active state to detect auto-finish
+  bool _wasActive = false;
+
   @override
   void initState() {
     super.initState();
@@ -620,11 +642,17 @@ class _MapTabState extends State<MapTab>
     _fetchFavorites();
 
     _walk = WalkManager(location: _location);
-    _walkListener = () {
+
+    _walkListener = () async {
       final changed = _syncPolylineIfNeeded();
       if (changed && mounted) setState(() {});
-      // timer chip:
       _elapsedText.value = _formatElapsed();
+
+      // Only auto-finish if we didn't just manually stop
+      if (_wasActive && !_walk.isActive && !_manualFinishing) {
+        await _handleWalkFinished(auto: true);
+      }
+      _wasActive = _walk.isActive;
     };
     _walk.addListener(_walkListener);
     _walk.restoreIfAny();
@@ -654,7 +682,9 @@ class _MapTabState extends State<MapTab>
     if (_finalPosition != null) return _finalPosition!;
     final cached = _currentMapCenter;
     try {
-      final l = await _location.getLocation().timeout(const Duration(milliseconds: 400));
+      final l = await _location
+          .getLocation()
+          .timeout(const Duration(milliseconds: 400));
       if (l.latitude != null && l.longitude != null) {
         return LatLng(l.latitude!, l.longitude!);
       }
@@ -789,7 +819,6 @@ class _MapTabState extends State<MapTab>
 
   @override
   void dispose() {
-    // best-effort to relax settings before teardown
     () async {
       try {
         await _location.enableBackgroundMode(enable: false);
@@ -818,49 +847,76 @@ class _MapTabState extends State<MapTab>
     // no-op: WalkManager manages its own timers
   }
 
-  Future<void> _toggleWalk() async {
-    if (_walk.isActive) {
-      if (!_finishingWalk) setState(() => _finishingWalk = true);
+  // ★ NEW: single place to finalize any walk (manual or auto)
+  Future<void> _handleWalkFinished({bool auto = false}) async {
+    if (_finishingWalk) return;
+    setState(() => _finishingWalk = true);
 
-      await _walk.stop();
-      _stopUiTicker();
+    _stopUiTicker();
 
-      try {
-        await _location.enableBackgroundMode(enable: false);
-        await _location.changeSettings(accuracy: loc.LocationAccuracy.balanced);
-      } catch (e) {
-        debugPrint('disable BG mode failed: $e');
+    try {
+      await _location.enableBackgroundMode(enable: false);
+      await _location.changeSettings(accuracy: loc.LocationAccuracy.balanced);
+    } catch (_) {}
+
+    if (!_walk.meetsMinimum) {
+      await _discardCurrentWalk();
+      _resetLiveRoute();
+      if (mounted) {
+        setState(() => _finishingWalk = false);
+
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("Walk not saved. ${_walk.tooShortReason}")),
+        );
       }
+      return;
+    }
 
-      if (!_walk.meetsMinimum) {
-        await _discardCurrentWalk();
-        _resetLiveRoute();
-        if (mounted) {
-          setState(() => _finishingWalk = false);
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text("Walk not saved. ${_walk.tooShortReason}")),
-          );
-        }
-        return;
-      }
+    _StreakResult? streak;
 
+    try {
       final saved = await _persistWalkSession();
-
-      _StreakResult? streak;
       if (saved) {
         streak = await _updateDailyStreak();
+      } else {
+        // Returned false without throwing → log some context
+        debugPrint(
+          'persistWalkSession returned false '
+          '(meetsMinimum=${_walk.meetsMinimum}, currentWalkId=$_currentWalkId)',
+        );
       }
+    } on FirebaseException catch (e, st) {
+      debugPrint('Firestore error [${e.code}]: ${e.message}');
+      debugPrint('plugin: ${e.plugin}');
+      debugPrintStack(stackTrace: st);
+      dev.log('persistWalkSession Firestore error', error: e, stackTrace: st);
 
-      final steps_ = _walk.steps;
-      final meters_ = _walk.meters;
-      final streakCurrent_ = streak?.current;
-      final streakLongest_ = streak?.longest;
-      final streakIsNewRecord_ = streak?.isNewRecord ?? false;
+      // Optional: show user
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Save failed (Firestore): ${e.message}')),
+        );
+      }
+    } on PlatformException catch (e, st) {
+      debugPrint('PlatformException [${e.code}]: ${e.message}; ${e.details}');
+      debugPrintStack(stackTrace: st);
+      dev.log('persistWalkSession Platform error', error: e, stackTrace: st);
+    } catch (e, st) {
+      debugPrint('persistWalkSession failed: $e');
+      debugPrintStack(stackTrace: st);
+      dev.log('persistWalkSession unknown error', error: e, stackTrace: st);
+    }
 
-      if (mounted) setState(() => _finishingWalk = false);
+    final steps_ = _walk.steps;
+    final meters_ = _walk.meters;
+    final streakCurrent_ = streak?.current;
+    final streakLongest_ = streak?.longest;
+    final streakIsNewRecord_ = streak?.isNewRecord ?? false;
 
+    if (mounted) setState(() => _finishingWalk = false);
+
+    if (mounted) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted) return;
         _showCelebrationDialog(
           steps: steps_,
           meters: meters_,
@@ -869,11 +925,24 @@ class _MapTabState extends State<MapTab>
           streakIsNewRecord: streakIsNewRecord_,
         );
       });
+    }
+  }
+
+  Future<void> _toggleWalk() async {
+    if (_walk.isActive) {
+      _manualFinishing = true;
+      try {
+        await _walk.stop();
+        await _handleWalkFinished(auto: false);
+      } finally {
+        _manualFinishing = false;
+      }
+      return;
     } else {
       if (!await _ensureLocationPermission()) {
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("Location permission is required to start a walk.")),
+          SnackBar(content: Text(_walk.tooShortReason)),
         );
         return;
       }
@@ -884,7 +953,9 @@ class _MapTabState extends State<MapTab>
       if (!ok) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text("Background location is required to track with the screen off.")),
+            const SnackBar(
+                content: Text(
+                    "Background location is required to track with the screen off.")),
           );
         }
         return;
@@ -899,7 +970,9 @@ class _MapTabState extends State<MapTab>
       if (!bgOk) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text("Couldn’t enable background mode. Make sure 'Allow all the time' is on in Settings.")),
+            const SnackBar(
+                content: Text(
+                    "Couldn’t enable background mode. Make sure 'Allow all the time' is on in Settings.")),
           );
         }
         return;
@@ -920,7 +993,8 @@ class _MapTabState extends State<MapTab>
         () async {
           try {
             await _location.enableBackgroundMode(enable: false);
-            await _location.changeSettings(accuracy: loc.LocationAccuracy.balanced);
+            await _location.changeSettings(
+                accuracy: loc.LocationAccuracy.balanced);
           } catch (_) {}
         }();
         if (!mounted) return;
@@ -958,13 +1032,12 @@ class _MapTabState extends State<MapTab>
     final docRef = walksCol.doc();
     _currentWalkId = docRef.id;
 
-    docRef
-        .set({
-          'status': 'active',
-          'startedAt': FieldValue.serverTimestamp(),
-          'createdAt': FieldValue.serverTimestamp(),
-        }, SetOptions(merge: true))
-        .catchError((e) => debugPrint('walk session set() failed: $e'));
+    docRef.set({
+      'status': 'active',
+      'startedAt': FieldValue.serverTimestamp(),
+      'createdAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true)).catchError(
+        (e) => debugPrint('walk session set() failed: $e'));
   }
 
   Future<void> _discardCurrentWalk() async {
@@ -1005,9 +1078,14 @@ class _MapTabState extends State<MapTab>
           .map((p) => GeoPoint(p.latitude, p.longitude))
           .toList(growable: false);
 
+      // If WalkManager exposes endedAt, prefer it; else server time
+      final endedAt = _walk.endedAt != null
+          ? Timestamp.fromDate(_walk.endedAt!)
+          : FieldValue.serverTimestamp();
+
       await walkRef.set({
         'status': 'completed',
-        'endedAt': FieldValue.serverTimestamp(),
+        'endedAt': endedAt,
         'durationSec': _walk.elapsed.inSeconds,
         'distanceMeters': _walk.meters,
         'steps': _walk.steps,
@@ -1293,13 +1371,15 @@ class _MapTabState extends State<MapTab>
   // ---- Services hydrator ----
   Future<void> _hydrateServicesForParks(List<Park> parks) async {
     final ids = parks.map((p) => p.id).toList().chunked(10);
-    final snaps = await Future.wait(ids.map((chunk) => FirebaseFirestore.instance
+    final snaps = await Future.wait(ids.map((chunk) => FirebaseFirestore
+        .instance
         .collection('parks')
         .where(FieldPath.documentId, whereIn: chunk)
         .get()));
     for (final qs in snaps) {
       for (final d in qs.docs) {
-        final svcs = (d.data()['services'] as List?)?.cast<String>() ?? const [];
+        final svcs =
+            (d.data()['services'] as List?)?.cast<String>() ?? const [];
         _parkServicesById[d.id] = svcs;
       }
     }
@@ -1380,7 +1460,6 @@ class _MapTabState extends State<MapTab>
         }
 
         if ((changedInfo || servicesChanged)) {
-          // Debounce UI updates to avoid rapid map rebuilds on Android
           _parksUiDebounce?.cancel();
           _parksUiDebounce = Timer(const Duration(milliseconds: 150), () {
             if (!mounted) return;
@@ -1548,7 +1627,8 @@ class _MapTabState extends State<MapTab>
     if (isCheckedIn) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("You are already checked in to this park.")),
+        const SnackBar(
+            content: Text("You are already checked in to this park.")),
       );
       return;
     }
@@ -1563,10 +1643,12 @@ class _MapTabState extends State<MapTab>
           builder: (context, setStateDialog) {
             return AlertDialog(
               title: const Text("Check In"),
-              content: Text("You are at ${park.name}. Do you want to check in?"),
+              content:
+                  Text("You are at ${park.name}. Do you want to check in?"),
               actions: [
                 TextButton(
-                  onPressed: isProcessing ? null : () => Navigator.of(context).pop(),
+                  onPressed:
+                      isProcessing ? null : () => Navigator.of(context).pop(),
                   child: const Text("No"),
                 ),
                 ElevatedButton(
@@ -1720,8 +1802,9 @@ class _MapTabState extends State<MapTab>
                 'ownerName': ownerName,
                 'petName': pet['name'] ?? 'Unknown Pet',
                 'petPhotoUrl': pet['photoUrl'] ?? '',
-                'checkInTime':
-                    checkInTime != null ? _checkedInForSince(checkInTime.toDate()) : '',
+                'checkInTime': checkInTime != null
+                    ? _checkedInForSince(checkInTime.toDate())
+                    : '',
               });
             }
           }
@@ -1748,7 +1831,8 @@ class _MapTabState extends State<MapTab>
                   StreamBuilder<QuerySnapshot>(
                     stream: likesCol.snapshots(),
                     builder: (context, snap) {
-                      final likeCount = snap.hasData ? snap.data!.docs.length : 0;
+                      final likeCount =
+                          snap.hasData ? snap.data!.docs.length : 0;
 
                       return Row(
                         children: [
@@ -1771,7 +1855,8 @@ class _MapTabState extends State<MapTab>
                                   await likesCol.doc(currentUser.uid).delete();
                                   if (context.mounted) {
                                     ScaffoldMessenger.of(context).showSnackBar(
-                                      const SnackBar(content: Text("Removed park like")),
+                                      const SnackBar(
+                                          content: Text("Removed park like")),
                                     );
                                   }
                                 } else {
@@ -1782,7 +1867,8 @@ class _MapTabState extends State<MapTab>
                                   });
                                   if (context.mounted) {
                                     ScaffoldMessenger.of(context).showSnackBar(
-                                      const SnackBar(content: Text("Park liked!")),
+                                      const SnackBar(
+                                          content: Text("Park liked!")),
                                     );
                                   }
                                 }
@@ -1790,13 +1876,17 @@ class _MapTabState extends State<MapTab>
                               } catch (e) {
                                 if (context.mounted) {
                                   ScaffoldMessenger.of(context).showSnackBar(
-                                    SnackBar(content: Text("Error updating like: $e")),
+                                    SnackBar(
+                                        content:
+                                            Text("Error updating like: $e")),
                                   );
                                 }
                               }
                             },
                             icon: Icon(
-                              isLiked ? Icons.thumb_up : Icons.thumb_up_outlined,
+                              isLiked
+                                  ? Icons.thumb_up
+                                  : Icons.thumb_up_outlined,
                             ),
                           ),
                         ],
@@ -1816,6 +1906,7 @@ class _MapTabState extends State<MapTab>
                         scrollDirection: Axis.horizontal,
                         child: Row(
                           children: [
+                            // existing chips
                             ...services.map((service) => Padding(
                                   padding: const EdgeInsets.only(right: 8.0),
                                   child: Chip(
@@ -1830,11 +1921,129 @@ class _MapTabState extends State<MapTab>
                                       size: 18,
                                       color: Colors.green,
                                     ),
-                                    label: Text(service, style: const TextStyle(fontSize: 12)),
+                                    label: Text(service,
+                                        style: const TextStyle(fontSize: 12)),
                                     backgroundColor: Colors.green[50],
                                   ),
                                 )),
                             const SizedBox(width: 6),
+
+                            // ★ ADDED: "+ Add Activity" button (adds to parks/{id}.services)
+                            TextButton(
+                              style: TextButton.styleFrom(
+                                foregroundColor: Colors.green.shade800,
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 8, vertical: 4),
+                              ),
+                              onPressed: () async {
+                                // options you allow users to add
+                                const all = <String>[
+                                  "Off-leash Trail",
+                                  "Off-leash Dog Park",
+                                  "Off-leash Beach",
+                                  "On-leash Trail",
+                                ];
+
+                                // Only show ones not already added
+                                final options = all
+                                    .where((s) => !services.contains(s))
+                                    .toList();
+
+                                if (options.isEmpty) {
+                                  if (context.mounted) {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      const SnackBar(
+                                        content: Text(
+                                            "All activities are already added."),
+                                      ),
+                                    );
+                                  }
+                                  return;
+                                }
+
+                                final newService = await showDialog<String>(
+                                  context: context,
+                                  builder: (ctx) {
+                                    String? selected = options.first;
+                                    return StatefulBuilder(
+                                      builder: (ctx, setState) {
+                                        return AlertDialog(
+                                          title: const Text("Add activity"),
+                                          content:
+                                              DropdownButtonFormField<String>(
+                                            value: selected,
+                                            items: options
+                                                .map((s) => DropdownMenuItem(
+                                                      value: s,
+                                                      child: Text(s),
+                                                    ))
+                                                .toList(),
+                                            onChanged: (val) =>
+                                                setState(() => selected = val),
+                                          ),
+                                          actions: [
+                                            TextButton(
+                                              onPressed: () =>
+                                                  Navigator.of(ctx).pop(),
+                                              child: const Text("Cancel"),
+                                            ),
+                                            ElevatedButton(
+                                              onPressed: () => Navigator.of(ctx)
+                                                  .pop(selected),
+                                              child: const Text("Add"),
+                                            ),
+                                          ],
+                                        );
+                                      },
+                                    );
+                                  },
+                                );
+
+                                if (newService == null || newService.isEmpty)
+                                  return;
+
+                                try {
+                                  // Write to Firestore
+                                  await FirebaseFirestore.instance
+                                      .collection('parks')
+                                      .doc(parkId)
+                                      .update({
+                                    'services':
+                                        FieldValue.arrayUnion([newService]),
+                                    'updatedAt': FieldValue.serverTimestamp(),
+                                  });
+
+                                  // Update local UI + cache so filters work immediately
+                                  services.add(newService);
+                                  _parkServicesById[parkId] =
+                                      List<String>.from(services);
+                                  setStateDialog(() {});
+
+                                  if (_selectedFilters.isNotEmpty) {
+                                    _applyFilters();
+                                  }
+
+                                  if (context.mounted) {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      SnackBar(
+                                          content: Text("Added: $newService")),
+                                    );
+                                  }
+                                } catch (e) {
+                                  if (context.mounted) {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      SnackBar(
+                                          content: Text(
+                                              "Couldn’t add activity: $e")),
+                                    );
+                                  }
+                                }
+                              },
+                              child: const Text(
+                                "Add Activity",
+                                style: TextStyle(fontWeight: FontWeight.w600),
+                              ),
+                            ),
                           ],
                         ),
                       ),
@@ -1848,13 +2057,15 @@ class _MapTabState extends State<MapTab>
                       separatorBuilder: (_, __) => const SizedBox(height: 6),
                       itemBuilder: (ctx, i) {
                         final petData = userList[i];
-                        final ownerId   = petData['ownerId'] as String? ?? '';
-                        final petId     = petData['petId'] as String? ?? '';
-                        final petName   = petData['petName'] as String? ?? '';
-                        final petPhoto  = petData['petPhotoUrl'] as String? ?? '';
-                        final checkIn   = petData['checkInTime'] as String? ?? '';
-                        final ownerName = (petData['ownerName'] as String? ?? '').trim();
-                        final mine      = (ownerId == currentUser.uid);
+                        final ownerId = petData['ownerId'] as String? ?? '';
+                        final petId = petData['petId'] as String? ?? '';
+                        final petName = petData['petName'] as String? ?? '';
+                        final petPhoto =
+                            petData['petPhotoUrl'] as String? ?? '';
+                        final checkIn = petData['checkInTime'] as String? ?? '';
+                        final ownerName =
+                            (petData['ownerName'] as String? ?? '').trim();
+                        final mine = (ownerId == currentUser.uid);
 
                         return ListTile(
                           leading: (petPhoto.isNotEmpty)
@@ -1865,7 +2076,7 @@ class _MapTabState extends State<MapTab>
                                     height: 40,
                                     fit: BoxFit.cover,
                                     filterQuality: FilterQuality.low,
-                                    cacheWidth: 120, // hint smaller decode
+                                    cacheWidth: 120,
                                   ),
                                 )
                               : const CircleAvatar(
@@ -1877,14 +2088,16 @@ class _MapTabState extends State<MapTab>
                             [
                               if (ownerName.isNotEmpty && !mine) ownerName,
                               if (mine) "Your pet",
-                              if (checkIn.isNotEmpty) "– Checked in for $checkIn",
+                              if (checkIn.isNotEmpty)
+                                "– Checked in for $checkIn",
                             ].whereType<String>().join(' '),
                           ),
                           trailing: _favoritePetIds.contains(petId)
                               ? IconButton(
                                   tooltip: "Remove Favorite",
                                   onPressed: () => _unfriend(ownerId, petId),
-                                  icon: const Icon(Icons.favorite, color: Colors.redAccent),
+                                  icon: const Icon(Icons.favorite,
+                                      color: Colors.redAccent),
                                 )
                               : IconButton(
                                   tooltip: "Add Favorite",
@@ -1904,7 +2117,9 @@ class _MapTabState extends State<MapTab>
                         Expanded(
                           child: _BigActionButton(
                             label: isCheckedIn ? "Check Out" : "Check In",
-                            backgroundColor: isCheckedIn ? Colors.red : const Color(0xFF567D46),
+                            backgroundColor: isCheckedIn
+                                ? Colors.red
+                                : const Color(0xFF567D46),
                             onPressed: () async {
                               showDialog(
                                 context: context,
@@ -1912,7 +2127,8 @@ class _MapTabState extends State<MapTab>
                                 builder: (_) => const AlertDialog(
                                   content: SizedBox(
                                     height: 120,
-                                    child: Center(child: CircularProgressIndicator()),
+                                    child: Center(
+                                        child: CircularProgressIndicator()),
                                   ),
                                 ),
                               );
@@ -1922,18 +2138,21 @@ class _MapTabState extends State<MapTab>
                                   await activeDocRef.delete();
                                   if (context.mounted) {
                                     ScaffoldMessenger.of(context).showSnackBar(
-                                      const SnackBar(content: Text("Checked out of park")),
+                                      const SnackBar(
+                                          content: Text("Checked out of park")),
                                     );
                                   }
                                 } else {
-                                  await _locationService.uploadUserToActiveUsersTable(
+                                  await _locationService
+                                      .uploadUserToActiveUsersTable(
                                     parkLatitude,
                                     parkLongitude,
                                     parkName,
                                   );
                                   if (context.mounted) {
                                     ScaffoldMessenger.of(context).showSnackBar(
-                                      const SnackBar(content: Text("Checked in to park")),
+                                      const SnackBar(
+                                          content: Text("Checked in to park")),
                                     );
                                   }
                                 }
@@ -1945,8 +2164,9 @@ class _MapTabState extends State<MapTab>
                                 }
                               } finally {
                                 if (context.mounted) {
-                                  Navigator.of(context, rootNavigator: true).pop(); // spinner
-                                  Navigator.of(context).pop(); // close the park dialog
+                                  Navigator.of(context, rootNavigator: true)
+                                      .pop();
+                                  Navigator.of(context).pop();
                                 }
                               }
                             },
@@ -1961,7 +2181,8 @@ class _MapTabState extends State<MapTab>
                               Navigator.push(
                                 context,
                                 MaterialPageRoute(
-                                  builder: (_) => ChatRoomScreen(parkId: parkId),
+                                  builder: (_) =>
+                                      ChatRoomScreen(parkId: parkId),
                                 ),
                               );
                             },
@@ -2032,8 +2253,8 @@ class _MapTabState extends State<MapTab>
       }
 
       if (context.mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(const SnackBar(content: Text("Checked in successfully")));
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text("Checked in successfully")));
       }
     } catch (e) {
       debugPrint("Error checking in: $e");
@@ -2150,8 +2371,8 @@ class _MapTabState extends State<MapTab>
       debugPrint("Error searching nearby parks: $e");
       if (mounted) {
         setState(() => _isSearching = false);
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text("Error searching for parks: $e")));
+        ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text("Error searching for parks: $e")));
       }
     }
   }
@@ -2198,8 +2419,8 @@ class _MapTabState extends State<MapTab>
     } catch (e) {
       debugPrint("Error adding friend: $e");
       if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(const SnackBar(content: Text("Error adding friend.")));
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text("Error adding friend.")));
       }
     }
   }
@@ -2228,8 +2449,8 @@ class _MapTabState extends State<MapTab>
     } catch (e) {
       debugPrint("Error unfriending: $e");
       if (mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(const SnackBar(content: Text("Error removing friend.")));
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text("Error removing friend.")));
       }
     }
   }
@@ -2239,8 +2460,8 @@ class _MapTabState extends State<MapTab>
     super.didChangeDependencies();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      final stale =
-          DateTime.now().difference(_lastCameraMove) > const Duration(seconds: 5);
+      final stale = DateTime.now().difference(_lastCameraMove) >
+          const Duration(seconds: 5);
       if (stale && _finalPosition != null && _mapController != null) {
         _moveCameraTo(_finalPosition!, zoom: 17);
       }
@@ -2401,8 +2622,9 @@ class _MapTabState extends State<MapTab>
                   bottom: 16,
                   child: ElevatedButton(
                     style: ElevatedButton.styleFrom(
-                      backgroundColor:
-                          _walk.isActive ? Colors.redAccent : const Color(0xFF567D46),
+                      backgroundColor: _walk.isActive
+                          ? Colors.redAccent
+                          : const Color(0xFF567D46),
                       foregroundColor: Colors.white,
                       shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(18)),
@@ -2424,11 +2646,14 @@ class _MapTabState extends State<MapTab>
                             mainAxisAlignment: MainAxisAlignment.center,
                             children: [
                               if (_walk.isActive)
-                                const Icon(Icons.flag, size: 24, color: Colors.white)
+                                const Icon(Icons.flag,
+                                    size: 24, color: Colors.white)
                               else ...[
-                                const Icon(Icons.directions_walk, size: 24, color: Colors.white),
+                                const Icon(Icons.directions_walk,
+                                    size: 24, color: Colors.white),
                                 const SizedBox(width: 6),
-                                const Icon(Icons.pets, size: 22, color: Colors.white),
+                                const Icon(Icons.pets,
+                                    size: 22, color: Colors.white),
                               ],
                               const SizedBox(width: 10),
                               Text(
@@ -2470,14 +2695,14 @@ class _MapTabState extends State<MapTab>
 
   // ---------- Filter bar ----------
   Widget _filterShell({required Widget child}) {
-    // Avoid heavy blur over platform view on Android
     if (Platform.isAndroid) {
       return Container(
         decoration: BoxDecoration(
           color: Colors.white.withOpacity(0.92),
           borderRadius: BorderRadius.circular(22),
           boxShadow: const [
-            BoxShadow(color: Colors.black12, blurRadius: 12, offset: Offset(0, 4)),
+            BoxShadow(
+                color: Colors.black12, blurRadius: 12, offset: Offset(0, 4)),
           ],
         ),
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
@@ -2487,13 +2712,14 @@ class _MapTabState extends State<MapTab>
     return ClipRRect(
       borderRadius: BorderRadius.circular(22),
       child: BackdropFilter(
-        filter: ui.ImageFilter.blur(sigmaX: 8, sigmaY: 8), // gentler than 12
+        filter: ui.ImageFilter.blur(sigmaX: 8, sigmaY: 8),
         child: Container(
           decoration: BoxDecoration(
             color: Colors.white.withOpacity(0.85),
             borderRadius: BorderRadius.circular(22),
             boxShadow: const [
-              BoxShadow(color: Colors.black12, blurRadius: 12, offset: Offset(0, 4)),
+              BoxShadow(
+                  color: Colors.black12, blurRadius: 12, offset: Offset(0, 4)),
             ],
           ),
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),

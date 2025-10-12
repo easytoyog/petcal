@@ -19,8 +19,8 @@ class WalkManager extends ChangeNotifier {
 
   WalkManager({
     required this.location,
-    this.minDuration = const Duration(seconds: 1),
-    this.minSteps = 1,
+    this.minDuration = const Duration(seconds: 30),
+    this.minSteps = 50,
   });
 
   // ---- Public state (read-only via getters)
@@ -39,6 +39,10 @@ class WalkManager extends ChangeNotifier {
   DateTime? _startedAt;
   DateTime? get startedAt => _startedAt;
 
+  // ✨ NEW: track when a walk actually ended
+  DateTime? _endedAt;
+  DateTime? get endedAt => _endedAt;
+
   Duration _elapsed = Duration.zero;
   Duration get elapsed => _elapsed;
 
@@ -49,7 +53,7 @@ class WalkManager extends ChangeNotifier {
     final meetsDur = _elapsed >= minDuration;
     final meetsStp = _steps >= minSteps;
     if (!meetsDur && !meetsStp) {
-      return "under ${_prettyDuration(minDuration)} and fewer than $minSteps steps – not saved.";
+      return "under ${_prettyDuration(minDuration)} and fewer than $minSteps steps – Let's keep that walk a little longer!.";
     } else if (!meetsDur) {
       return "under ${_prettyDuration(minDuration)} – not saved.";
     } else {
@@ -67,8 +71,8 @@ class WalkManager extends ChangeNotifier {
   DateTime? _lastMoveAt;
 
   static const _persistKey = 'active_walk';
-  static const inactivityLimit = Duration(minutes: 5);
-  static const maxWalkLimit = Duration(hours: 4);
+  static const inactivityLimit = Duration(minutes: 10);
+  static const maxWalkLimit = Duration(hours: 24);
 
   // ————— API —————
   Future<void> start() async {
@@ -80,6 +84,7 @@ class WalkManager extends ChangeNotifier {
     _steps = 0;
     _stepBaseline = null;
     _startedAt = DateTime.now();
+    _endedAt = null; // ✨ reset on new walk
     _lastMoveAt = _startedAt;
     _elapsed = Duration.zero;
     notifyListeners();
@@ -143,9 +148,10 @@ class WalkManager extends ChangeNotifier {
 
     await _disableNavMode();
 
-    final endedAt = DateTime.now();
-    final started = _startedAt ?? endedAt;
-    _elapsed = endedAt.difference(started);
+    final ended = DateTime.now();
+    _endedAt = ended; // ✨ set end time
+    final started = _startedAt ?? ended;
+    _elapsed = ended.difference(started);
 
     // If pedometer produced 0, backfill from distance with ~0.78m stride.
     if (_steps == 0) {
@@ -180,6 +186,9 @@ class WalkManager extends ChangeNotifier {
       _steps = (m['steps'] as num?)?.toInt() ?? 0;
       _startedAt = (m['startedAt'] != null)
           ? DateTime.tryParse(m['startedAt'] as String)
+          : null;
+      _endedAt = (m['endedAt'] != null) // ✨ restore if present
+          ? DateTime.tryParse(m['endedAt'] as String)
           : null;
       _active = (m['isWalking'] == true);
 
@@ -235,6 +244,7 @@ class WalkManager extends ChangeNotifier {
       final prefs = await SharedPreferences.getInstance();
       final payload = {
         'startedAt': _startedAt?.toIso8601String(),
+        'endedAt': _endedAt?.toIso8601String(), // ✨ save end time if any
         'meters': _meters,
         'steps': _steps,
         'isWalking': _active,

@@ -8,6 +8,8 @@
 	<string>We use motion data to count your steps during walks with your dog.</string>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
+	<key>NSUserTrackingUsageDescription</key>
+	<string>We use your device identifier to show relevant ads and measure performance. We never track you across apps without your permission.</string>
 	<key>CFBundleDisplayName</key>
 	<string>InThePark</string>
 	<key>CFBundleExecutable</key>

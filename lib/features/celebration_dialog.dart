@@ -5,6 +5,7 @@ import 'package:confetti/confetti.dart';
 import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:share_plus/share_plus.dart';
+import 'dart:math';
 
 class CelebrationDialog extends StatefulWidget {
   final int steps;
@@ -40,10 +41,28 @@ class CelebrationDialog extends StatefulWidget {
 class _CelebrationDialogState extends State<CelebrationDialog> {
   late final ConfettiController _controller;
 
+  // 10 quick options to rotate through
+  static const List<String> _ctaOptions = [
+    "Nice!",
+    "Sweet!",
+    "Love it!",
+    "Heck yeah!",
+    "All done!",
+    "Paws up!",
+    "High five!",
+    "Crushed it!",
+    "Let’s go!",
+    "Woohoo!",
+  ];
+
+  // chosen once per dialog instance
+  late final String _ctaLabel;
+
   @override
   void initState() {
     super.initState();
     _controller = ConfettiController(duration: const Duration(seconds: 2));
+    _ctaLabel = _ctaOptions[Random().nextInt(_ctaOptions.length)];
     WidgetsBinding.instance.addPostFrameCallback((_) => _controller.play());
   }
 
@@ -79,12 +98,12 @@ class _CelebrationDialogState extends State<CelebrationDialog> {
 
     TextPainter tp(
       String text, {
-        double fontSize = 60,
-        FontWeight weight = FontWeight.w800,
-        Color color = Colors.white,
-        int maxLines = 2,
-        TextAlign align = TextAlign.center,
-      }) {
+      double fontSize = 60,
+      FontWeight weight = FontWeight.w800,
+      Color color = Colors.white,
+      int maxLines = 2,
+      TextAlign align = TextAlign.center,
+    }) {
       final t = TextPainter(
         textDirection: TextDirection.ltr,
         textAlign: align,
@@ -105,7 +124,8 @@ class _CelebrationDialogState extends State<CelebrationDialog> {
     }
 
     // Title
-    final title = tp("🎉 Walk completed!", fontSize: 84, weight: FontWeight.w900);
+    final title =
+        tp("🎉 Walk completed!", fontSize: 84, weight: FontWeight.w900);
     title.paint(canvas, Offset((size - title.width) / 2, size * 0.22));
 
     // Neutral connection line (inside the card)
@@ -118,7 +138,8 @@ class _CelebrationDialogState extends State<CelebrationDialog> {
     line.paint(canvas, Offset((size - line.width) / 2, size * 0.38));
 
     // Brand footer
-    final brand = tp("InThePark", fontSize: 46, weight: FontWeight.w800, color: Colors.white70);
+    final brand = tp("InThePark",
+        fontSize: 46, weight: FontWeight.w800, color: Colors.white70);
     brand.paint(canvas, Offset((size - brand.width) / 2, size * 0.80));
 
     final picture = recorder.endRecording();
@@ -127,7 +148,8 @@ class _CelebrationDialogState extends State<CelebrationDialog> {
     final bytes = byteData!.buffer.asUint8List();
 
     final dir = await getTemporaryDirectory();
-    final file = File('${dir.path}/inthepark_walk_${DateTime.now().millisecondsSinceEpoch}.png');
+    final file = File(
+        '${dir.path}/inthepark_walk_${DateTime.now().millisecondsSinceEpoch}.png');
     await file.writeAsBytes(bytes, flush: true);
     return file;
   }
@@ -169,12 +191,14 @@ class _CelebrationDialogState extends State<CelebrationDialog> {
 
   @override
   Widget build(BuildContext context) {
-    final neutralLine = "You and your pup walked ${widget.kmText} km (${widget.steps} steps).";
+    final neutralLine =
+        "You and your pup walked ${widget.kmText} km (${widget.steps} steps).";
 
     return Stack(
       children: [
         AlertDialog(
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
           title: const Text(
             "🎉 Walk completed!",
             textAlign: TextAlign.center,
@@ -187,14 +211,16 @@ class _CelebrationDialogState extends State<CelebrationDialog> {
               Text(
                 neutralLine,
                 textAlign: TextAlign.center,
-                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+                style:
+                    const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
               ),
 
               // Optional streak pill
               if (widget.streakCurrent != null) ...[
                 const SizedBox(height: 12),
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                   decoration: BoxDecoration(
                     color: widget.streakIsNewRecord
                         ? const Color(0xFFFFF7E6) // soft gold
@@ -223,7 +249,7 @@ class _CelebrationDialogState extends State<CelebrationDialog> {
                         widget.streakIsNewRecord
                             ? "New streak record: ${_days(widget.streakCurrent!)}!"
                             : "Streak: ${_days(widget.streakCurrent!)}"
-                              "${widget.streakLongest != null ? " • Best: ${_days(widget.streakLongest!)}" : ""}",
+                                "${widget.streakLongest != null ? " • Best: ${_days(widget.streakLongest!)}" : ""}",
                         style: TextStyle(
                           fontSize: 14.5,
                           fontWeight: FontWeight.w800,
@@ -246,9 +272,12 @@ class _CelebrationDialogState extends State<CelebrationDialog> {
                   style: ElevatedButton.styleFrom(
                     backgroundColor: const Color(0xFF567D46),
                     foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-                    textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 24, vertical: 14),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(14)),
+                    textStyle: const TextStyle(
+                        fontSize: 16, fontWeight: FontWeight.w800),
                   ),
                   onPressed: _shareSystem,
                 ),
@@ -261,12 +290,15 @@ class _CelebrationDialogState extends State<CelebrationDialog> {
               style: ElevatedButton.styleFrom(
                 backgroundColor: const Color(0xFF567D46),
                 foregroundColor: Colors.white,
-                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-                textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(14)),
+                textStyle:
+                    const TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
               ),
               onPressed: () => Navigator.of(context).pop(),
-              child: const Text("Nice!"),
+              child: Text(_ctaLabel), // ← was "Nice!"
             ),
           ],
         ),

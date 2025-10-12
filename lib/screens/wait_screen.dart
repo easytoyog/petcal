@@ -75,7 +75,7 @@ class _WaitForEmailVerificationScreenState
       await FirebaseAuth.instance.signOut();
       if (!mounted) return;
       // Go to your main page. Adjust route name if different.
-      Navigator.of(context).pushNamedAndRemoveUntil('/', (route) => false);
+      Navigator.of(context).pushNamedAndRemoveUntil('/login', (route) => false);
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(

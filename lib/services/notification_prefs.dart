@@ -14,12 +14,9 @@ Future<void> upsertNotificationPrefs() async {
     // keep 'UTC' fallback
   }
 
-  await FirebaseFirestore.instance
-      .collection('owners')
-      .doc(uid)
-      .set({
-        'tz': tz,
-        'dailyStepsOptIn': true, // toggle later in Settings
-        'updatedAt': FieldValue.serverTimestamp(),
-      }, SetOptions(merge: true));
+  await FirebaseFirestore.instance.collection('owners').doc(uid).set({
+    'tz': tz,
+    'dailyStepsOptIn': true, // toggle later in Settings
+    'updatedAt': FieldValue.serverTimestamp(),
+  }, SetOptions(merge: true));
 }

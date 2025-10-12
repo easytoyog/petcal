@@ -43,6 +43,7 @@ import 'package:inthepark/screens/wait_screen.dart';
 
 // Saves tz + dailyStepsOptIn + updatedAt (and you can extend it as needed)
 import 'package:inthepark/services/notification_prefs.dart';
+import 'package:app_tracking_transparency/app_tracking_transparency.dart';
 
 bool _appCheckActivated = false;
 
@@ -54,6 +55,26 @@ Future<void> _configureMobileAds() async {
       maxAdContentRating: gma.MaxAdContentRating.pg,
     ),
   );
+}
+
+Future<void> _requestATTIfNeeded() async {
+  if (!Platform.isIOS) return;
+  try {
+    // Check current status
+    final status = await AppTrackingTransparency.trackingAuthorizationStatus;
+
+    // (Optional) you can show a friendly pre-prompt here explaining why you ask.
+
+    if (status == TrackingStatus.notDetermined) {
+      await AppTrackingTransparency.requestTrackingAuthorization();
+    }
+    // You don't need to do anything with the result here;
+    // the Ads SDK will automatically respect the ATT outcome.
+  } catch (e) {
+    // Don't crash if ATT isn't available for some reason
+    // (e.g., device restrictions)
+    // print('ATT error: $e');
+  }
 }
 
 Future<void> _gatherConsentIfNeeded() async {
@@ -102,7 +123,7 @@ Future<void> main() async {
   try {
     await dotenv.load(fileName: '.env').catchError((_) {});
     await Firebase.initializeApp();
-
+    await _requestATTIfNeeded();
     // ✅ App Check
     if (!_appCheckActivated) {
       await FirebaseAppCheck.instance.activate(

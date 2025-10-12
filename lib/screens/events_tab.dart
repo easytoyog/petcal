@@ -56,7 +56,7 @@ class _EventsTabState extends State<EventsTab> {
   }
 
   Future<void> _init() async {
-    await _fetchUserLocation();      // if this fails, screen shows a message
+    await _fetchUserLocation(); // if this fails, screen shows a message
     await _fetchEvents(reset: true); // still fetch so we’re ready when enabled
   }
 
@@ -116,7 +116,8 @@ class _EventsTabState extends State<EventsTab> {
       }
 
       // Page by createdAt; client filters upcoming/recurring.
-      Query q = baseQuery.orderBy('createdAt', descending: true).limit(pageSize);
+      Query q =
+          baseQuery.orderBy('createdAt', descending: true).limit(pageSize);
       if (_lastDoc != null) q = q.startAfterDocument(_lastDoc!);
 
       final snap = await q.get();
@@ -124,8 +125,11 @@ class _EventsTabState extends State<EventsTab> {
 
       // Keep upcoming or recurring
       final now = DateTime.now();
-      final fetched = snap.docs.map((d) => ParkEvent.fromFirestore(d)).where((e) {
-        final recurring = (e.recurrence.toLowerCase() != 'one time' && e.recurrence.toLowerCase() != 'one-time' && e.recurrence.toLowerCase() != 'none');
+      final fetched =
+          snap.docs.map((d) => ParkEvent.fromFirestore(d)).where((e) {
+        final recurring = (e.recurrence.toLowerCase() != 'one time' &&
+            e.recurrence.toLowerCase() != 'one-time' &&
+            e.recurrence.toLowerCase() != 'none');
         final upcoming = e.endDateTime.isAfter(now);
         return recurring || upcoming;
       }).toList();
@@ -227,64 +231,63 @@ class _EventsTabState extends State<EventsTab> {
   @override
   Widget build(BuildContext context) {
     // If location is missing, show only the message — no fallbacks, no lists.
-    final noLocation = _userLocation?.latitude == null || _userLocation?.longitude == null;
+    final noLocation =
+        _userLocation?.latitude == null || _userLocation?.longitude == null;
 
     return Scaffold(
-      body: Stack(
-        children: [
-          SafeArea(
-            child: _isLoading
-                ? const Center(child: CircularProgressIndicator())
-                : noLocation
-                    ? _EnableLocationMessage(onRetry: _fetchUserLocation)
-                    : RefreshIndicator(
-                        onRefresh: () => _fetchEvents(reset: true),
-                        child: ListView(
-                          controller: _scroll,
-                          padding: const EdgeInsets.fromLTRB(8, 8, 8, 120),
-                          children: [
-                            if (_likedEvents.isNotEmpty) ...[
-                              const _SectionTitle('Your Liked Events'),
-                              ..._likedEvents.map((e) => _eventCard(e, isFavorite: true)),
-                              const Divider(),
+        body: Stack(
+          children: [
+            SafeArea(
+              child: _isLoading
+                  ? const Center(child: CircularProgressIndicator())
+                  : noLocation
+                      ? _EnableLocationMessage(onRetry: _fetchUserLocation)
+                      : RefreshIndicator(
+                          onRefresh: () => _fetchEvents(reset: true),
+                          child: ListView(
+                            controller: _scroll,
+                            padding: const EdgeInsets.fromLTRB(8, 8, 8, 120),
+                            children: [
+                              if (_likedEvents.isNotEmpty) ...[
+                                const _SectionTitle('Your Liked Events'),
+                                ..._likedEvents.map(
+                                    (e) => _eventCard(e, isFavorite: true)),
+                                const Divider(),
+                              ],
+                              const _SectionTitle('Nearby (within 2 km)'),
+                              if (_nearbyEvents.isEmpty)
+                                const _EmptyHint(
+                                    text: 'No events within 2 km.'),
+                              ..._nearbyEvents.map(_eventCard),
+                              if (_isPaging) ...[
+                                const SizedBox(height: 12),
+                                const Center(
+                                    child: CircularProgressIndicator()),
+                                const SizedBox(height: 12),
+                              ],
+                              if (!_isPaging &&
+                                  !_hasMore &&
+                                  (_likedEvents.isNotEmpty ||
+                                      _nearbyEvents.isNotEmpty))
+                                const Padding(
+                                  padding: EdgeInsets.symmetric(vertical: 16),
+                                  child: Center(child: Text('No more events')),
+                                ),
                             ],
-                            const _SectionTitle('Nearby (within 2 km)'),
-                            if (_nearbyEvents.isEmpty)
-                              const _EmptyHint(text: 'No events within 2 km.'),
-                            ..._nearbyEvents.map(_eventCard),
-                            if (_isPaging) ...[
-                              const SizedBox(height: 12),
-                              const Center(child: CircularProgressIndicator()),
-                              const SizedBox(height: 12),
-                            ],
-                            if (!_isPaging && !_hasMore && (_likedEvents.isNotEmpty || _nearbyEvents.isNotEmpty))
-                              const Padding(
-                                padding: EdgeInsets.symmetric(vertical: 16),
-                                child: Center(child: Text('No more events')),
-                              ),
-                          ],
+                          ),
                         ),
-                      ),
-          ),
-
-          // Fixed banner ad
-          const Positioned(
-            left: 0,
-            right: 0,
-            bottom: 0,
-            child: SafeArea(top: false, child: AdBanner()),
-          ),
-        ],
-      ),
-      floatingActionButton: noLocation
-          ? null
-          : FloatingActionButton(
-              heroTag: 'add_event_fab',
-              backgroundColor: const Color(0xFF567D46),
-              onPressed: _showAddEventSheet,
-              child: const Icon(Icons.add, color: Colors.white),
             ),
-    );
+
+            // Fixed banner ad
+            const Positioned(
+              left: 0,
+              right: 0,
+              bottom: 0,
+              child: SafeArea(top: false, child: AdBanner()),
+            ),
+          ],
+        ),
+        floatingActionButton: null);
   }
 
   Widget _eventCard(ParkEvent e, {bool isFavorite = false}) {
@@ -309,8 +312,10 @@ class _EventsTabState extends State<EventsTab> {
     String trailing = parkName;
     if (_userLocation?.latitude != null && _userLocation?.longitude != null) {
       final km = _distanceKm(
-        _userLocation!.latitude!, _userLocation!.longitude!,
-        e.parkLatitude, e.parkLongitude,
+        _userLocation!.latitude!,
+        _userLocation!.longitude!,
+        e.parkLatitude,
+        e.parkLongitude,
       );
       trailing = '$parkName • ${km.toStringAsFixed(1)} km';
     }
@@ -357,11 +362,13 @@ class _EventsTabState extends State<EventsTab> {
             children: [
               nameRow,
               const SizedBox(height: 6),
-              Text(trailing, style: const TextStyle(fontSize: 12, color: Colors.grey)),
+              Text(trailing,
+                  style: const TextStyle(fontSize: 12, color: Colors.grey)),
               const SizedBox(height: 8),
               Row(
                 children: [
-                  Icon(Icons.access_time, size: 16, color: Colors.grey.shade700),
+                  Icon(Icons.access_time,
+                      size: 16, color: Colors.grey.shade700),
                   const SizedBox(width: 6),
                   Text('$start – $end', style: const TextStyle(fontSize: 12)),
                   const Spacer(),
@@ -376,11 +383,13 @@ class _EventsTabState extends State<EventsTab> {
                     onPressed: () {
                       Navigator.push(
                         context,
-                        MaterialPageRoute(builder: (_) => ChatRoomScreen(parkId: e.parkId)),
+                        MaterialPageRoute(
+                            builder: (_) => ChatRoomScreen(parkId: e.parkId)),
                       );
                     },
                     icon: const Icon(Icons.chat, size: 16),
-                    label: const Text('Park Chat', style: TextStyle(fontSize: 12)),
+                    label:
+                        const Text('Park Chat', style: TextStyle(fontSize: 12)),
                   ),
                   const Spacer(),
                   IconButton(
@@ -389,7 +398,8 @@ class _EventsTabState extends State<EventsTab> {
                     icon: Icon(liked ? Icons.favorite : Icons.favorite_border,
                         color: liked ? Colors.green : Colors.grey),
                   ),
-                  Text('${e.likes.length}', style: const TextStyle(fontSize: 12)),
+                  Text('${e.likes.length}',
+                      style: const TextStyle(fontSize: 12)),
                 ],
               ),
             ],
@@ -458,9 +468,11 @@ class _EventsTabState extends State<EventsTab> {
       builder: (_) {
         final start = DateFormat('EEE, MMM d • h:mm a').format(e.startDateTime);
         final end = DateFormat('h:mm a').format(e.endDateTime);
-        final hasLoc = _userLocation?.latitude != null && _userLocation?.longitude != null;
+        final hasLoc =
+            _userLocation?.latitude != null && _userLocation?.longitude != null;
         final dist = hasLoc
-            ? _distanceKm(_userLocation!.latitude!, _userLocation!.longitude!, e.parkLatitude, e.parkLongitude)
+            ? _distanceKm(_userLocation!.latitude!, _userLocation!.longitude!,
+                    e.parkLatitude, e.parkLongitude)
                 .toStringAsFixed(1)
             : null;
 
@@ -472,9 +484,16 @@ class _EventsTabState extends State<EventsTab> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Container(width: 40, height: 4, decoration: BoxDecoration(color: Colors.black12, borderRadius: BorderRadius.circular(999))),
+                Container(
+                    width: 40,
+                    height: 4,
+                    decoration: BoxDecoration(
+                        color: Colors.black12,
+                        borderRadius: BorderRadius.circular(999))),
                 const SizedBox(height: 12),
-                Text(e.name, style: const TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
+                Text(e.name,
+                    style: const TextStyle(
+                        fontSize: 18, fontWeight: FontWeight.w700)),
                 const SizedBox(height: 6),
                 Text(
                   dist != null ? '$parkName • $dist km' : parkName,
@@ -488,30 +507,41 @@ class _EventsTabState extends State<EventsTab> {
                     Text('$start – $end'),
                     const Spacer(),
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 3),
                       decoration: BoxDecoration(
                         color: Colors.green.shade50,
                         borderRadius: BorderRadius.circular(999),
                         border: Border.all(color: Colors.green.shade200),
                       ),
-                      child: Text(_recurrenceLabel(e), style: const TextStyle(fontSize: 11, color: Colors.green)),
+                      child: Text(_recurrenceLabel(e),
+                          style: const TextStyle(
+                              fontSize: 11, color: Colors.green)),
                     ),
                   ],
                 ),
                 const SizedBox(height: 12),
                 if ((e.description ?? '').trim().isNotEmpty)
-                  Text(e.description.trim(), style: const TextStyle(fontSize: 14)),
+                  Text(e.description.trim(),
+                      style: const TextStyle(fontSize: 14)),
                 const SizedBox(height: 16),
                 Row(
                   children: [
                     ElevatedButton.icon(
-                      style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF567D46)),
+                      style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF567D46)),
                       onPressed: () {
                         Navigator.pop(context);
-                        Navigator.push(context, MaterialPageRoute(builder: (_) => ChatRoomScreen(parkId: e.parkId)));
+                        Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                                builder: (_) =>
+                                    ChatRoomScreen(parkId: e.parkId)));
                       },
-                      icon: const Icon(Icons.chat, size: 16, color: Colors.white),
-                      label: const Text('Open Park Chat', style: TextStyle(color: Colors.white)),
+                      icon:
+                          const Icon(Icons.chat, size: 16, color: Colors.white),
+                      label: const Text('Open Park Chat',
+                          style: TextStyle(color: Colors.white)),
                     ),
                     const Spacer(),
                     TextButton(
@@ -567,34 +597,10 @@ class _EventsTabState extends State<EventsTab> {
                 ),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Close')),
-        ],
-      ),
-    );
-  }
-
-  // --------------- Add Event (placeholder) ---------------
-  void _showAddEventSheet() {
-    showModalBottomSheet(
-      context: context,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-      ),
-      builder: (_) => SafeArea(
-        top: false,
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
-            const Text('Add Event', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
-            const SizedBox(height: 12),
-            const Text('Hook up your existing Add Event flow here.'),
-            const SizedBox(height: 12),
-            ElevatedButton(
+          TextButton(
               onPressed: () => Navigator.pop(context),
-              child: const Text('Close'),
-            ),
-          ]),
-        ),
+              child: const Text('Close')),
+        ],
       ),
     );
   }
@@ -608,7 +614,8 @@ class _SectionTitle extends StatelessWidget {
   Widget build(BuildContext context) {
     return Padding(
       padding: const EdgeInsets.fromLTRB(4, 8, 4, 6),
-      child: Text(text, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+      child: Text(text,
+          style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
     );
   }
 }
@@ -627,7 +634,8 @@ class _EmptyHint extends StatelessWidget {
 
 class _EnableLocationMessage extends StatelessWidget {
   final Future<void> Function() onRetry;
-  const _EnableLocationMessage({Key? key, required this.onRetry}) : super(key: key);
+  const _EnableLocationMessage({Key? key, required this.onRetry})
+      : super(key: key);
 
   @override
   Widget build(BuildContext context) {
@@ -655,7 +663,9 @@ class _EnableLocationMessage extends StatelessWidget {
               onPressed: onRetry,
               icon: const Icon(Icons.my_location),
               label: const Text('Enable / Retry'),
-              style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF567D46), foregroundColor: Colors.white),
+              style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF567D46),
+                  foregroundColor: Colors.white),
             ),
           ],
         ),
