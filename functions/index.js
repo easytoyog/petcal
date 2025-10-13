@@ -572,31 +572,22 @@ exports.sendDailyStepsRecap = onSchedule(
   }
 );
 
-exports.notifyParkChat = onDocumentCreated(
-  "parks/{parkId}/chat/{messageId}",
-  async (event) => {
-    const parkId = event.params.parkId;
+function toSafeTopic(s) {
+  return s.replace(/[^A-Za-z0-9_\-\.~%]/g, '_');
+}
 
-    // 🔧 Use defensive checks instead of optional chaining / ??
-    const msg = (event.data && typeof event.data.data === "function")
-      ? event.data.data()
-      : {};
+exports.notifyParkChat = onDocumentCreated("parks/{parkId}/chat/{messageId}", async (event) => {
+  const { parkId, messageId } = event.params;
+  const msg = (event.data && typeof event.data.data === "function") ? event.data.data() : {};
+  const text = ((msg.text || "") + "").slice(0, 120);
+  if (!text) return;
 
-    const senderId = msg.senderId || "someone";
-    const text = (msg.text || "").toString().slice(0, 120);
-    if (!text) return;
-
-    const topic = `park_chat_${parkId}`;
-    await getMessaging().send({
-      topic,
-      notification: { title: "New park chat message", body: text },
-      data: {
-        parkId,
-        senderId: String(senderId),
-        messageId: event.params.messageId,
-      },
-      android: { priority: "high" },
-      apns: { payload: { aps: { sound: "default" } } },
-    });
-  }
-);
+  const topic = toSafeTopic(`park_chat_${parkId}`);
+  await getMessaging().send({
+    topic,
+    notification: { title: "New park chat message", body: text },
+    data: { parkId, senderId: String(msg.senderId || ""), messageId },
+    android: { priority: "high" },
+    apns: { payload: { aps: { sound: "default" } } },
+  });
+});
