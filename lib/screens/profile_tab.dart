@@ -269,12 +269,8 @@ class _ProfileTabState extends State<ProfileTab> {
         'https://play.google.com/store/apps/details?id=ca.inthepark&pcampaignid=web_share';
     const iosUrl = 'https://apps.apple.com/ca/app/in-the-park/id6752841263';
 
-    final link = Platform.isAndroid
-        ? androidUrl
-        : (Platform.isIOS ? iosUrl : '$androidUrl\n$iosUrl');
-
     Share.share(
-      'Check out In The Park! $link',
+      'Check out In The Park!\n\niOS: $iosUrl\nAndroid: $androidUrl',
       subject: 'In The Park',
     );
   }
