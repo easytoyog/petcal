@@ -4,13 +4,12 @@ import 'dart:convert';
 import 'dart:ui' as ui;
 import 'dart:io' show Platform;
 import 'dart:math' as math;
-import 'package:flutter/services.dart'; // PlatformException
+import 'package:flutter/services.dart' show rootBundle, PlatformException;
 import 'package:cloud_firestore/cloud_firestore.dart'; // FirebaseException
 import 'dart:developer' as dev;
 
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart' show rootBundle, PlatformException;
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:location/location.dart' as loc;
@@ -59,6 +58,7 @@ class _MapTabState extends State<MapTab>
   // Ads
   late final InterstitialAdManager _adManager;
 
+  bool _resumeRefreshing = false;
   LatLng? _finalPosition;
   LatLng _currentMapCenter = const LatLng(43.7615, -79.4111);
   bool _isMapReady = false;
@@ -249,10 +249,36 @@ class _MapTabState extends State<MapTab>
 
     if (_drawnRoute.length > 2 &&
         (_drawnRoute.length % _simplifyEveryNPoints == 0)) {
-      final simplified = _simplifyRoute(_drawnRoute, _simplifyToleranceMeters);
-      _drawnRoute
-        ..clear()
-        ..addAll(simplified);
+      final copy = List<LatLng>.from(_drawnRoute);
+      Future(() {
+        final simplified = _simplifyRoute(copy, _simplifyToleranceMeters);
+        _drawnRoute
+          ..clear()
+          ..addAll(simplified);
+
+        if (_livePolylineSet.isEmpty) {
+          _livePolylineSet = {
+            Polyline(
+              polylineId: const PolylineId('current_walk'),
+              points: List<LatLng>.from(_drawnRoute),
+              width: 6,
+              color: Colors.blueAccent,
+              geodesic: !Platform.isAndroid,
+              startCap: Cap.roundCap,
+              endCap: Cap.roundCap,
+              jointType: JointType.round,
+            ),
+          };
+        } else {
+          _livePolylineSet = {
+            _livePolylineSet.first
+                .copyWith(pointsParam: List<LatLng>.from(_drawnRoute)),
+          };
+        }
+
+        _recomputeVisiblePolylines();
+        if (mounted) setState(() {});
+      });
     }
 
     final useGeodesic = !Platform.isAndroid;
@@ -667,7 +693,7 @@ class _MapTabState extends State<MapTab>
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       await _initLocationFlow();
       if (_finalPosition != null) {
-        _moveCameraTo(_finalPosition!, zoom: 17);
+        _moveCameraTo(_finalPosition!, zoom: 17, instant: true);
       }
     });
 
@@ -819,6 +845,19 @@ class _MapTabState extends State<MapTab>
 
   @override
   void dispose() {
+    if (_walk.isActive && !_finishingWalk) {
+      _manualFinishing = true;
+      // We cannot show UI here; do a silent finalize best-effort
+      // ignore: discarded_futures
+      () async {
+        try {
+          await _walk.stop();
+          await _handleWalkFinished(auto: true, silent: true);
+        } finally {
+          _manualFinishing = false;
+        }
+      }();
+    }
     () async {
       try {
         await _location.enableBackgroundMode(enable: false);
@@ -844,13 +883,77 @@ class _MapTabState extends State<MapTab>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    // no-op: WalkManager manages its own timers
+    if (state == AppLifecycleState.resumed) {
+      _onFastResume();
+    }
+  }
+
+  Future<void> _onFastResume() async {
+    if (!mounted || _resumeRefreshing) return;
+    _resumeRefreshing = true;
+
+    // 1) Immediately restore camera to last known (no awaits blocking UI)
+    final pos = _finalPosition ?? _currentMapCenter;
+    // fire-and-forget; the map is already on screen
+    // ignore: discarded_futures
+    _moveCameraTo(pos, zoom: 17, instant: true);
+
+    // 2) Light background refresh: only reload parks if we actually moved or cache is stale
+    try {
+      final saved = await _locationService.getSavedUserLocation();
+      final movedFar =
+          (saved != null) && _metersBetween(saved, _currentMapCenter) > 150;
+      final stale =
+          await _isParksCacheStale(); // implement using your _kParksCacheTsKey + _cacheTtl
+
+      if (movedFar || stale) {
+        // ignore: discarded_futures
+        _loadNearbyParks(saved ?? pos);
+      }
+    } finally {
+      _resumeRefreshing = false;
+    }
+  }
+
+  Future<bool> _isParksCacheStale() async {
+    final prefs = await SharedPreferences.getInstance();
+    final ts = prefs.getInt(_kParksCacheTsKey);
+    if (ts == null) return true;
+    final age =
+        DateTime.now().difference(DateTime.fromMillisecondsSinceEpoch(ts));
+    return age > _cacheTtl;
+  }
+
+  Future<void> _loadNearbyParks(LatLng position) async {
+    setState(() => _isSearching = true);
+    try {
+      final nearbyParks = await _locationService.findNearbyParks(
+        position.latitude,
+        position.longitude,
+      );
+      _allParks = nearbyParks;
+
+      await _applyMarkerDiff(nearbyParks); // markers now visible quickly
+
+      // Defer services unless needed
+      if (_selectedFilters.isNotEmpty) {
+        await _hydrateServicesForParks(nearbyParks);
+      }
+
+      _rebuildParksListeners();
+      await _cacheParksAndServices(nearbyParks);
+    } finally {
+      if (mounted) setState(() => _isSearching = false);
+    }
   }
 
   // ★ NEW: single place to finalize any walk (manual or auto)
-  Future<void> _handleWalkFinished({bool auto = false}) async {
+  // ★ Change signature to support silent mode
+  Future<void> _handleWalkFinished(
+      {bool auto = false, bool silent = false}) async {
     if (_finishingWalk) return;
-    setState(() => _finishingWalk = true);
+    _finishingWalk = true;
+    if (mounted) setState(() {}); // disable End Walk button
 
     _stopUiTicker();
 
@@ -860,62 +963,44 @@ class _MapTabState extends State<MapTab>
     } catch (_) {}
 
     if (!_walk.meetsMinimum) {
-      await _discardCurrentWalk();
+      // Nothing is saved anymore because we never created the doc
       _resetLiveRoute();
-      if (mounted) {
+      if (!silent && mounted) {
         setState(() => _finishingWalk = false);
-
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text("Walk not saved. ${_walk.tooShortReason}")),
         );
+      } else {
+        _finishingWalk = false;
+        if (mounted) setState(() {});
       }
       return;
     }
 
     _StreakResult? streak;
-
     try {
       final saved = await _persistWalkSession();
       if (saved) {
         streak = await _updateDailyStreak();
-      } else {
-        // Returned false without throwing → log some context
-        debugPrint(
-          'persistWalkSession returned false '
-          '(meetsMinimum=${_walk.meetsMinimum}, currentWalkId=$_currentWalkId)',
-        );
       }
-    } on FirebaseException catch (e, st) {
-      debugPrint('Firestore error [${e.code}]: ${e.message}');
-      debugPrint('plugin: ${e.plugin}');
-      debugPrintStack(stackTrace: st);
-      dev.log('persistWalkSession Firestore error', error: e, stackTrace: st);
-
-      // Optional: show user
-      if (mounted) {
+    } catch (e) {
+      if (!silent && mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Save failed (Firestore): ${e.message}')),
+          SnackBar(content: Text('Save failed: $e')),
         );
       }
-    } on PlatformException catch (e, st) {
-      debugPrint('PlatformException [${e.code}]: ${e.message}; ${e.details}');
-      debugPrintStack(stackTrace: st);
-      dev.log('persistWalkSession Platform error', error: e, stackTrace: st);
-    } catch (e, st) {
-      debugPrint('persistWalkSession failed: $e');
-      debugPrintStack(stackTrace: st);
-      dev.log('persistWalkSession unknown error', error: e, stackTrace: st);
+    } finally {
+      _finishingWalk = false;
+      if (mounted) setState(() {});
     }
 
-    final steps_ = _walk.steps;
-    final meters_ = _walk.meters;
-    final streakCurrent_ = streak?.current;
-    final streakLongest_ = streak?.longest;
-    final streakIsNewRecord_ = streak?.isNewRecord ?? false;
+    if (!silent && mounted) {
+      final steps_ = _walk.steps;
+      final meters_ = _walk.meters;
+      final streakCurrent_ = streak?.current;
+      final streakLongest_ = streak?.longest;
+      final streakIsNewRecord_ = streak?.isNewRecord ?? false;
 
-    if (mounted) setState(() => _finishingWalk = false);
-
-    if (mounted) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         _showCelebrationDialog(
           steps: steps_,
@@ -942,7 +1027,9 @@ class _MapTabState extends State<MapTab>
       if (!await _ensureLocationPermission()) {
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(_walk.tooShortReason)),
+          const SnackBar(
+              content:
+                  Text("Location permission is required to start a walk.")),
         );
         return;
       }
@@ -987,7 +1074,6 @@ class _MapTabState extends State<MapTab>
       final startFuture = _walk.start();
       if (mounted) setState(() {});
       _startUiTicker();
-      _startWalkSession();
 
       startFuture.catchError((e, _) {
         () async {
@@ -1010,55 +1096,6 @@ class _MapTabState extends State<MapTab>
     }
   }
 
-  Future<void> _startWalkSession() async {
-    _noteMarkers.clear();
-    _noteMeta.clear();
-    _noteRecords.clear();
-    _noteIndexById.clear();
-    _resetLiveRoute();
-    _recomputeVisibleMarkers();
-
-    final currentUid = FirebaseAuth.instance.currentUser?.uid;
-    if (currentUid == null) {
-      _currentWalkId = null;
-      return;
-    }
-
-    final walksCol = FirebaseFirestore.instance
-        .collection('owners')
-        .doc(currentUid)
-        .collection('walks');
-
-    final docRef = walksCol.doc();
-    _currentWalkId = docRef.id;
-
-    docRef.set({
-      'status': 'active',
-      'startedAt': FieldValue.serverTimestamp(),
-      'createdAt': FieldValue.serverTimestamp(),
-    }, SetOptions(merge: true)).catchError(
-        (e) => debugPrint('walk session set() failed: $e'));
-  }
-
-  Future<void> _discardCurrentWalk() async {
-    if (_currentWalkId == null) return;
-    try {
-      final currentUid = FirebaseAuth.instance.currentUser?.uid;
-      if (currentUid != null) {
-        final walkRef = FirebaseFirestore.instance
-            .collection('owners')
-            .doc(currentUid)
-            .collection('walks')
-            .doc(_currentWalkId);
-        await walkRef.delete();
-      }
-    } catch (e) {
-      debugPrint('discard walk error: $e');
-    } finally {
-      _currentWalkId = null;
-    }
-  }
-
   Future<bool> _persistWalkSession() async {
     if (_persistingWalk) return false;
     if (!_walk.meetsMinimum) return false;
@@ -1066,30 +1103,37 @@ class _MapTabState extends State<MapTab>
     _persistingWalk = true;
     try {
       final currentUid = FirebaseAuth.instance.currentUser?.uid;
-      if (currentUid == null || _currentWalkId == null) return false;
+      if (currentUid == null) return false;
 
-      final walkRef = FirebaseFirestore.instance
+      final walksCol = FirebaseFirestore.instance
           .collection('owners')
           .doc(currentUid)
-          .collection('walks')
-          .doc(_currentWalkId);
+          .collection('walks');
+
+      // ★ Create new doc only now (no doc at start)
+      final walkRef = walksCol.doc();
+      _currentWalkId = walkRef.id;
 
       final route = _walk.points
           .map((p) => GeoPoint(p.latitude, p.longitude))
           .toList(growable: false);
 
-      // If WalkManager exposes endedAt, prefer it; else server time
+      final startedAt = _walk.startedAt != null
+          ? Timestamp.fromDate(_walk.startedAt!)
+          : FieldValue.serverTimestamp();
       final endedAt = _walk.endedAt != null
           ? Timestamp.fromDate(_walk.endedAt!)
           : FieldValue.serverTimestamp();
 
       await walkRef.set({
         'status': 'completed',
+        'startedAt': startedAt,
         'endedAt': endedAt,
         'durationSec': _walk.elapsed.inSeconds,
         'distanceMeters': _walk.meters,
-        'steps': _walk.steps,
+        'steps': _walk.steps == 0 ? (_walk.meters / 0.78).round() : _walk.steps,
         'route': route,
+        'createdAt': FieldValue.serverTimestamp(),
       }, SetOptions(merge: true));
 
       if (_noteRecords.isNotEmpty) {
@@ -1261,53 +1305,6 @@ class _MapTabState extends State<MapTab>
     }
   }
 
-  Future<void> _loadNearbyParks(LatLng position) async {
-    try {
-      setState(() => _isSearching = true);
-
-      final nearbyParks = await _locationService.findNearbyParks(
-        position.latitude,
-        position.longitude,
-      );
-      _allParks = nearbyParks;
-
-      await _applyMarkerDiff(nearbyParks);
-      await _hydrateServicesForParks(nearbyParks);
-      _rebuildParksListeners();
-
-      await _cacheParksAndServices(nearbyParks);
-
-      if (!mounted) return;
-      setState(() => _isSearching = false);
-
-      final currentPark = await _locationService.isUserAtPark(
-        position.latitude,
-        position.longitude,
-      );
-      if (currentPark != null && mounted) {
-        await _locationService.ensureParkExists(currentPark);
-
-        final currentUser = FirebaseAuth.instance.currentUser;
-        if (currentUser != null) {
-          final parkId = generateParkID(
-              currentPark.latitude, currentPark.longitude, currentPark.name);
-          final activeDocRef = FirebaseFirestore.instance
-              .collection('parks')
-              .doc(parkId)
-              .collection('active_users')
-              .doc(currentUser.uid);
-          final activeDoc = await activeDocRef.get();
-          if (!activeDoc.exists) {
-            _showCheckInDialog(currentPark);
-          }
-        }
-      }
-    } catch (e) {
-      debugPrint("Error loading nearby parks: $e");
-      if (mounted) setState(() => _isSearching = false);
-    }
-  }
-
   // ---- Cache restore/save ----
   Future<void> _restoreCachedParks() async {
     try {
@@ -1387,23 +1384,42 @@ class _MapTabState extends State<MapTab>
 
   // ---- Marker diff keyed by park.id ----
   Future<void> _applyMarkerDiff(List<Park> parks) async {
-    final next = <String, Marker>{};
-    final futures = parks.map((p) async {
-      final m = await _createParkMarker(p);
-      return MapEntry(p.id, m);
-    }).toList();
+    bool changed = false;
+    final nextIds = parks.map((p) => p.id).toSet();
+    final prevIds = _markersMap.keys.toSet();
 
-    for (final entry in await Future.wait(futures)) {
-      next[entry.key] = entry.value;
+    for (final removed in prevIds.difference(nextIds)) {
+      _markersMap.remove(removed);
+      changed = true;
     }
 
-    if (!mounted) return;
-    setState(() {
-      _markersMap
-        ..clear()
-        ..addAll(next);
+    final toAdd = parks.where((p) => !_markersMap.containsKey(p.id)).toList();
+    if (toAdd.isNotEmpty) {
+      final futures =
+          toAdd.map((p) async => MapEntry(p.id, await _createParkMarker(p)));
+      for (final e in await Future.wait(futures)) {
+        _markersMap[e.key] = e.value;
+      }
+      changed = true;
+    }
+
+    for (final p in parks) {
+      final old = _markersMap[p.id];
+      if (old == null) continue;
+      final newSnippet = (p.userCount > 0) ? 'Users: ${p.userCount}' : null;
+      if (old.infoWindow.snippet != newSnippet ||
+          old.infoWindow.title != p.name) {
+        _markersMap[p.id] = old.copyWith(
+          infoWindowParam: InfoWindow(title: p.name, snippet: newSnippet),
+        );
+        changed = true;
+      }
+    }
+
+    if (changed) {
       _recomputeVisibleMarkers();
-    });
+      if (mounted) setState(() {});
+    }
   }
 
   void _rebuildParksListeners() {
@@ -1461,7 +1477,7 @@ class _MapTabState extends State<MapTab>
 
         if ((changedInfo || servicesChanged)) {
           _parksUiDebounce?.cancel();
-          _parksUiDebounce = Timer(const Duration(milliseconds: 150), () {
+          _parksUiDebounce = Timer(const Duration(milliseconds: 220), () {
             if (!mounted) return;
             setState(() {
               _recomputeVisibleMarkers();
@@ -1499,7 +1515,7 @@ class _MapTabState extends State<MapTab>
     _currentMapCenter = _finalPosition ?? const LatLng(43.7615, -79.4111);
 
     if (_finalPosition != null) {
-      _moveCameraTo(_finalPosition!, zoom: 17);
+      _moveCameraTo(_finalPosition!, zoom: 17, instant: true);
     }
   }
 
@@ -1514,9 +1530,15 @@ class _MapTabState extends State<MapTab>
     });
   }
 
-  Future<void> _moveCameraTo(LatLng pos, {double zoom = 17}) async {
+  Future<void> _moveCameraTo(LatLng pos,
+      {double zoom = 17, bool instant = false}) async {
     final ctl = await _mapCtlCompleter.future;
-    await ctl.animateCamera(CameraUpdate.newLatLngZoom(pos, zoom));
+    final update = CameraUpdate.newLatLngZoom(pos, zoom);
+    if (instant) {
+      await ctl.moveCamera(update);
+    } else {
+      await ctl.animateCamera(update);
+    }
     _lastCameraMove = DateTime.now();
   }
 
@@ -1542,42 +1564,21 @@ class _MapTabState extends State<MapTab>
   Future<void> _centerOnUser() async {
     if (_isCentering) return;
     setState(() => _isCentering = true);
-
     try {
-      if (!await _ensureLocationPermission()) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text("Location permission is required.")),
-          );
-        }
-        return;
-      }
-
-      final user = await _getFreshUserLatLng();
-      if (user == null) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text("Unable to get current location.")),
-          );
-        }
-        return;
-      }
+      // super short fresh attempt
+      final user = await _getFreshUserLatLng(
+            freshTimeout: const Duration(milliseconds: 1200),
+            minAccuracyMeters: 100,
+          ) ??
+          _currentMapCenter;
 
       _finalPosition = user;
       _currentMapCenter = user;
-
       await _moveCameraTo(user, zoom: 17);
 
-      // async updates
-      // ignore: discarded_futures
-      _locationService.saveUserLocation(user.latitude, user.longitude);
+      // background refresh of parks
       // ignore: discarded_futures
       _loadNearbyParks(user);
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Error centering: $e")),
-      );
     } finally {
       if (mounted) setState(() => _isCentering = false);
     }
@@ -2536,7 +2537,10 @@ class _MapTabState extends State<MapTab>
                 _buildFilterBar(),
 
                 if (_isSearching)
-                  const Center(child: CircularProgressIndicator()),
+                  const IgnorePointer(
+                    ignoring: true,
+                    child: Center(child: CircularProgressIndicator()),
+                  ),
 
                 // Top-right walk-note buttons (only when walking)
                 if (_walk.isActive)

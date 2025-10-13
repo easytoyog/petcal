@@ -1,7 +1,12 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:math' as math;
+
+import 'package:flutter/foundation.dart' show compute;
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:google_maps_flutter/google_maps_flutter.dart' show LatLng;
 import 'package:inthepark/utils/utils.dart';
 import 'package:location/location.dart' as loc;
 import 'package:inthepark/models/park_model.dart';
@@ -11,6 +16,7 @@ import 'package:inthepark/services/firestore_service.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:inthepark/widgets/ad_banner.dart';
 import 'package:inthepark/widgets/active_pets_dialog.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class ParksTab extends StatefulWidget {
   final void Function(String parkId) onShowEvents;
@@ -20,7 +26,8 @@ class ParksTab extends StatefulWidget {
   State<ParksTab> createState() => _ParksTabState();
 }
 
-class _ParksTabState extends State<ParksTab> {
+class _ParksTabState extends State<ParksTab>
+    with AutomaticKeepAliveClientMixin<ParksTab>, WidgetsBindingObserver {
   final _locationService =
       LocationService(dotenv.env['GOOGLE_MAPS_API_KEY'] ?? '');
   final String? _currentUserId = FirebaseAuth.instance.currentUser?.uid;
@@ -41,41 +48,208 @@ class _ParksTabState extends State<ParksTab> {
   final Map<String, List<String>> _parkServices = {}; // parkId -> services[]
   final Set<String> _checkedInParkIds = {}; // where current user is checked-in
 
-  // Meta hydration memo
-  final Set<String> _hydratedMeta = {}; // parkIds whose meta we've fetched
+  // Meta hydration memo / in-flight
+  final Set<String> _hydratedMeta = {}; // parkIds already fetched
+  final Set<String> _metaInFlight = {}; // currently hydrating
+
+  // Ensure-park-doc memo
+  final Set<String> _ensuredParkDocs = {};
+
+  // Resume throttle
+  bool _resumeRefreshing = false;
+  DateTime _lastNearbyRefresh = DateTime.fromMillisecondsSinceEpoch(0);
+  LatLng? _lastRefreshLoc;
+
+  // Cache keys & TTL
+  static const _kCacheNearby = 'parksTab.nearby.v1';
+  static const _kCacheFavs = 'parksTab.favs.v1';
+  static const _kCacheMeta = 'parksTab.meta.v1';
+  static const _kCacheTs = 'parksTab.ts.v1';
+  static const Duration _cacheTtl = Duration(hours: 2);
+
+  // Debounces
+  Timer? _checkinDebounce;
+  Timer? _cacheDebounce;
+
+  // SharedPreferences reuse
+  SharedPreferences? _prefs;
+  Future<SharedPreferences> _sp() async =>
+      _prefs ??= await SharedPreferences.getInstance();
 
   // ---------- Helpers ----------
   String _parkIdOf(Park p) => generateParkID(p.latitude, p.longitude, p.name);
 
   // Filtered nearby list (favorites excluded)
-  List<Park> get _nearbyParksVisible =>
-      _nearbyParks.where((p) => !_favoriteParkIds.contains(_parkIdOf(p))).toList();
+  List<Park> get _nearbyParksVisible => _nearbyParks
+      .where((p) => !_favoriteParkIds.contains(_parkIdOf(p)))
+      .toList();
+
+  @override
+  bool get wantKeepAlive => true;
 
   @override
   void initState() {
     super.initState();
-    _bootstrap();
+    WidgetsBinding.instance.addObserver(this);
+    _restoreCache(); // paint instantly if we have cache
+    _bootstrap(); // then fetch fresh data
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _checkinDebounce?.cancel();
+    _cacheDebounce?.cancel();
+    _metaInFlight.clear();
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) _onFastResume();
   }
 
   Future<void> _bootstrap() async {
     await Future.wait([
       _fetchFavoriteParks(),
       _refreshCheckedInSet(),
-      _fetchNearbyParksFast(),
+      _fetchNearbyParksFast(), // spinner-less fast pass
     ]);
   }
 
+  // ---------- Resume: fast, spinner-less refresh ----------
+  Future<void> _onFastResume() async {
+    if (!mounted || _resumeRefreshing) return;
+    _resumeRefreshing = true;
+    try {
+      final saved = await _locationService.getSavedUserLocation();
+      final movedFar = (saved != null && _lastRefreshLoc != null)
+          ? _approxMeters(saved, _lastRefreshLoc!) > 150
+          : (_lastRefreshLoc == null);
+      final stale = DateTime.now().difference(_lastNearbyRefresh) >
+          const Duration(minutes: 5);
+
+      if (movedFar || stale || !_hasFetchedNearby) {
+        await _fetchNearbyParksFast(); // no spinner
+        _lastNearbyRefresh = DateTime.now();
+        _lastRefreshLoc = saved ?? _lastRefreshLoc;
+
+        // quietly hydrate meta updates in the background
+        final ids = _nearbyParks.map(_parkIdOf).toList();
+        final toHydrate =
+            ids.where((id) => !_hydratedMeta.contains(id)).toList();
+        if (toHydrate.isNotEmpty) {
+          // fire-and-forget
+          // ignore: discarded_futures
+          _hydrateMetaForIds(toHydrate);
+        }
+      }
+    } finally {
+      _resumeRefreshing = false;
+    }
+  }
+
+  double _approxMeters(LatLng a, LatLng b) {
+    const k = 111000.0; // ~ meters / degree latitude
+    final dx = (a.latitude - b.latitude) * k;
+    final dy = (a.longitude - b.longitude) *
+        k *
+        math.cos(a.latitude * math.pi / 180.0);
+    return math.sqrt(dx * dx + dy * dy);
+  }
+
+  // ---------- Cache (restore + save, debounced) ----------
+  void _cacheStateDebounced() {
+    _cacheDebounce?.cancel();
+    _cacheDebounce = Timer(const Duration(milliseconds: 250), _cacheState);
+  }
+
+  Future<void> _restoreCache() async {
+    try {
+      final p = await _sp();
+      final ts = p.getInt(_kCacheTs);
+      if (ts == null) return;
+      final age =
+          DateTime.now().difference(DateTime.fromMillisecondsSinceEpoch(ts));
+      if (age > _cacheTtl) return;
+
+      final nearbyRaw = p.getString(_kCacheNearby);
+      final favsRaw = p.getString(_kCacheFavs);
+      final metaRaw = p.getString(_kCacheMeta);
+
+      if (nearbyRaw != null) {
+        // parse off-thread
+        _nearbyParks = await compute(_parseParksFromJson, nearbyRaw);
+        _hasFetchedNearby = _nearbyParks.isNotEmpty;
+      }
+      if (favsRaw != null) {
+        _favoriteParks = await compute(_parseParksFromJson, favsRaw);
+        _favoriteParkIds = _favoriteParks.map(_parkIdOf).toSet();
+      }
+      if (metaRaw != null) {
+        final meta = jsonDecode(metaRaw) as Map<String, dynamic>;
+        _activeUserCounts
+          ..clear()
+          ..addAll((meta['counts'] as Map?)?.map(
+                (k, v) => MapEntry(k as String, (v as num).toInt()),
+              ) ??
+              {});
+        _parkServices
+          ..clear()
+          ..addAll((meta['services'] as Map?)?.map(
+                (k, v) => MapEntry(
+                    k as String, ((v as List?) ?? const []).cast<String>()),
+              ) ??
+              {});
+        _hydratedMeta
+          ..clear()
+          ..addAll(_parkServices.keys);
+      }
+
+      if (mounted) setState(() {});
+    } catch (_) {
+      // ignore cache errors
+    }
+  }
+
+  Future<void> _cacheState() async {
+    try {
+      final p = await _sp();
+      await p.setString(_kCacheNearby,
+          jsonEncode(_nearbyParks.map((x) => x.toJson()).toList()));
+      await p.setString(_kCacheFavs,
+          jsonEncode(_favoriteParks.map((x) => x.toJson()).toList()));
+      await p.setString(
+        _kCacheMeta,
+        jsonEncode({
+          'counts': _activeUserCounts,
+          'services': _parkServices,
+        }),
+      );
+      await p.setInt(_kCacheTs, DateTime.now().millisecondsSinceEpoch);
+    } catch (_) {
+      // ignore
+    }
+  }
+
+  // ---------- Firestore helpers ----------
   Future<void> _ensureParkDoc(String parkId, Park p) async {
+    if (_ensuredParkDocs.contains(parkId)) return;
     final ref = FirebaseFirestore.instance.collection('parks').doc(parkId);
-    final snap = await ref.get();
-    if (!snap.exists) {
-      await ref.set({
-        'id': parkId,
-        'name': p.name,
-        'latitude': p.latitude,
-        'longitude': p.longitude,
-        'createdAt': FieldValue.serverTimestamp(),
-      });
+    try {
+      final snap = await ref.get().timeout(const Duration(seconds: 6));
+      if (!snap.exists) {
+        await ref.set({
+          'id': parkId,
+          'name': p.name,
+          'latitude': p.latitude,
+          'longitude': p.longitude,
+          'createdAt': FieldValue.serverTimestamp(),
+        }).timeout(const Duration(seconds: 6));
+      }
+      _ensuredParkDocs.add(parkId);
+    } catch (_) {
+      // ignore ensure failures silently
     }
   }
 
@@ -88,7 +262,8 @@ class _ParksTabState extends State<ParksTab> {
           .collection('owners')
           .doc(uid)
           .collection('likedParks')
-          .get();
+          .get()
+          .timeout(const Duration(seconds: 8));
 
       final parkIds = likedSnapshot.docs.map((d) => d.id).toList();
 
@@ -102,7 +277,8 @@ class _ParksTabState extends State<ParksTab> {
         final qs = await FirebaseFirestore.instance
             .collection('parks')
             .where(FieldPath.documentId, whereIn: chunk)
-            .get();
+            .get()
+            .timeout(const Duration(seconds: 8));
 
         parks.addAll(qs.docs.map((d) => Park.fromFirestore(d)));
         _hydrateMetaFromDocs(qs.docs);
@@ -111,9 +287,10 @@ class _ParksTabState extends State<ParksTab> {
 
       if (!mounted) return;
       setState(() {
-        _favoriteParkIds = parkIds.toSet(); // <- ensure rebuild with fav IDs
+        _favoriteParkIds = parkIds.toSet();
         _favoriteParks = parks;
       });
+      _cacheStateDebounced();
     } catch (_) {
       // silently ignore
     }
@@ -131,9 +308,43 @@ class _ParksTabState extends State<ParksTab> {
 
   // ---------- Nearby (FAST first, then precise) ----------
   Future<void> _fetchNearbyParksFast() async {
-    final cached = await _locationService.getUserLocationOrCached();
-    if (cached == null) return;
-    await _fetchNearbyParksAt(cached.latitude, cached.longitude);
+    try {
+      final cached = await _locationService.getUserLocationOrCached();
+      if (cached == null) return;
+
+      final parks = await _locationService.findNearbyParks(
+        cached.latitude,
+        cached.longitude,
+      );
+
+      // Only update UI if list actually changed
+      bool changed = parks.length != _nearbyParks.length;
+      if (!changed) {
+        for (int i = 0; i < parks.length; i++) {
+          if (_parkIdOf(parks[i]) != _parkIdOf(_nearbyParks[i])) {
+            changed = true;
+            break;
+          }
+        }
+      }
+      if (!changed) return;
+
+      // hydrate meta lightly (fire-and-forget)
+      final ids = parks.map(_parkIdOf).toList();
+      final toHydrate = ids.where((id) => !_hydratedMeta.contains(id)).toList();
+      if (toHydrate.isNotEmpty) {
+        // ignore: discarded_futures
+        _hydrateMetaForIds(toHydrate);
+      }
+
+      _nearbyParks = parks;
+      _hasFetchedNearby = true;
+      _lastRefreshLoc = cached;
+      if (mounted) setState(() {});
+      _cacheStateDebounced();
+    } catch (_) {
+      // ignore
+    }
   }
 
   Future<void> _fetchNearbyParks() async {
@@ -153,7 +364,9 @@ class _ParksTabState extends State<ParksTab> {
         return;
       }
 
-      final l = await permission.getLocation();
+      final l = await permission.getLocation().timeout(
+          const Duration(seconds: 2),
+          onTimeout: () => loc.LocationData.fromMap({}));
       if (l.latitude == null || l.longitude == null) return;
       await _fetchNearbyParksAt(l.latitude!, l.longitude!);
     } catch (_) {
@@ -176,11 +389,24 @@ class _ParksTabState extends State<ParksTab> {
         _hydratedMeta.addAll(toHydrate);
       }
 
+      // Only update UI if changed
+      bool changed = parks.length != _nearbyParks.length;
+      if (!changed) {
+        for (int i = 0; i < parks.length; i++) {
+          if (_parkIdOf(parks[i]) != _parkIdOf(_nearbyParks[i])) {
+            changed = true;
+            break;
+          }
+        }
+      }
+      if (!changed) return;
+
       if (!mounted) return;
       setState(() {
-        _nearbyParks = parks; // we keep raw list; UI filters out favorites
+        _nearbyParks = parks; // keep raw list; UI filters out favorites
         _hasFetchedNearby = true;
       });
+      _cacheStateDebounced();
     } catch (_) {
       // ignore
     } finally {
@@ -191,32 +417,68 @@ class _ParksTabState extends State<ParksTab> {
   // ---------- Meta (userCount + services) ----------
   void _hydrateMetaFromDocs(
       List<QueryDocumentSnapshot<Map<String, dynamic>>> docs) {
+    bool anyChange = false;
     for (final d in docs) {
       final data = d.data();
-      _activeUserCounts[d.id] = (data['userCount'] ?? 0) as int;
-      final svcs = (data['services'] as List?)?.cast<String>() ?? const [];
-      _parkServices[d.id] = svcs;
+      final newCount = (data['userCount'] ?? 0) as int;
+      final newSvcs = (data['services'] as List?)?.cast<String>() ?? const [];
+      if (_activeUserCounts[d.id] != newCount) {
+        _activeUserCounts[d.id] = newCount;
+        anyChange = true;
+      }
+      // compare lists shallowly
+      final oldSvcs = _parkServices[d.id] ?? const <String>[];
+      if (oldSvcs.length != newSvcs.length ||
+          !oldSvcs.toSet().containsAll(newSvcs)) {
+        _parkServices[d.id] = newSvcs;
+        anyChange = true;
+      }
+    }
+    if (anyChange) {
+      if (mounted) setState(() {});
+      _cacheStateDebounced();
     }
   }
 
   Future<void> _hydrateMetaForIds(List<String> parkIds) async {
-    final futures = <Future<void>>[];
-    for (var i = 0; i < parkIds.length; i += 10) {
-      final end = (i + 10).clamp(0, parkIds.length);
-      final chunk = parkIds.sublist(i, end);
-      if (chunk.isEmpty) continue;
+    // avoid duplicate in-flight fetches
+    final ids = parkIds
+        .where(
+            (id) => !_hydratedMeta.contains(id) && !_metaInFlight.contains(id))
+        .toList();
+    if (ids.isEmpty) return;
 
-      futures.add(FirebaseFirestore.instance
-          .collection('parks')
-          .where(FieldPath.documentId, whereIn: chunk)
-          .get()
-          .then((qs) => _hydrateMetaFromDocs(qs.docs)));
+    _metaInFlight.addAll(ids);
+    try {
+      final futures = <Future<void>>[];
+      for (var i = 0; i < ids.length; i += 10) {
+        final end = (i + 10).clamp(0, ids.length);
+        final chunk = ids.sublist(i, end);
+        if (chunk.isEmpty) continue;
+
+        futures.add(FirebaseFirestore.instance
+            .collection('parks')
+            .where(FieldPath.documentId, whereIn: chunk)
+            .get()
+            .timeout(const Duration(seconds: 8))
+            .then((qs) => _hydrateMetaFromDocs(qs.docs)));
+      }
+      await Future.wait(futures);
+      _hydratedMeta.addAll(ids);
+    } catch (_) {
+      // ignore
+    } finally {
+      _metaInFlight.removeAll(ids);
     }
-    await Future.wait(futures);
-    if (mounted) setState(() {});
   }
 
   // ---------- Checked-in set ----------
+  void _debouncedRefreshCheckedIn() {
+    _checkinDebounce?.cancel();
+    _checkinDebounce =
+        Timer(const Duration(milliseconds: 220), _refreshCheckedInSet);
+  }
+
   Future<void> _refreshCheckedInSet() async {
     _checkedInParkIds.clear();
     final uid = _currentUserId;
@@ -226,15 +488,16 @@ class _ParksTabState extends State<ParksTab> {
       final snaps = await FirebaseFirestore.instance
           .collectionGroup('active_users')
           .where('uid', isEqualTo: uid)
-          .get();
+          .get()
+          .timeout(const Duration(seconds: 8));
 
       for (final doc in snaps.docs) {
         final parkRef = doc.reference.parent.parent; // parks/{parkId}
         if (parkRef != null) _checkedInParkIds.add(parkRef.id);
       }
       if (mounted) setState(() {});
-    } catch (e) {
-      // optional: log e
+    } catch (_) {
+      // ignore
     }
   }
 
@@ -247,11 +510,15 @@ class _ParksTabState extends State<ParksTab> {
     final userRef =
         db.collection('parks').doc(parkId).collection('active_users').doc(uid);
 
-    await db.runTransaction((tx) async {
-      final snap = await tx.get(userRef);
-      if (!snap.exists) return;
-      tx.delete(userRef);
-    });
+    try {
+      await db.runTransaction((tx) async {
+        final snap = await tx.get(userRef);
+        if (!snap.exists) return;
+        tx.delete(userRef);
+      }).timeout(const Duration(seconds: 8));
+    } catch (_) {
+      // ignore
+    }
   }
 
   Future<void> _txCheckIn(String parkId) async {
@@ -262,14 +529,18 @@ class _ParksTabState extends State<ParksTab> {
     final userRef =
         db.collection('parks').doc(parkId).collection('active_users').doc(uid);
 
-    await db.runTransaction((tx) async {
-      final snap = await tx.get(userRef);
-      if (snap.exists) return; // already checked in
-      tx.set(userRef, {
-        'uid': uid,
-        'checkedInAt': FieldValue.serverTimestamp(),
-      });
-    });
+    try {
+      await db.runTransaction((tx) async {
+        final snap = await tx.get(userRef);
+        if (snap.exists) return; // already checked in
+        tx.set(userRef, {
+          'uid': uid,
+          'checkedInAt': FieldValue.serverTimestamp(),
+        });
+      }).timeout(const Duration(seconds: 8));
+    } catch (_) {
+      // ignore
+    }
   }
 
   Future<void> _checkOutFromAllParks() async {
@@ -280,7 +551,8 @@ class _ParksTabState extends State<ParksTab> {
       final snaps = await FirebaseFirestore.instance
           .collectionGroup('active_users')
           .where('uid', isEqualTo: uid)
-          .get();
+          .get()
+          .timeout(const Duration(seconds: 8));
 
       if (snaps.docs.isEmpty) return;
 
@@ -297,7 +569,8 @@ class _ParksTabState extends State<ParksTab> {
           );
         }
       }
-      await wb.commit();
+      await wb.commit().timeout(const Duration(seconds: 8));
+      _debouncedRefreshCheckedIn();
     } catch (_) {
       // ignore
     }
@@ -316,12 +589,18 @@ class _ParksTabState extends State<ParksTab> {
     }
 
     try {
-      return await petsCol.where('ownerId', whereIn: ownerIds).get();
+      return await petsCol
+          .where('ownerId', whereIn: ownerIds)
+          .get()
+          .timeout(const Duration(seconds: 8));
     } on FirebaseException catch (_) {
       final ownerRefs = ownerIds
           .map((id) => FirebaseFirestore.instance.collection('owners').doc(id))
           .toList();
-      return await petsCol.where('ownerId', whereIn: ownerRefs).get();
+      return await petsCol
+          .where('ownerId', whereIn: ownerRefs)
+          .get()
+          .timeout(const Duration(seconds: 8));
     }
   }
 
@@ -334,14 +613,16 @@ class _ParksTabState extends State<ParksTab> {
         .collection('favorites')
         .doc(currentUser.uid)
         .collection('pets')
-        .get();
+        .get()
+        .timeout(const Duration(seconds: 8));
     final favoritePetIds = favPetsSnap.docs.map((d) => d.id).toSet();
 
     final activeUsersSnapshot = await FirebaseFirestore.instance
         .collection('parks')
         .doc(parkId)
         .collection('active_users')
-        .get();
+        .get()
+        .timeout(const Duration(seconds: 8));
     final userIds = activeUsersSnapshot.docs.map((d) => d.id).toList();
 
     final checkedInForByOwner = <String, String>{};
@@ -393,13 +674,15 @@ class _ParksTabState extends State<ParksTab> {
                   .doc(currentUser.uid)
                   .collection('userFriends')
                   .doc(ownerId)
-                  .delete();
+                  .delete()
+                  .timeout(const Duration(seconds: 8));
               await FirebaseFirestore.instance
                   .collection('favorites')
                   .doc(currentUser.uid)
                   .collection('pets')
                   .doc(petId)
-                  .delete();
+                  .delete()
+                  .timeout(const Duration(seconds: 8));
               favoritePetIds.remove(petId);
               if (context.mounted) {
                 ScaffoldMessenger.of(context).showSnackBar(
@@ -410,7 +693,8 @@ class _ParksTabState extends State<ParksTab> {
               final ownerDoc = await FirebaseFirestore.instance
                   .collection('owners')
                   .doc(ownerId)
-                  .get();
+                  .get()
+                  .timeout(const Duration(seconds: 8));
               String ownerName = "";
               if (ownerDoc.exists) {
                 final data = ownerDoc.data() as Map<String, dynamic>;
@@ -429,7 +713,7 @@ class _ParksTabState extends State<ParksTab> {
                 'friendId': ownerId,
                 'ownerName': ownerName,
                 'addedAt': FieldValue.serverTimestamp(),
-              });
+              }).timeout(const Duration(seconds: 8));
               await FirebaseFirestore.instance
                   .collection('favorites')
                   .doc(currentUser.uid)
@@ -438,7 +722,7 @@ class _ParksTabState extends State<ParksTab> {
                   .set({
                 'petId': petId,
                 'addedAt': FieldValue.serverTimestamp(),
-              });
+              }).timeout(const Duration(seconds: 8));
               favoritePetIds.add(petId);
               if (context.mounted) {
                 ScaffoldMessenger.of(context).showSnackBar(
@@ -457,18 +741,23 @@ class _ParksTabState extends State<ParksTab> {
     final parkId = _parkIdOf(park);
     await _ensureParkDoc(parkId, park); // ensure doc only on mutation
 
-    if (_favoriteParkIds.contains(parkId)) {
-      await _fs.unlikePark(parkId);
-      _favoriteParkIds.remove(parkId);
-      _favoriteParks.removeWhere((p) => _parkIdOf(p) == parkId);
-    } else {
-      await _fs.likePark(parkId);
-      _favoriteParkIds.add(parkId);
-      if (!_favoriteParks.any((p) => _parkIdOf(p) == parkId)) {
-        _favoriteParks.add(park);
+    try {
+      if (_favoriteParkIds.contains(parkId)) {
+        await _fs.unlikePark(parkId);
+        _favoriteParkIds.remove(parkId);
+        _favoriteParks.removeWhere((p) => _parkIdOf(p) == parkId);
+      } else {
+        await _fs.likePark(parkId);
+        _favoriteParkIds.add(parkId);
+        if (!_favoriteParks.any((p) => _parkIdOf(p) == parkId)) {
+          _favoriteParks.add(park);
+        }
       }
+      if (mounted) setState(() {});
+      _cacheStateDebounced();
+    } catch (_) {
+      // ignore
     }
-    if (mounted) setState(() {}); // rebuild -> nearby list auto-filters
   }
 
   // ---------- Check-in / out ----------
@@ -515,6 +804,8 @@ class _ParksTabState extends State<ParksTab> {
           );
         }
       }
+      _debouncedRefreshCheckedIn();
+      _cacheStateDebounced();
     } catch (_) {
       // ignore
     } finally {
@@ -523,6 +814,13 @@ class _ParksTabState extends State<ParksTab> {
   }
 
   // ---------- UI ----------
+  static const _svcIcons = <String, IconData>{
+    "Off-leash Dog Park": Icons.pets,
+    "Off-leash Trail": Icons.terrain,
+    "Off-leash Beach": Icons.beach_access,
+  };
+  IconData _serviceIcon(String s) => _svcIcons[s] ?? Icons.park;
+
   Widget _buildParkCard(Park park, {required bool isFavorite}) {
     final parkId = _parkIdOf(park);
     final liked = _favoriteParkIds.contains(parkId);
@@ -531,116 +829,115 @@ class _ParksTabState extends State<ParksTab> {
     final isCheckedIn = _checkedInParkIds.contains(parkId);
     final isBusy = _mutatingParkId == parkId;
 
-    IconData serviceIcon(String s) {
-      if (s == "Off-leash Dog Park") return Icons.pets;
-      if (s == "Off-leash Trail") return Icons.terrain;
-      if (s == "Off-leash Beach") return Icons.beach_access;
-      return Icons.park;
-    }
-
-    return Card(
-      color: isFavorite ? Colors.green.shade50 : null,
-      margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-      child: InkWell(
-        onTap: () async {
-          await _ensureParkDoc(parkId, park);
-          _showActiveUsersDialog(parkId);
-        },
-        child: Padding(
-          padding: const EdgeInsets.all(12),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // Title + like toggle
-              Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      park.name,
-                      style: const TextStyle(
-                          fontSize: 16, fontWeight: FontWeight.bold),
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                  IconButton(
-                    icon: Icon(liked ? Icons.favorite : Icons.favorite_border),
-                    color: liked ? Colors.green : Colors.grey,
-                    onPressed: () => _toggleLike(park),
-                  ),
-                ],
-              ),
-
-              // Services chips
-              if (services.isNotEmpty) ...[
-                const SizedBox(height: 6),
-                Wrap(
-                  spacing: 6,
-                  runSpacing: -6,
-                  children: services.map((s) {
-                    return Chip(
-                      avatar:
-                          Icon(serviceIcon(s), size: 16, color: Colors.green),
-                      label: Text(s, style: const TextStyle(fontSize: 12)),
-                      backgroundColor: Colors.green[50],
-                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                      visualDensity:
-                          const VisualDensity(horizontal: -4, vertical: -4),
-                    );
-                  }).toList(),
-                ),
-              ],
-
-              const SizedBox(height: 6),
-
-              // Active users count
-              Text("Active Users: $userCount"),
-
-              const SizedBox(height: 8),
-
-              // Actions
-              Row(
-                children: [
-                  ElevatedButton(
-                    onPressed: () => Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) => ChatRoomScreen(parkId: parkId),
+    return KeyedSubtree(
+      key: ValueKey('park:$parkId'),
+      child: Card(
+        color: isFavorite ? Colors.green.shade50 : null,
+        margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        child: InkWell(
+          onTap: () async {
+            await _ensureParkDoc(parkId, park);
+            _showActiveUsersDialog(parkId);
+          },
+          child: Padding(
+            padding: const EdgeInsets.all(12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Title + like toggle
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        park.name,
+                        style: const TextStyle(
+                            fontSize: 16, fontWeight: FontWeight.bold),
+                        overflow: TextOverflow.ellipsis,
                       ),
                     ),
-                    child:
-                        const Text("Park Chat", style: TextStyle(fontSize: 12)),
-                  ),
-                  const SizedBox(width: 8),
-                  ElevatedButton(
-                    onPressed: () => widget.onShowEvents(parkId),
-                    child: const Text("Park Events",
-                        style: TextStyle(fontSize: 12)),
-                  ),
-                  const SizedBox(width: 8),
-                  ElevatedButton(
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: isCheckedIn ? Colors.red : Colors.green,
+                    IconButton(
+                      icon:
+                          Icon(liked ? Icons.favorite : Icons.favorite_border),
+                      color: liked ? Colors.green : Colors.grey,
+                      onPressed: () => _toggleLike(park),
+                      tooltip: liked ? 'Unlike' : 'Like',
                     ),
-                    onPressed: isBusy ? null : () => _toggleCheckIn(park),
-                    child: isBusy
-                        ? const SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              valueColor:
-                                  AlwaysStoppedAnimation<Color>(Colors.white),
-                            ),
-                          )
-                        : Text(
-                            isCheckedIn ? "Check Out" : "Check In",
-                            style: const TextStyle(
-                                fontSize: 12, color: Colors.white),
-                          ),
+                  ],
+                ),
+
+                // Services chips
+                if (services.isNotEmpty) ...[
+                  const SizedBox(height: 6),
+                  Wrap(
+                    spacing: 6,
+                    runSpacing: -6,
+                    children: services.map((s) {
+                      return Chip(
+                        avatar: Icon(_serviceIcon(s),
+                            size: 16, color: Colors.green),
+                        label: Text(s, style: const TextStyle(fontSize: 12)),
+                        backgroundColor: Colors.green[50],
+                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        visualDensity:
+                            const VisualDensity(horizontal: -4, vertical: -4),
+                      );
+                    }).toList(),
                   ),
                 ],
-              ),
-            ],
+
+                const SizedBox(height: 6),
+
+                // Active users count
+                Text("Active Users: $userCount"),
+
+                const SizedBox(height: 8),
+
+                // Actions
+                Row(
+                  children: [
+                    ElevatedButton(
+                      onPressed: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => ChatRoomScreen(parkId: parkId),
+                        ),
+                      ),
+                      child: const Text("Park Chat",
+                          style: TextStyle(fontSize: 12)),
+                    ),
+                    const SizedBox(width: 8),
+                    ElevatedButton(
+                      onPressed: () => widget.onShowEvents(parkId),
+                      child: const Text("Park Events",
+                          style: TextStyle(fontSize: 12)),
+                    ),
+                    const SizedBox(width: 8),
+                    ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor:
+                            isCheckedIn ? Colors.red : Colors.green,
+                      ),
+                      onPressed: isBusy ? null : () => _toggleCheckIn(park),
+                      child: isBusy
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                valueColor:
+                                    AlwaysStoppedAnimation<Color>(Colors.white),
+                              ),
+                            )
+                          : Text(
+                              isCheckedIn ? "Check Out" : "Check In",
+                              style: const TextStyle(
+                                  fontSize: 12, color: Colors.white),
+                            ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -650,54 +947,61 @@ class _ParksTabState extends State<ParksTab> {
   // ---------- Build ----------
   @override
   Widget build(BuildContext context) {
+    super.build(context); // KeepAlive mixin
     final nearbyVisible = _nearbyParksVisible;
 
     return Scaffold(
       body: Stack(
         children: [
-          ListView(
-            padding: const EdgeInsets.only(bottom: 70),
-            children: [
-              // Favorites
-              if (_favoriteParks.isNotEmpty) ...[
+          RepaintBoundary(
+            child: ListView(
+              cacheExtent: 800, // prefetch a bit to reduce scroll jank
+              padding: const EdgeInsets.only(bottom: 70),
+              children: [
+                // Favorites
+                if (_favoriteParks.isNotEmpty) ...[
+                  const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                    child: Text("Favourite Parks",
+                        style: TextStyle(
+                            fontSize: 16, fontWeight: FontWeight.bold)),
+                  ),
+                  ..._favoriteParks
+                      .map((p) => _buildParkCard(p, isFavorite: true)),
+                ],
+
+                // Nearby header
                 const Padding(
                   padding: EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                  child: Text("Favourite Parks",
+                  child: Text("Nearby Parks",
                       style:
                           TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
                 ),
-                ..._favoriteParks
-                    .map((p) => _buildParkCard(p, isFavorite: true)),
-              ],
 
-              // Nearby header
-              const Padding(
-                padding: EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                child: Text("Nearby Parks",
-                    style:
-                        TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-              ),
-
-              // CTA to fetch nearby (only shows if we didn’t have a cached fix)
-              if (!_hasFetchedNearby && !_isSearching && nearbyVisible.isEmpty)
-                Padding(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                  child: ElevatedButton(
-                    onPressed: _fetchNearbyParks,
-                    child: const Text("Find Nearby Parks"),
+                // CTA to fetch nearby (only shows if we didn’t have a cached fix)
+                if (!_hasFetchedNearby &&
+                    !_isSearching &&
+                    nearbyVisible.isEmpty)
+                  Padding(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                    child: ElevatedButton(
+                      onPressed: _fetchNearbyParks,
+                      child: const Text("Find Nearby Parks"),
+                    ),
                   ),
-                ),
 
-              if (_isSearching)
-                const Padding(
-                  padding: EdgeInsets.symmetric(vertical: 20),
-                  child: Center(child: CircularProgressIndicator()),
-                ),
+                if (_isSearching)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 20),
+                    child: Center(child: CircularProgressIndicator()),
+                  ),
 
-              // Nearby list (favorites excluded)
-              ...nearbyVisible.map((p) => _buildParkCard(p, isFavorite: false)),
-            ],
+                // Nearby list (favorites excluded)
+                ...nearbyVisible
+                    .map((p) => _buildParkCard(p, isFavorite: false)),
+              ],
+            ),
           ),
           const Positioned(
             left: 0,
@@ -709,4 +1013,11 @@ class _ParksTabState extends State<ParksTab> {
       ),
     );
   }
+}
+
+// ---------- Top-level helpers for compute() ----------
+
+List<Park> _parseParksFromJson(String raw) {
+  final list = (jsonDecode(raw) as List).cast<Map<String, dynamic>>();
+  return list.map((e) => Park.fromJson(e)).toList();
 }

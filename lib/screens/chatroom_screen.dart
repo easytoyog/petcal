@@ -7,6 +7,10 @@ import 'package:intl/intl.dart';
 import 'package:profanity_filter/profanity_filter.dart';
 import 'package:inthepark/widgets/ad_banner.dart';
 
+// Push notifications + permission
+import 'package:firebase_messaging/firebase_messaging.dart' as fcm;
+import 'package:permission_handler/permission_handler.dart' as ph;
+
 /// ---------------------------
 /// Blocks Service (helpers)
 /// ---------------------------
@@ -102,24 +106,131 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
   late final Stream<QuerySnapshot<Map<String, dynamic>>> _chatStream;
   final String? _currentUid = FirebaseAuth.instance.currentUser?.uid;
 
-  /// senderId -> profile (includes displayName, fallback photo, and primary pet photo)
   final Map<String, _PublicProfile> _profiles = <String, _PublicProfile>{};
   String _parkName = 'Chatroom';
 
-  /// Blocked users (by current user).
   Set<String> _blockedUids = <String>{};
-
-  /// Friends (to mirror FriendsTab schema)
   Set<String> _friendUids = <String>{};
 
   StreamSubscription<Set<String>>? _blocksSub;
   StreamSubscription<Set<String>>? _friendsSub;
 
+  // ---------- Notifications ----------
+  bool _notifyEnabled = false; // drives the bell UI
+  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _notifPrefSub;
+
+  String get _notifDocPath {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) return '';
+    return 'owners/$uid/chat_subscriptions/${widget.parkId}';
+  }
+
+  String get _topicName => 'park_chat_${widget.parkId}';
+
+  Future<void> _loadNotifyPrefOnce() async {
+    final path = _notifDocPath;
+    if (path.isEmpty) return;
+    try {
+      final snap = await FirebaseFirestore.instance.doc(path).get();
+      final on = (snap.data()?['enabled'] ?? false) == true;
+      if (mounted && _notifyEnabled != on) {
+        setState(() => _notifyEnabled = on);
+      }
+    } catch (_) {}
+  }
+
+  void _listenNotifyPref() {
+    final path = _notifDocPath;
+    if (path.isEmpty) return;
+
+    _notifPrefSub?.cancel(); // avoid duplicates when user/park changes
+    final ref = FirebaseFirestore.instance.doc(path);
+    _notifPrefSub = ref.snapshots().listen((snap) {
+      final on = (snap.data()?['enabled'] ?? false) == true;
+      if (!mounted) return;
+      if (_notifyEnabled != on) {
+        setState(() => _notifyEnabled = on);
+      }
+    });
+  }
+
+  Future<void> _ensurePushPermission() async {
+    try {
+      final notifStatus = await ph.Permission.notification.status;
+      if (notifStatus.isDenied || notifStatus.isPermanentlyDenied) {
+        await ph.Permission.notification.request();
+      }
+    } catch (_) {}
+
+    try {
+      await fcm.FirebaseMessaging.instance.requestPermission(
+        alert: true,
+        badge: true,
+        sound: true,
+      );
+    } catch (_) {}
+  }
+
+  Future<void> _toggleNotify() async {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) return;
+
+    await _ensurePushPermission();
+
+    final next = !_notifyEnabled;
+
+    // Flip UI immediately so the bell lights up right away
+    if (mounted) setState(() => _notifyEnabled = next);
+
+    // Persist to Firestore
+    try {
+      final ref = FirebaseFirestore.instance.doc(_notifDocPath);
+      await ref.set(
+        {
+          'enabled': next,
+          'parkId': widget.parkId,
+          'updatedAt': FieldValue.serverTimestamp(),
+        },
+        SetOptions(merge: true),
+      );
+    } catch (e) {
+      // Roll back if write failed
+      if (mounted) setState(() => _notifyEnabled = !next);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to update notifications: $e')),
+        );
+      }
+      return;
+    }
+
+    // Topic subscribe/unsubscribe (optional; doesn’t affect UI)
+    try {
+      final safeTopic =
+          _topicName.replaceAll(RegExp(r'[^A-Za-z0-9_\-\.~%]'), '_');
+      if (next) {
+        await fcm.FirebaseMessaging.instance.subscribeToTopic(safeTopic);
+      } else {
+        await fcm.FirebaseMessaging.instance.unsubscribeFromTopic(safeTopic);
+      }
+    } catch (_) {}
+
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          next
+              ? 'Notifications enabled for this chat.'
+              : 'Notifications turned off for this chat.',
+        ),
+      ),
+    );
+  }
+
   @override
   void initState() {
     super.initState();
 
-    // Newest first for reverse list (new messages appear at bottom of screen).
     _chatStream = FirebaseFirestore.instance
         .collection('parks')
         .doc(widget.parkId)
@@ -134,6 +245,23 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
     _listenToBlocks();
     _listenToFriendsSameAsTab();
     _fetchParkName();
+
+    // Make sure pref listener attaches when auth is ready
+    final user = FirebaseAuth.instance.currentUser;
+    if (user != null) {
+      _listenNotifyPref();
+      _loadNotifyPrefOnce();
+    }
+    FirebaseAuth.instance.authStateChanges().listen((user) {
+      if (user != null) {
+        _listenNotifyPref();
+        _loadNotifyPrefOnce();
+      } else {
+        // user signed out: clear local state + stop listening
+        _notifPrefSub?.cancel();
+        if (mounted) setState(() => _notifyEnabled = false);
+      }
+    });
   }
 
   void _listenToBlocks() {
@@ -142,8 +270,6 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
     });
   }
 
-  /// Friends stream that matches your FriendsTab collections:
-  /// friends/{me}/userFriends/{friendUid}
   void _listenToFriendsSameAsTab() {
     final me = _currentUid;
     if (me == null) return;
@@ -175,7 +301,6 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
     } catch (_) {}
   }
 
-  /// Warm profile + primary pet caches in batches
   Future<void> _warmProfileCache(
       List<QueryDocumentSnapshot<Map<String, dynamic>>> docs) async {
     final missing = <String>{};
@@ -191,13 +316,11 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
     for (var i = 0; i < ids.length; i += 10) {
       final batch = ids.sublist(i, i + 10 > ids.length ? ids.length : i + 10);
 
-      // 1) public profiles
       final profileSnap = await FirebaseFirestore.instance
           .collection('public_profiles')
           .where(FieldPath.documentId, whereIn: batch)
           .get();
 
-      // Pre-fill with empty so we don’t re-query same ids on next frame
       for (final id in batch) {
         _profiles.putIfAbsent(id, () => const _PublicProfile.empty());
       }
@@ -213,7 +336,6 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
         );
       }
 
-      // 2) pets for those owners
       final petsSnap = await FirebaseFirestore.instance
           .collection('pets')
           .where('ownerId', whereIn: batch)
@@ -273,7 +395,6 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
       return;
     }
 
-    // WhatsApp-style: clear but keep keyboard open
     _messageController.clear();
     _inputFocus.requestFocus();
 
@@ -406,117 +527,6 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
     }
   }
 
-  /// ---------------------------
-  /// Add Friend (FriendsTab schema)
-  /// friends/{me}/userFriends/{friendUserId} + favorites/{me}/pets/{petId}
-  /// ---------------------------
-  Future<void> _addFriendSameAsFriendsTab(String friendUserId) async {
-    final me = _currentUid;
-    if (me == null || friendUserId.isEmpty || me == friendUserId) return;
-
-    try {
-      // 0) If already friends, bail.
-      final already = await FirebaseFirestore.instance
-          .collection('friends')
-          .doc(me)
-          .collection('userFriends')
-          .doc(friendUserId)
-          .get();
-      if (already.exists) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Already friends.')),
-          );
-        }
-        return;
-      }
-
-      // 1) Resolve owner name (owners -> public_profiles -> uid)
-      String ownerName = '';
-      try {
-        final ownerDoc = await FirebaseFirestore.instance
-            .collection('owners')
-            .doc(friendUserId)
-            .get();
-        if (ownerDoc.exists) {
-          final m = ownerDoc.data() as Map<String, dynamic>;
-          final firstName =
-              (m['firstName'] ?? m['first_name'] ?? '').toString();
-          final lastName = (m['lastName'] ?? m['last_name'] ?? '').toString();
-          ownerName = '$firstName $lastName'.trim();
-        }
-      } catch (_) {}
-      if (ownerName.isEmpty) {
-        try {
-          final pp = await FirebaseFirestore.instance
-              .collection('public_profiles')
-              .doc(friendUserId)
-              .get();
-          final dn = (pp.data()?['displayName'] ?? '').toString().trim();
-          if (dn.isNotEmpty) ownerName = dn;
-        } catch (_) {}
-      }
-      if (ownerName.isEmpty) ownerName = friendUserId;
-
-      // 2) Pick a representative petId (prefer isMain==true)
-      String? petId;
-      try {
-        final petsSnap = await FirebaseFirestore.instance
-            .collection('pets')
-            .where('ownerId', isEqualTo: friendUserId)
-            .get();
-
-        if (petsSnap.docs.isNotEmpty) {
-          QueryDocumentSnapshot? mainPet;
-          for (final d in petsSnap.docs) {
-            final mp = d.data();
-            if (mp['isMain'] == true) {
-              mainPet = d;
-              break;
-            }
-          }
-          final chosen = mainPet ?? petsSnap.docs.first;
-          petId = chosen.id;
-        }
-      } catch (_) {}
-
-      // 3) Write friend doc (same as FriendsTab)
-      await FirebaseFirestore.instance
-          .collection('friends')
-          .doc(me)
-          .collection('userFriends')
-          .doc(friendUserId)
-          .set({
-        'friendId': friendUserId,
-        'ownerName': ownerName,
-        'addedAt': FieldValue.serverTimestamp(),
-      });
-
-      // 4) If we found a pet, mirror the "favorite" add like FriendsTab
-      if (petId != null && petId.isNotEmpty) {
-        await FirebaseFirestore.instance
-            .collection('favorites')
-            .doc(me)
-            .collection('pets')
-            .doc(petId)
-            .set({
-          'petId': petId,
-          'addedAt': FieldValue.serverTimestamp(),
-        });
-      }
-
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Friend added.')),
-      );
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error adding friend: $e')),
-      );
-    }
-  }
-
   void _showMessageActions({
     required String senderId,
     required String displayName,
@@ -536,7 +546,6 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              // Add friend / Friends
               ListTile(
                 leading: Icon(isFriend ? Icons.check_circle : Icons.person_add),
                 title: Text(isFriend ? 'Friends' : 'Add friend'),
@@ -548,8 +557,6 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
                       }
                     : null,
               ),
-
-              // Block / Unblock
               ListTile(
                 leading: Icon(isBlocked ? Icons.lock_open : Icons.block),
                 title: Text(
@@ -566,8 +573,6 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
                   }
                 },
               ),
-
-              // Report
               ListTile(
                 leading: const Icon(Icons.report),
                 title: const Text('Report user'),
@@ -588,7 +593,6 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
     );
   }
 
-  /// Visible ⋮ menu for desktop/web + long-press alternative
   Widget _messageActionsMenu({
     required String senderId,
     required String displayName,
@@ -620,7 +624,6 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
         }
       },
       itemBuilder: (context) => <PopupMenuEntry<String>>[
-        // Add friend / Friends
         PopupMenuItem<String>(
           value: 'add_friend',
           enabled: !isFriend,
@@ -636,7 +639,6 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
           ),
         ),
         const PopupMenuDivider(height: 8),
-        // Block / Unblock
         PopupMenuItem<String>(
           value: 'block',
           child: Row(
@@ -649,7 +651,6 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
           ),
         ),
         const PopupMenuDivider(height: 8),
-        // Report
         PopupMenuItem<String>(
           value: 'report',
           child: Row(
@@ -679,7 +680,6 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
     final name =
         profile.displayName.isNotEmpty ? profile.displayName : 'Someone';
 
-    // Avatar priority: primaryPetPhoto -> profilePhoto -> fallback icon
     final avatarUrl = profile.primaryPetPhotoUrl.isNotEmpty
         ? profile.primaryPetPhotoUrl
         : (profile.profilePhotoUrl.isNotEmpty ? profile.profilePhotoUrl : '');
@@ -734,13 +734,11 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: me
               ? <Widget>[
-                  // My message (no menu)
                   bubble,
                   const SizedBox(width: 8),
                   avatarWidget,
                 ]
               : <Widget>[
-                  // Other user's message: avatar, bubble, then ⋮ menu
                   avatarWidget,
                   const SizedBox(width: 8),
                   Flexible(child: bubble),
@@ -767,6 +765,54 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
         title: Text('Park Chat: $_parkName'),
         backgroundColor: const Color(0xFF567D46),
         actions: [
+          // 🔔 Bell that lights up when enabled
+          IconButton(
+            tooltip: _notifyEnabled
+                ? 'Turn off notifications'
+                : 'Turn on notifications',
+            onPressed: _toggleNotify,
+            iconSize: 28,
+            icon: AnimatedSwitcher(
+              duration: const Duration(milliseconds: 200),
+              transitionBuilder: (child, anim) =>
+                  ScaleTransition(scale: anim, child: child),
+              child: _notifyEnabled
+                  ? Stack(
+                      key: const ValueKey('bell_on'),
+                      alignment: Alignment.center,
+                      children: [
+                        // subtle glow (optional – remove this SizedBox to have no glow at all)
+                        SizedBox(
+                          width: 30,
+                          height: 30,
+                          child: DecoratedBox(
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              gradient: RadialGradient(
+                                stops: const [0.0, 0.7, 1.0],
+                                colors: [
+                                  Colors.amber.withOpacity(0.28),
+                                  Colors.amber.withOpacity(0.12),
+                                  Colors.transparent,
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                        const Icon(
+                          Icons.notifications_active_rounded,
+                          color: Colors.amber,
+                          size: 24,
+                        ),
+                      ],
+                    )
+                  : const Icon(
+                      Icons.notifications_none_rounded,
+                      key: ValueKey('bell_off'),
+                    ),
+            ),
+          ),
+
           IconButton(
             tooltip: 'Blocked users',
             icon: const Icon(Icons.block),
@@ -782,7 +828,6 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
       body: SafeArea(
         child: Column(
           children: [
-            // Messages
             Expanded(
               child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
                 stream: _chatStream,
@@ -794,17 +839,14 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
                     return const Center(child: CircularProgressIndicator());
                   }
 
-                  // Filter out blocked senders locally
                   final allDocs = snapshot.data!.docs;
                   final docs = allDocs.where((d) {
                     final sid = (d.data()['senderId'] as String?) ?? '';
                     return !_blockedUids.contains(sid);
                   }).toList();
 
-                  // Warm profile caches
                   _warmProfileCache(docs);
 
-                  // EMPTY STATE
                   if (docs.isEmpty) {
                     return Center(
                       child: Padding(
@@ -825,7 +867,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
 
                   return ListView.builder(
                     controller: _scrollController,
-                    reverse: true, // newest messages rendered from bottom up
+                    reverse: true,
                     keyboardDismissBehavior:
                         ScrollViewKeyboardDismissBehavior.manual,
                     padding: const EdgeInsets.only(top: 8, bottom: 8),
@@ -835,8 +877,6 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
                 },
               ),
             ),
-
-            // Composer
             Padding(
               padding: EdgeInsets.fromLTRB(
                   8, 0, 8, (bottomSafe > 0 ? bottomSafe : 8)),
@@ -863,7 +903,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
                         textInputAction: TextInputAction.send,
                         onSubmitted: (_) => _sendMessage(),
                         minLines: 1,
-                        maxLines: 5, // allow gentle growth like WhatsApp
+                        maxLines: 5,
                         keyboardType: TextInputType.multiline,
                         decoration: const InputDecoration(
                           hintText: 'Type a message…',
@@ -879,8 +919,6 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
                 ),
               ),
             ),
-
-            // Ad (optional)
             const AdBanner(),
           ],
         ),
@@ -895,15 +933,118 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
     _scrollController.dispose();
     _blocksSub?.cancel();
     _friendsSub?.cancel();
+    _notifPrefSub?.cancel();
     super.dispose();
+  }
+
+  Future<void> _addFriendSameAsFriendsTab(String friendUserId) async {
+    final me = _currentUid;
+    if (me == null || friendUserId.isEmpty || me == friendUserId) return;
+
+    try {
+      final already = await FirebaseFirestore.instance
+          .collection('friends')
+          .doc(me)
+          .collection('userFriends')
+          .doc(friendUserId)
+          .get();
+      if (already.exists) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Already friends.')),
+          );
+        }
+        return;
+      }
+
+      String ownerName = '';
+      try {
+        final ownerDoc = await FirebaseFirestore.instance
+            .collection('owners')
+            .doc(friendUserId)
+            .get();
+        if (ownerDoc.exists) {
+          final m = ownerDoc.data() as Map<String, dynamic>;
+          final firstName =
+              (m['firstName'] ?? m['first_name'] ?? '').toString();
+          final lastName = (m['lastName'] ?? m['last_name'] ?? '').toString();
+          ownerName = '$firstName $lastName'.trim();
+        }
+      } catch (_) {}
+      if (ownerName.isEmpty) {
+        try {
+          final pp = await FirebaseFirestore.instance
+              .collection('public_profiles')
+              .doc(friendUserId)
+              .get();
+          final dn = (pp.data()?['displayName'] ?? '').toString().trim();
+          if (dn.isNotEmpty) ownerName = dn;
+        } catch (_) {}
+      }
+      if (ownerName.isEmpty) ownerName = friendUserId;
+
+      String? petId;
+      try {
+        final petsSnap = await FirebaseFirestore.instance
+            .collection('pets')
+            .where('ownerId', isEqualTo: friendUserId)
+            .get();
+
+        if (petsSnap.docs.isNotEmpty) {
+          QueryDocumentSnapshot? mainPet;
+          for (final d in petsSnap.docs) {
+            final mp = d.data();
+            if (mp['isMain'] == true) {
+              mainPet = d;
+              break;
+            }
+          }
+          final chosen = mainPet ?? petsSnap.docs.first;
+          petId = chosen.id;
+        }
+      } catch (_) {}
+
+      await FirebaseFirestore.instance
+          .collection('friends')
+          .doc(me)
+          .collection('userFriends')
+          .doc(friendUserId)
+          .set({
+        'friendId': friendUserId,
+        'ownerName': ownerName,
+        'addedAt': FieldValue.serverTimestamp(),
+      });
+
+      if (petId != null && petId.isNotEmpty) {
+        await FirebaseFirestore.instance
+            .collection('favorites')
+            .doc(me)
+            .collection('pets')
+            .doc(petId)
+            .set({
+          'petId': petId,
+          'addedAt': FieldValue.serverTimestamp(),
+        });
+      }
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Friend added.')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error adding friend: $e')),
+      );
+    }
   }
 }
 
 /// Profile cache entry
 class _PublicProfile {
   final String displayName;
-  final String profilePhotoUrl; // from public_profiles.photoUrl
-  final String primaryPetPhotoUrl; // chosen pet photo (isMain -> first)
+  final String profilePhotoUrl;
+  final String primaryPetPhotoUrl;
 
   const _PublicProfile({
     required this.displayName,
@@ -1003,11 +1144,10 @@ class BlockedUsersScreen extends StatelessWidget {
                       label: const Text('Unblock'),
                       onPressed: () async {
                         await service.unblock(uid);
-                        if (context.mounted) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            SnackBar(content: Text('Unblocked $title')),
-                          );
-                        }
+                        // ignore: use_build_context_synchronously
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text('Unblocked $title')),
+                        );
                       },
                     ),
                   );

@@ -571,3 +571,32 @@ exports.sendDailyStepsRecap = onSchedule(
     return null;
   }
 );
+
+exports.notifyParkChat = onDocumentCreated(
+  "parks/{parkId}/chat/{messageId}",
+  async (event) => {
+    const parkId = event.params.parkId;
+
+    // 🔧 Use defensive checks instead of optional chaining / ??
+    const msg = (event.data && typeof event.data.data === "function")
+      ? event.data.data()
+      : {};
+
+    const senderId = msg.senderId || "someone";
+    const text = (msg.text || "").toString().slice(0, 120);
+    if (!text) return;
+
+    const topic = `park_chat_${parkId}`;
+    await getMessaging().send({
+      topic,
+      notification: { title: "New park chat message", body: text },
+      data: {
+        parkId,
+        senderId: String(senderId),
+        messageId: event.params.messageId,
+      },
+      android: { priority: "high" },
+      apns: { payload: { aps: { sound: "default" } } },
+    });
+  }
+);

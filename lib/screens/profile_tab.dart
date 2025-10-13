@@ -204,43 +204,58 @@ class _ProfileTabState extends State<ProfileTab> {
         final current = (data['current'] as num?)?.toInt() ?? 0;
         final longest = (data['longest'] as num?)?.toInt() ?? 0;
 
-        return Container(
-          decoration: _glassCardDecoration(),
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-          child: Row(
-            children: [
-              Container(
-                width: 46,
-                height: 46,
-                decoration: BoxDecoration(
-                  color: const Color(0xFFFF7A59),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: const Icon(Icons.local_fire_department,
-                    color: Colors.white, size: 28),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+        // Entire card is clickable → goes to My Walks
+        return Material(
+          color: Colors.transparent,
+          child: Ink(
+            decoration: _glassCardDecoration(),
+            child: InkWell(
+              borderRadius: BorderRadius.circular(18),
+              onTap: _openWalksList,
+              child: Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                child: Row(
                   children: [
-                    Text(
-                      'Current Streak: ${days(current)}',
-                      style: const TextStyle(
-                          fontSize: 16, fontWeight: FontWeight.w800),
+                    Container(
+                      width: 46,
+                      height: 46,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFFF7A59),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: const Icon(Icons.local_fire_department,
+                          color: Colors.white, size: 28),
                     ),
-                    const SizedBox(height: 2),
-                    Text(
-                      'Best: ${days(longest)}',
-                      style: TextStyle(
-                        color: Colors.black.withOpacity(0.7),
-                        fontWeight: FontWeight.w600,
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Current Streak: ${days(current)}',
+                            style: const TextStyle(
+                                fontSize: 16, fontWeight: FontWeight.w800),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            'Best: ${days(longest)}',
+                            style: TextStyle(
+                              color: Colors.black.withOpacity(0.7),
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
                       ),
                     ),
+                    // small affordance so it reads as a link
+                    const SizedBox(width: 8),
+                    _MiniHintPill(text: 'History'),
+                    const Icon(Icons.chevron_right, color: Colors.black54),
                   ],
                 ),
               ),
-            ],
+            ),
           ),
         );
       },
@@ -1002,28 +1017,6 @@ class _ProfileTabState extends State<ProfileTab> {
                         }).toList(),
                       ),
                     const SizedBox(height: 16),
-
-                    // NEW: Walks button
-                    ElevatedButton(
-                      onPressed: _openWalksList,
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.tealAccent,
-                        foregroundColor: Colors.black,
-                        minimumSize: const Size.fromHeight(48),
-                      ),
-                      child: const Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(Icons.directions_walk),
-                          SizedBox(width: 6),
-                          Icon(Icons.pets), // paw icon
-                          SizedBox(width: 8),
-                          Text("My Walks"),
-                        ],
-                      ),
-                    ),
-
-                    const SizedBox(height: 32),
 
                     // Feedback button
                     ElevatedButton.icon(

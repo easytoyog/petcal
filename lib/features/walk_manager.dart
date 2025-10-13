@@ -164,6 +164,48 @@ class WalkManager extends ChangeNotifier {
     await _clearPersisted();
   }
 
+  Future<void> resume() async {
+    if (_active != true) return; // only if persisted said we're active
+    await _enableNavMode();
+
+    // reattach streams
+    _locSub?.cancel();
+    _locSub = location.onLocationChanged.listen(_onLocTick);
+
+    _stepSub?.cancel();
+    try {
+      _stepSub = Pedometer.stepCountStream.listen((sc) {
+        _stepBaseline ??=
+            sc.steps - _steps; // baseline so (current-baseline) == _steps
+        final raw = sc.steps - (_stepBaseline ?? sc.steps);
+        if (raw >= 0) {
+          _steps = raw;
+          notifyListeners();
+        }
+      });
+    } catch (_) {}
+
+    // UI timer
+    _uiTicker?.cancel();
+    _uiTicker = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (_startedAt != null) {
+        _elapsed = DateTime.now().difference(_startedAt!);
+        notifyListeners();
+      }
+    });
+
+    // auto-stop guard
+    _autoStopTimer?.cancel();
+    _autoStopTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+      _checkAutoStop();
+    });
+
+    // re-enable periodic persist
+    _persistTimer?.cancel();
+    _persistTimer =
+        Timer.periodic(const Duration(seconds: 10), (_) => _persist());
+  }
+
   Future<void> restoreIfAny() async {
     try {
       final prefs = await SharedPreferences.getInstance();
@@ -187,23 +229,21 @@ class WalkManager extends ChangeNotifier {
       _startedAt = (m['startedAt'] != null)
           ? DateTime.tryParse(m['startedAt'] as String)
           : null;
-      _endedAt = (m['endedAt'] != null) // ✨ restore if present
+      _endedAt = (m['endedAt'] != null)
           ? DateTime.tryParse(m['endedAt'] as String)
           : null;
       _active = (m['isWalking'] == true);
 
       if (_active && _startedAt != null) {
         _elapsed = DateTime.now().difference(_startedAt!);
-        // restore UI ticker only (call start() for full listeners)
-        _uiTicker?.cancel();
-        _uiTicker = Timer.periodic(const Duration(seconds: 1), (_) {
-          if (_startedAt != null) {
-            _elapsed = DateTime.now().difference(_startedAt!);
-            notifyListeners();
-          }
-        });
+        notifyListeners();
+        // ★ IMPORTANT: fully resume sensors/timers
+        // ignore: discarded_futures
+        resume();
+      } else {
+        // if not active we still publish restored state
+        notifyListeners();
       }
-      notifyListeners();
     } catch (_) {}
   }
 
@@ -268,8 +308,8 @@ class WalkManager extends ChangeNotifier {
       await location.enableBackgroundMode(enable: true);
       await location.changeSettings(
         accuracy: loc.LocationAccuracy.navigation,
-        interval: 1000,
-        distanceFilter: 2,
+        interval: 2000,
+        distanceFilter: 5,
       );
     } catch (_) {}
   }
@@ -299,7 +339,8 @@ class WalkManager extends ChangeNotifier {
 
   String _prettyDuration(Duration d) {
     if (d.inMinutes >= 1 && d.inSeconds % 60 == 0) {
-      return '${d.inMinutes} minutes';
+      final m = d.inMinutes;
+      return '$m minute${m == 1 ? '' : 's'}';
     }
     if (d.inMinutes >= 1) {
       final m = d.inMinutes;
