@@ -2,7 +2,7 @@
 
 // -------- Imports --------
 const admin = require("firebase-admin");
-const { getFirestore } = require("firebase-admin/firestore");
+const { getFirestore, FieldPath } = require("firebase-admin/firestore");
 const { getMessaging } = require("firebase-admin/messaging");
 const { getAuth } = require("firebase-admin/auth");
 
@@ -116,64 +116,6 @@ exports.notifyFriendCheckIn = onDocumentCreated(
               body: "Your friend just checked into a park you like.",
             },
             data: { parkId: parkId, friendId: userId },
-          });
-        }
-      }
-    }
-  }
-);
-
-
-/* =========================
-   Chat message: notify friends who like the park
-   ========================= */
-
-exports.notifyFriendChatMessage = onDocumentCreated(
-  "parks/{parkId}/chat/{messageId}",
-  async (event) => {
-    const parkId = event.params.parkId;
-    const payload =
-      event.data && typeof event.data.data === "function"
-        ? event.data.data()
-        : {};
-    const senderId = payload && payload.senderId ? payload.senderId : "";
-
-    if (!senderId) return;
-
-    const friendsSnap = await db
-      .collection("friends")
-      .doc(senderId)
-      .collection("userFriends")
-      .get();
-
-    for (let i = 0; i < friendsSnap.docs.length; i++) {
-      const friendDoc = friendsSnap.docs[i];
-      const friendId = friendDoc.id;
-
-      const likedParkDoc = await db
-        .collection("owners")
-        .doc(friendId)
-        .collection("likedParks")
-        .doc(parkId)
-        .get();
-
-      if (likedParkDoc.exists) {
-        const ownerDoc = await db.collection("owners").doc(friendId).get();
-        const data = ownerDoc.exists ? ownerDoc.data() : {};
-        const fcmToken = data && data.fcmToken;
-
-        if (fcmToken) {
-          await getMessaging().send({
-            token: fcmToken,
-            notification: {
-              title: "New message in your favorite park!",
-              body: "Your friend posted in a park chat you like.",
-            },
-            data: {
-              parkId: parkId,
-              senderId: senderId,
-              messageId: event.params.messageId,
-            },
           });
         }
       }
@@ -576,18 +518,93 @@ function toSafeTopic(s) {
   return s.replace(/[^A-Za-z0-9_\-\.~%]/g, '_');
 }
 
-exports.notifyParkChat = onDocumentCreated("parks/{parkId}/chat/{messageId}", async (event) => {
-  const { parkId, messageId } = event.params;
-  const msg = (event.data && typeof event.data.data === "function") ? event.data.data() : {};
-  const text = ((msg.text || "") + "").slice(0, 120);
-  if (!text) return;
+// helper: batch an array
+const chunk = (arr, n) => arr.reduce((a,_,i)=> (i%n? a[a.length-1].push(arr[i]) : a.push([arr[i]]), a), []);
 
-  const topic = toSafeTopic(`park_chat_${parkId}`);
-  await getMessaging().send({
-    topic,
-    notification: { title: "New park chat message", body: text },
-    data: { parkId, senderId: String(msg.senderId || ""), messageId },
-    android: { priority: "high" },
-    apns: { payload: { aps: { sound: "default" } } },
+exports.notifyParkChat = require("firebase-functions/v2/firestore")
+  .onDocumentCreated("parks/{parkId}/chat/{messageId}", async (event) => {
+    const { parkId, messageId } = event.params;
+    const msg = event.data && typeof event.data.data === "function" ? event.data.data() : {};
+    const senderId = String(msg.senderId || "");
+    const text = String(msg.text || "").slice(0, 120);
+    if (!text) return;
+
+
+  // Park name
+  let parkName = "this park";
+  try {
+    const parkSnap = await db.collection("parks").doc(parkId).get();
+    const n = parkSnap.exists ? parkSnap.get("name") : null;
+    if (typeof n === "string" && n.trim()) parkName = n.trim();
+  } catch (_) {}
+
+    console.log("notifyParkChat fanout → park:", parkId, "messageId:", messageId, "sender:", senderId);
+
+    // 1) Who enabled notifications for this park?
+    const subsSnap = await db
+      .collectionGroup("chat_subscriptions")
+      .where("parkId", "==", parkId)
+      .where("enabled", "==", true)
+      .get();
+
+    // 2) Collect distinct ownerIds (parent of sub doc)
+    const ownerIds = Array.from(new Set(subsSnap.docs.map(d => d.ref.parent.parent.id)))
+      .filter(id => id && id !== senderId); // optional: skip sender
+
+    if (!ownerIds.length) {
+      console.log("No subscribers for park", parkId);
+      return;
+    }
+
+    // 3) Fetch owners in batches of 10 (limit of 'in' query)
+    let tokens = [];
+    for (const group of chunk(ownerIds, 10)) {
+      const ownersSnap = await db.collection("owners")
+        .where(FieldPath.documentId(), "in", group)
+        .select("fcmToken")
+        .get();
+      ownersSnap.forEach(doc => {
+        const t = doc.get("fcmToken");
+        if (typeof t === "string" && t.trim()) tokens.push({ uid: doc.id, token: t.trim() });
+      });
+    }
+
+    // safety: dedupe tokens
+    const seen = new Set();
+    tokens = tokens.filter(t => !seen.has(t.token) && seen.add(t.token));
+
+    if (!tokens.length) {
+      console.log("No valid tokens for park", parkId);
+      return;
+    }
+
+    // 4) Send in chunks of 500
+    const payload = {
+      notification: { title: `New message in ${parkName}`, body: text },
+      data: { parkId, senderId, messageId, type: "park_chat", click_action: "FLUTTER_NOTIFICATION_CLICK" },
+      android: { priority: "high" },
+      apns: { payload: { aps: { sound: "default" } } },
+    };
+
+    let success = 0, failure = 0;
+    for (const group of chunk(tokens, 500)) {
+      const res = await getMessaging().sendEachForMulticast({
+        tokens: group.map(x => x.token),
+        ...payload,
+      });
+      success += res.successCount;
+      failure += res.failureCount;
+
+      // 5) Clean up dead tokens
+      for (let i = 0; i < res.responses.length; i++) {
+        const r = res.responses[i];
+        if (!r.success && r.error && String(r.error.code).includes("registration-token-not-registered")) {
+          const dead = group[i];
+          console.log("Cleaning dead token for uid", dead.uid);
+          await db.collection("owners").doc(dead.uid).set({ fcmToken: admin.firestore.FieldValue.delete() }, { merge: true });
+        }
+      }
+    }
+
+    console.log(`Chat fanout done → park=${parkId} success=${success} failure=${failure} recipients=${tokens.length}`);
   });
-});
