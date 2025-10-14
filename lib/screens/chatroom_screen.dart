@@ -125,8 +125,6 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
     return 'owners/$uid/chat_subscriptions/${widget.parkId}';
   }
 
-  String get _topicName => 'park_chat_${widget.parkId}';
-
   Future<void> _loadNotifyPrefOnce() async {
     final path = _notifDocPath;
     if (path.isEmpty) return;
@@ -203,17 +201,6 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
       }
       return;
     }
-
-    // Topic subscribe/unsubscribe (optional; doesn’t affect UI)
-    try {
-      final safeTopic =
-          _topicName.replaceAll(RegExp(r'[^A-Za-z0-9_\-\.~%]'), '_');
-      if (next) {
-        await fcm.FirebaseMessaging.instance.subscribeToTopic(safeTopic);
-      } else {
-        await fcm.FirebaseMessaging.instance.unsubscribeFromTopic(safeTopic);
-      }
-    } catch (_) {}
 
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
