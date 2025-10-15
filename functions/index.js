@@ -75,6 +75,42 @@ async function closeLatestOpenVisit(opts) {
   return true;
 }
 
+// --- helpers to format names safely ---
+async function getOwnerDisplayName(uid) {
+  try {
+    const o = await db.collection("owners").doc(uid).get();
+    if (o.exists) {
+      const d = o.data() || {};
+      const first = String(d.firstName || d.first_name || "").trim();
+      const last  = String(d.lastName  || d.last_name  || "").trim();
+      const full  = (first && last) ? `${first} ${last}` : (d.displayName || "").toString().trim();
+      if (full) return full.slice(0, 60);
+    }
+  } catch (_) {}
+  try {
+    const p = await db.collection("public_profiles").doc(uid).get();
+    if (p.exists) {
+      const n = String(p.get("displayName") || "").trim();
+      if (n) return n.slice(0, 60);
+    }
+  } catch (_) {}
+  return "Someone";
+}
+
+async function getParkName(parkId) {
+  try {
+    const snap = await db.collection("parks").doc(parkId).get();
+    const n = snap.exists ? String(snap.get("name") || "").trim() : "";
+    return n || "this park";
+  } catch (_) {
+    return "this park";
+  }
+}
+
+/* =========================
+   Check-in: notify friends + create visit row
+   ========================= */
+
 /* =========================
    Check-in: notify friends + create visit row
    ========================= */
@@ -85,43 +121,68 @@ exports.notifyFriendCheckIn = onDocumentCreated(
     const parkId = event.params.parkId;
     const userId = event.params.userId;
 
-    // ----- Notify friends who liked this park (no visit writes here) -----
+    // Resolve friendly strings once
+    const [ownerName, parkName] = await Promise.all([
+      getOwnerDisplayName(userId),
+      getParkName(parkId),
+    ]);
+
+    // Friends of userId
     const friendsSnap = await db
       .collection("friends")
       .doc(userId)
       .collection("userFriends")
       .get();
 
-    for (let i = 0; i < friendsSnap.docs.length; i++) {
-      const friendDoc = friendsSnap.docs[i];
+    for (const friendDoc of friendsSnap.docs) {
       const friendId = friendDoc.id;
 
-      const likedParkDoc = await db
-        .collection("owners")
-        .doc(friendId)
-        .collection("likedParks")
-        .doc(parkId)
+      // Only if that friend liked this park
+      const liked = await db
+        .collection("owners").doc(friendId)
+        .collection("likedParks").doc(parkId)
         .get();
+      if (!liked.exists) continue;
 
-      if (likedParkDoc.exists) {
-        const ownerDoc = await db.collection("owners").doc(friendId).get();
-        const data = ownerDoc.exists ? ownerDoc.data() : {};
-        const fcmToken = data && data.fcmToken;
+      // Friend's FCM token
+      const friendOwner = await db.collection("owners")
+        .doc(friendId).get();
+      const fcmToken = friendOwner.exists ? friendOwner.get("fcmToken") : null;
+      if (!fcmToken || !String(fcmToken).trim()) continue;
 
-        if (fcmToken) {
-          await getMessaging().send({
-            token: fcmToken,
-            notification: {
-              title: "Friend at your favorite park!",
-              body: "Your friend just checked into a park you like.",
-            },
-            data: { parkId: parkId, friendId: userId },
-          });
+      try {
+        await getMessaging().send({
+          token: fcmToken,
+          notification: {
+            title: "Friend at your favorite park!",
+            body: `${ownerName} checked into ${parkName}`,
+          },
+          data: {
+            type: "friend_checkin",
+            parkId,
+            friendId: userId,
+            friendName: ownerName,
+            parkName,
+            click_action: "FLUTTER_NOTIFICATION_CLICK",
+          },
+          android: { priority: "high" },
+          apns: { payload: { aps: { sound: "default" } } },
+        });
+      } catch (e) {
+        // Clean up an unregistered token (avoid optional chaining for ESLint)
+        const code = (e && e.code) ? String(e.code) : "";
+        if (code.includes("registration-token-not-registered")) {
+          await db.collection("owners").doc(friendId)
+            .set({ fcmToken: admin.firestore.FieldValue.delete() }, { merge: true });
+        } else {
+          console.error("friend_checkin push failed for", friendId, e);
         }
       }
     }
+
   }
 );
+
 
 /* =========================
    Auto-checkout (3 hours) — runs every 10 minutes
@@ -498,7 +559,6 @@ exports.sendDailyStepsRecap = onSchedule(
               payload: {
                 aps: {
                   sound: "default",
-                  badge: 1,
                 },
               },
             },

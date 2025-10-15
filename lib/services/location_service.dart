@@ -1,3 +1,4 @@
+// lib/services/location_service.dart
 import 'dart:convert';
 import 'dart:math';
 
@@ -10,6 +11,9 @@ import 'package:inthepark/models/park_model.dart';
 import 'package:location/location.dart' as loc;
 import 'package:shared_preferences/shared_preferences.dart';
 
+/// Uses Places API (New) with a strict field mask to avoid
+/// Atmosphere & Contact data charges.
+/// Requested fields: places.id, places.displayName, places.location
 class LocationService {
   final loc.Location _location = loc.Location();
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
@@ -17,6 +21,7 @@ class LocationService {
 
   LocationService(this._googlePlacesApiKey);
 
+  // ---------- Background location ----------
   Future<void> enableBackgroundLocation() async {
     bool serviceEnabled = await _location.serviceEnabled();
     if (!serviceEnabled) {
@@ -35,109 +40,162 @@ class LocationService {
     try {
       await _location.enableBackgroundMode(enable: true);
     } catch (_) {
-      // Background mode not supported / not granted – ignore gracefully.
+      // Not supported or not granted—ignore.
     }
   }
 
-  /// Google Places Nearby Search for parks within ~500m.
-  Future<List<Park>> findNearbyParks(double userLat, double userLng) async {
-    const String baseUrl =
-        "https://maps.googleapis.com/maps/api/place/nearbysearch/json";
-    const String type = "park";
-    const int radius = 500;
+  // ---------- Places (New) helpers ----------
+  static const _placesHost = 'places.googleapis.com';
+  static const _nearbyPath = '/v1/places:searchNearby';
 
-    final String url =
-        "$baseUrl?location=$userLat,$userLng&radius=$radius&type=$type&key=$_googlePlacesApiKey";
+  /// Core POST to Places API (New) Nearby Search with a tight field mask.
+  Future<List<Map<String, dynamic>>> _placesSearchNearby({
+    required double lat,
+    required double lng,
+    double radiusMeters = 800, // keep small; scale by zoom if desired
+    int maxResultCount = 20, // hard cap to avoid extra costs
+    List<String> includedTypes = const ['park'],
+  }) async {
+    final uri = Uri.https(_placesHost, _nearbyPath);
 
-    final parks = <Park>[];
-    try {
-      final response = await http.get(Uri.parse(url));
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body);
-        if (data['status'] == 'OK' && (data['results'] as List).isNotEmpty) {
-          for (final place in data['results']) {
-            final name = (place['name'] ?? '').toString();
-            final lat =
-                (place['geometry']['location']['lat'] as num).toDouble();
-            final lng =
-                (place['geometry']['location']['lng'] as num).toDouble();
-
-            final park = Park(
-              id: generateParkID(lat, lng, name),
-              name: name,
-              latitude: lat,
-              longitude: lng,
-            );
-
-            // Dedup by name (case-insensitive)
-            if (parks
-                .any((p) => p.name.toLowerCase() == park.name.toLowerCase())) {
-              continue;
-            }
-            parks.add(park);
-          }
+    final body = jsonEncode({
+      "includedTypes": includedTypes,
+      "maxResultCount": maxResultCount,
+      "locationRestriction": {
+        "circle": {
+          "center": {"latitude": lat, "longitude": lng},
+          "radius": radiusMeters
         }
       }
-    } catch (e) {
-      // Network/parse errors are non-fatal for UI – just return what we have.
-      // print("Error finding nearby parks: $e");
+    });
+
+    final resp = await http.post(
+      uri,
+      headers: {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": _googlePlacesApiKey,
+        // IMPORTANT: Field mask avoids Contact/Atmosphere charges.
+        "X-Goog-FieldMask": "places.id,places.displayName,places.location",
+      },
+      body: body,
+    );
+
+    if (resp.statusCode != 200) {
+      // Return empty list on errors (keep UI resilient)
+      return const [];
     }
+
+    final data = jsonDecode(resp.body);
+    final List places = (data["places"] as List?) ?? const [];
+    // Normalize to simple maps with id, name, lat, lng
+    return places
+        .map<Map<String, dynamic>>((p) {
+          final loc = p["location"] as Map<String, dynamic>? ?? const {};
+          final nameObj = p["displayName"] as Map<String, dynamic>? ?? const {};
+          return {
+            "id": p["id"] ?? "",
+            "name": (nameObj["text"] ?? "").toString(),
+            "lat": (loc["latitude"] as num?)?.toDouble(),
+            "lng": (loc["longitude"] as num?)?.toDouble(),
+          };
+        })
+        .where((m) =>
+            m["lat"] != null &&
+            m["lng"] != null &&
+            (m["name"] as String).isNotEmpty)
+        .toList();
+  }
+
+  // ---------- Public API ----------
+  /// Find nearby parks around (userLat,userLng).
+  /// Uses Places (New) Nearby with tight field mask → Basic data only.
+  Future<List<Park>> findNearbyParks(double userLat, double userLng) async {
+    final parks = <Park>[];
+
+    try {
+      final raw = await _placesSearchNearby(
+        lat: userLat,
+        lng: userLng,
+        radiusMeters: 800, // ~0.8 km; adjust to taste/zoom
+        maxResultCount: 20,
+        includedTypes: const ['park'],
+      );
+
+      // Dedup by (lowercased) name to mimic your previous behavior.
+      final seenNames = <String>{};
+
+      for (final p in raw) {
+        final name = (p['name'] as String).trim();
+        final lat = p['lat'] as double;
+        final lng = p['lng'] as double;
+
+        final key = name.toLowerCase();
+        if (seenNames.contains(key)) continue;
+        seenNames.add(key);
+
+        parks.add(
+          Park(
+            // Keep your existing stable ID scheme used elsewhere:
+            id: generateParkID(lat, lng, name),
+            name: name,
+            latitude: lat,
+            longitude: lng,
+          ),
+        );
+      }
+    } catch (_) {
+      // Swallow network/parse errors; return what we have.
+    }
+
     return parks;
   }
 
-  /// Is the user currently within ~150m of a park? Returns the closest match.
+  /// Determine if user is within ~150m of a park.
+  /// Rewritten to Places (New) Nearby with small radius, Basic fields only.
   Future<Park?> isUserAtPark(double userLat, double userLng) async {
-    const String baseUrl =
-        "https://maps.googleapis.com/maps/api/place/nearbysearch/json";
-    const String type = "park";
-    const int radius = 150;
-
-    final String url =
-        "$baseUrl?location=$userLat,$userLng&radius=$radius&type=$type&key=$_googlePlacesApiKey";
-
     try {
-      final response = await http.get(Uri.parse(url));
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body);
-        if (data['status'] == 'OK' && (data['results'] as List).isNotEmpty) {
-          double minDistance = double.infinity;
-          Map<String, dynamic>? closestPlace;
+      final list = await _placesSearchNearby(
+        lat: userLat,
+        lng: userLng,
+        radiusMeters: 150, // tight radius for "at a park?"
+        maxResultCount: 10,
+        includedTypes: const ['park'],
+      );
 
-          for (final place in data['results']) {
-            final parkLat =
-                (place['geometry']['location']['lat'] as num).toDouble();
-            final parkLng =
-                (place['geometry']['location']['lng'] as num).toDouble();
-            final distance =
-                _calculateDistance(userLat, userLng, parkLat, parkLng);
-            if (distance < minDistance) {
-              minDistance = distance;
-              closestPlace = place as Map<String, dynamic>;
-            }
-          }
+      if (list.isEmpty) return null;
 
-          if (closestPlace != null) {
-            final name = (closestPlace['name'] ?? '').toString();
-            final lat =
-                (closestPlace['geometry']['location']['lat'] as num).toDouble();
-            final lng =
-                (closestPlace['geometry']['location']['lng'] as num).toDouble();
+      // Pick the closest by haversine distance.
+      double minDistance = double.infinity;
+      Map<String, dynamic>? closest;
 
-            return Park(
-              id: generateParkID(lat, lng, name),
-              name: name,
-              latitude: lat,
-              longitude: lng,
-            );
-          }
+      for (final p in list) {
+        final lat = p['lat'] as double;
+        final lng = p['lng'] as double;
+        final d = _calculateDistance(userLat, userLng, lat, lng);
+        if (d < minDistance) {
+          minDistance = d;
+          closest = p;
         }
       }
-    } catch (e) {
-      // print("Error determining if user is at park: $e");
+
+      if (closest == null) return null;
+
+      final name = (closest['name'] as String).trim();
+      final lat = closest['lat'] as double;
+      final lng = closest['lng'] as double;
+
+      return Park(
+        id: generateParkID(lat, lng, name),
+        name: name,
+        latitude: lat,
+        longitude: lng,
+      );
+    } catch (_) {
+      return null;
     }
-    return null;
   }
 
+  // ---------- Geometry ----------
   // Haversine distance in meters
   double _calculateDistance(
       double lat1, double lng1, double lat2, double lng2) {
@@ -155,7 +213,7 @@ class LocationService {
 
   double _deg2rad(double deg) => deg * (pi / 180.0);
 
-  /// Ensure a park doc exists with only safe, allow-listed fields.
+  // ---------- Firestore helpers (unchanged) ----------
   Future<void> ensureParkExists(Park park) async {
     final parkRef = _firestore.collection('parks').doc(park.id);
     final snap = await parkRef.get();
@@ -170,8 +228,6 @@ class LocationService {
     }
   }
 
-  /// Check the current user into a park (single-check-in).
-  /// Cloud Functions increment/decrement `userCount`.
   Future<void> uploadUserToActiveUsersTable(
     double lat,
     double lng,
@@ -185,7 +241,7 @@ class LocationService {
     final parkId = generateParkID(lat, lng, parkName);
     final parkRef = db.collection('parks').doc(parkId);
 
-    // 1) Ensure park exists (safe fields only). Do NOT write 'uid'.
+    // 1) Ensure park exists
     final parkSnap = await parkRef.get();
     if (!parkSnap.exists) {
       await parkRef.set({
@@ -197,7 +253,7 @@ class LocationService {
       });
     }
 
-    // 2) Single-check-in: delete any existing active_users/{uid} anywhere
+    // 2) Single-check-in anywhere
     final existing = await db
         .collectionGroup('active_users')
         .where('uid', isEqualTo: uid)
@@ -209,20 +265,15 @@ class LocationService {
         batch.delete(d.reference);
       }
       await batch.commit();
-      // CF onDocumentDeleted will decrement userCount
     }
 
-    // 3) Create/overwrite check-in here – write 'uid' + 'checkedInAt' only
+    // 3) Create current check-in (server maintains userCount)
     await parkRef.collection('active_users').doc(uid).set({
       'uid': uid,
       'checkedInAt': FieldValue.serverTimestamp(),
     });
-
-    // Do NOT touch userCount here (server maintains it).
   }
 
-  /// Uncheck the current user from a specific park.
-  /// Cloud Functions will decrement `userCount`.
   Future<void> removeUserFromActiveUsersTable(String parkId) async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
@@ -234,14 +285,13 @@ class LocationService {
         .doc(user.uid);
 
     await userRef.delete();
-    // No client-side userCount updates.
   }
 
+  // ---------- Location cache ----------
   Future<loc.LocationData> getCurrentLocation() async {
     return await _location.getLocation();
   }
 
-  /// Cache user location
   Future<void> saveUserLocation(double latitude, double longitude) async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setDouble('last_latitude', latitude);
@@ -250,7 +300,6 @@ class LocationService {
         'last_location_timestamp', DateTime.now().millisecondsSinceEpoch);
   }
 
-  /// Read cached user location if recent
   Future<LatLng?> getSavedUserLocation({int maxAgeSeconds = 300}) async {
     final prefs = await SharedPreferences.getInstance();
     final latitude = prefs.getDouble('last_latitude');
@@ -266,7 +315,6 @@ class LocationService {
     return null;
   }
 
-  /// Get user location, prefer cache, else read & cache fresh
   Future<LatLng?> getUserLocationOrCached({int maxAgeSeconds = 300}) async {
     final cached = await getSavedUserLocation(maxAgeSeconds: maxAgeSeconds);
     if (cached != null) return cached;

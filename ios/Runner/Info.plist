@@ -4,12 +4,8 @@
 <dict>
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
-	<key>NSMotionUsageDescription</key>
-	<string>We use motion data to count your steps during walks with your dog.</string>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
-	<key>NSUserTrackingUsageDescription</key>
-	<string>We use your device identifier to show relevant ads and measure performance. We never track you across apps without your permission.</string>
 	<key>CFBundleDisplayName</key>
 	<string>InThePark</string>
 	<key>CFBundleExecutable</key>
@@ -37,14 +33,10 @@
 			</array>
 		</dict>
 	</array>
-	<key>UIBackgroundModes</key>
-	<array>
-	<string>location</string>
-	</array>
 	<key>CFBundleVersion</key>
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>FirebaseAppDelegateProxyEnabled</key>
-	<false/>
+	<true/>
 	<key>GADApplicationIdentifier</key>
 	<string>ca-app-pub-3773871623541431~4689160792</string>
 	<key>LSRequiresIPhoneOS</key>
@@ -57,12 +49,19 @@
 	<string>This app needs your location to show nearby parks and connect with other dog owners.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>This app may use the microphone during video features.</string>
+	<key>NSMotionUsageDescription</key>
+	<string>We use motion data to count your steps during walks with your dog.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>This app needs access to your photo library to select pet images.</string>
 	<key>NSUserTrackingUsageDescription</key>
 	<string>This identifier is used to deliver personalized ads and improve the app experience.</string>
 	<key>UIApplicationSupportsIndirectInputEvents</key>
 	<true/>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>location</string>
+		<string>remote-notification</string>
+	</array>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UIMainStoryboardFile</key>

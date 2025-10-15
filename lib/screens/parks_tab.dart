@@ -359,8 +359,7 @@ class _ParksTabState extends State<ParksTab>
       if (status == loc.PermissionStatus.denied) {
         status = await permission.requestPermission();
       }
-      if (status != loc.PermissionStatus.granted &&
-          status != loc.PermissionStatus.grantedLimited) {
+      if (status != loc.PermissionStatus.granted) {
         return;
       }
 
