@@ -13,69 +13,78 @@ const {
 } = require("firebase-functions/v2/firestore");
 const { onSchedule } = require("firebase-functions/v2/scheduler");
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
+const { DateTime } = require("luxon");
 
 // -------- Init --------
 admin.initializeApp();
 const db = getFirestore();
 
-// ---------- Helpers ----------
+// ---------- Small helpers ----------
 function dateToDayUTCString(d) {
-  // "YYYY-MM-DD" (UTC)
   const y = d.getUTCFullYear();
   const m = String(d.getUTCMonth() + 1).padStart(2, "0");
   const day = String(d.getUTCDate()).padStart(2, "0");
-  return y + "-" + m + "-" + day;
+  return `${y}-${m}-${day}`; // "YYYY-MM-DD" (UTC)
 }
 
-/**
- * Close the latest open visit for a park/user (one with null checkOutAt).
- * Returns true if a visit was closed; false if none found.
- */
-async function closeLatestOpenVisit(opts) {
-  const parkId = opts.parkId;
-  const userId = opts.userId;
-  const closedBy = opts.closedBy || "unknown";
-  const checkoutDate = opts.checkoutDate || new Date();
+function formatWalkMinutes(totalMinutes) {
+  const m = Math.max(0, Math.round(totalMinutes || 0));
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  const rm = m % 60;
+  return rm ? `${h}h ${rm}m` : `${h}h`;
+}
 
-  // Find most recent open visit
-  const q = await db
-    .collection("park_visits")
-    .where("parkId", "==", parkId)
-    .where("userId", "==", userId)
-    .where("checkOutAt", "==", null)
-    .orderBy("checkInAt", "desc")
-    .limit(1)
+function todayWindowInTz(tz) {
+  const now = DateTime.now().setZone(tz || "UTC");
+  const start = now.startOf("day");
+  const end = start.plus({ days: 1 });
+  return {
+    start: start.toJSDate(),
+    end: end.toJSDate(),
+    todayKey: start.toFormat("yyyy-LL-dd"),
+    now, // Luxon DateTime
+  };
+}
+
+async function sumStepsAndMinutesForUserDay(uid, start, end) {
+  const snap = await db
+    .collection("owners").doc(uid)
+    .collection("walks")
+    .where("endedAt", ">=", start)
+    .where("endedAt", "<", end)
+    .select("steps", "durationSec")
     .get();
 
-  if (q.empty) return false;
-
-  const doc = q.docs[0];
-  const data = doc.data();
-
-  let checkInAt = new Date();
-  if (data && data.checkInAt && typeof data.checkInAt.toDate === "function") {
-    checkInAt = data.checkInAt.toDate();
-  }
-
-  const minutes = Math.max(
-    0,
-    Math.round((checkoutDate.getTime() - checkInAt.getTime()) / 60000)
-  );
-
-  await doc.ref.set(
-    {
-      checkOutAt: admin.firestore.Timestamp.fromDate(checkoutDate),
-      durationMinutes: minutes,
-      closedBy: closedBy,
-      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-    },
-    { merge: true }
-  );
-
-  return true;
+  let steps = 0;
+  let minutes = 0;
+  snap.forEach(d => {
+    const s = d.get("steps");
+    if (typeof s === "number" && isFinite(s)) steps += s;
+    const dur = d.get("durationSec");
+    if (typeof dur === "number" && isFinite(dur)) minutes += dur / 60;
+  });
+  return { steps, minutes: Math.round(minutes) };
 }
 
-// --- helpers to format names safely ---
+async function alreadySentToday(uid, todayKey) {
+  const doc = await db
+    .collection("owners").doc(uid)
+    .collection("stats").doc("dailyStepsNudge")
+    .get();
+  return doc.exists && doc.get("lastSentDay") === todayKey;
+}
+
+async function markSent(uid, todayKey, tz) {
+  await db.collection("owners").doc(uid)
+    .collection("stats").doc("dailyStepsNudge")
+    .set({
+      lastSentDay: todayKey,
+      lastSentAt: admin.firestore.FieldValue.serverTimestamp(),
+      tz: tz || "UTC",
+    }, { merge: true });
+}
+
 async function getOwnerDisplayName(uid) {
   try {
     const o = await db.collection("owners").doc(uid).get();
@@ -107,27 +116,66 @@ async function getParkName(parkId) {
   }
 }
 
-/* =========================
-   Check-in: notify friends + create visit row
-   ========================= */
+/**
+ * Close the latest open visit for a park/user (one with null checkOutAt).
+ * Returns true if a visit was closed; false if none found.
+ */
+async function closeLatestOpenVisit(opts) {
+  const { parkId, userId } = opts;
+  const closedBy = opts.closedBy || "unknown";
+  const checkoutDate = opts.checkoutDate || new Date();
 
-/* =========================
-   Check-in: notify friends + create visit row
-   ========================= */
+  const q = await db
+    .collection("park_visits")
+    .where("parkId", "==", parkId)
+    .where("userId", "==", userId)
+    .where("checkOutAt", "==", null)
+    .orderBy("checkInAt", "desc")
+    .limit(1)
+    .get();
 
+  if (q.empty) return false;
+
+  const doc = q.docs[0];
+  const data = doc.data();
+
+  let checkInAt = new Date();
+  if (data && data.checkInAt && typeof data.checkInAt.toDate === "function") {
+    checkInAt = data.checkInAt.toDate();
+  }
+
+  const minutes = Math.max(
+    0,
+    Math.round((checkoutDate.getTime() - checkInAt.getTime()) / 60000)
+  );
+
+  await doc.ref.set(
+    {
+      checkOutAt: admin.firestore.Timestamp.fromDate(checkoutDate),
+      durationMinutes: minutes,
+      closedBy,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    },
+    { merge: true }
+  );
+  return true;
+}
+
+// =========================
+// Check-in: notify friends (MUTUAL ONLY) + create visit row
+// =========================
 exports.notifyFriendCheckIn = onDocumentCreated(
   "parks/{parkId}/active_users/{userId}",
   async (event) => {
     const parkId = event.params.parkId;
-    const userId = event.params.userId;
+    const userId = event.params.userId; // the user who just checked in
 
-    // Resolve friendly strings once
     const [ownerName, parkName] = await Promise.all([
       getOwnerDisplayName(userId),
       getParkName(parkId),
     ]);
 
-    // Friends of userId
+    // All users *this user* friended
     const friendsSnap = await db
       .collection("friends")
       .doc(userId)
@@ -136,6 +184,14 @@ exports.notifyFriendCheckIn = onDocumentCreated(
 
     for (const friendDoc of friendsSnap.docs) {
       const friendId = friendDoc.id;
+      if (!friendId || friendId === userId) continue; // never notify self
+
+      // Only notify if friendship is MUTUAL: friend also has userId in their list
+      const mutual = await db
+        .collection("friends").doc(friendId)
+        .collection("userFriends").doc(userId)
+        .get();
+      if (!mutual.exists) continue;
 
       // Only if that friend liked this park
       const liked = await db
@@ -145,8 +201,7 @@ exports.notifyFriendCheckIn = onDocumentCreated(
       if (!liked.exists) continue;
 
       // Friend's FCM token
-      const friendOwner = await db.collection("owners")
-        .doc(friendId).get();
+      const friendOwner = await db.collection("owners").doc(friendId).get();
       const fcmToken = friendOwner.exists ? friendOwner.get("fcmToken") : null;
       if (!fcmToken || !String(fcmToken).trim()) continue;
 
@@ -169,7 +224,6 @@ exports.notifyFriendCheckIn = onDocumentCreated(
           apns: { payload: { aps: { sound: "default" } } },
         });
       } catch (e) {
-        // Clean up an unregistered token (avoid optional chaining for ESLint)
         const code = (e && e.code) ? String(e.code) : "";
         if (code.includes("registration-token-not-registered")) {
           await db.collection("owners").doc(friendId)
@@ -179,35 +233,29 @@ exports.notifyFriendCheckIn = onDocumentCreated(
         }
       }
     }
-
   }
 );
 
-
-/* =========================
-   Auto-checkout (3 hours) — runs every 10 minutes
-   ========================= */
-
+// =========================
+// Auto-checkout (3 hours) — runs every 10 minutes
+// =========================
 exports.autoCheckoutInactiveUsers = onSchedule(
   { schedule: "every 10 minutes" },
   async () => {
     const threeHoursAgo = new Date(Date.now() - 3 * 60 * 60 * 1000);
 
     const parksSnapshot = await db.collection("parks").get();
-    for (let p = 0; p < parksSnapshot.docs.length; p++) {
-      const parkDoc = parksSnapshot.docs[p];
+    for (const parkDoc of parksSnapshot.docs) {
       const activeUsersRef = parkDoc.ref.collection("active_users");
       const activeUsersSnapshot = await activeUsersRef.get();
 
-      for (let u = 0; u < activeUsersSnapshot.docs.length; u++) {
-        const userDoc = activeUsersSnapshot.docs[u];
+      for (const userDoc of activeUsersSnapshot.docs) {
         const checkedInAt = userDoc.get("checkedInAt");
         const hasToDate =
           checkedInAt && typeof checkedInAt.toDate === "function";
 
         if (hasToDate && checkedInAt.toDate() < threeHoursAgo) {
-          // Deleting the doc will trigger onDocumentDeleted below,
-          // which decrements userCount and closes the visit.
+          // Deleting triggers onDocumentDeleted below.
           await userDoc.ref.delete();
         }
       }
@@ -216,16 +264,11 @@ exports.autoCheckoutInactiveUsers = onSchedule(
   }
 );
 
-/* =========================
-   Admin callables
-   ========================= */
-
+// =========================
+// Admin callables
+// =========================
 exports.setAdmin = onCall({ enforceAppCheck: true }, async (request) => {
-  if (
-    !request.auth ||
-    !request.auth.token ||
-    request.auth.token.admin !== true
-  ) {
+  if (!request.auth || !request.auth.token || request.auth.token.admin !== true) {
     throw new HttpsError("permission-denied", "Only admins can set admin.");
   }
 
@@ -234,92 +277,67 @@ exports.setAdmin = onCall({ enforceAppCheck: true }, async (request) => {
   const makeAdmin = body.makeAdmin;
 
   if (typeof uid !== "string" || typeof makeAdmin !== "boolean") {
-    throw new HttpsError(
-      "invalid-argument",
-      "Provide { uid: string, makeAdmin: boolean }"
-    );
+    throw new HttpsError("invalid-argument", "Provide { uid: string, makeAdmin: boolean }");
   }
 
   const auth = getAuth();
   const user = await auth.getUser(uid);
   const existing = user.customClaims || {};
-  const merged = {};
-  Object.keys(existing).forEach((k) => (merged[k] = existing[k]));
-  merged.admin = makeAdmin;
+  const merged = { ...existing, admin: makeAdmin };
 
   await auth.setCustomUserClaims(uid, merged);
   await auth.revokeRefreshTokens(uid);
-
-  return { ok: true, uid: uid, claims: merged };
+  return { ok: true, uid, claims: merged };
 });
 
-exports.setAdminByEmail = onCall(
-  { enforceAppCheck: true },
-  async (request) => {
-    if (
-      !request.auth ||
-      !request.auth.token ||
-      request.auth.token.admin !== true
-    ) {
-      throw new HttpsError("permission-denied", "Only admins can set admin.");
-    }
-
-    const body = request.data || {};
-    const email = body.email;
-    const makeAdmin = body.makeAdmin;
-
-    if (typeof email !== "string" || typeof makeAdmin !== "boolean") {
-      throw new HttpsError(
-        "invalid-argument",
-        "Provide { email: string, makeAdmin: boolean }"
-      );
-    }
-
-    const auth = getAuth();
-    const user = await auth.getUserByEmail(email);
-    const existing = user.customClaims || {};
-    const merged = {};
-    Object.keys(existing).forEach((k) => (merged[k] = existing[k]));
-    merged.admin = makeAdmin;
-
-    await auth.setCustomUserClaims(user.uid, merged);
-    await auth.revokeRefreshTokens(user.uid);
-
-    return { ok: true, uid: user.uid, claims: merged };
+exports.setAdminByEmail = onCall({ enforceAppCheck: true }, async (request) => {
+  if (!request.auth || !request.auth.token || request.auth.token.admin !== true) {
+    throw new HttpsError("permission-denied", "Only admins can set admin.");
   }
-);
 
-/* =========================
-   userCount triggers (tamper-proof) + visit sync
-   ========================= */
+  const body = request.data || {};
+  const email = body.email;
+  const makeAdmin = body.makeAdmin;
 
+  if (typeof email !== "string" || typeof makeAdmin !== "boolean") {
+    throw new HttpsError("invalid-argument", "Provide { email: string, makeAdmin: boolean }");
+  }
+
+  const auth = getAuth();
+  const user = await auth.getUserByEmail(email);
+  const existing = user.customClaims || {};
+  const merged = { ...existing, admin: makeAdmin };
+
+  await auth.setCustomUserClaims(user.uid, merged);
+  await auth.revokeRefreshTokens(user.uid);
+  return { ok: true, uid: user.uid, claims: merged };
+});
+
+// =========================
+/* userCount triggers (tamper-proof) + visit sync */
+// =========================
 exports.onCheckInIncrementCount = onDocumentCreated(
   "parks/{parkId}/active_users/{uid}",
   async (event) => {
     const parkId = event.params.parkId;
     const uid = event.params.uid;
 
-    // Increment park userCount
     await db.collection("parks").doc(parkId).update({
       userCount: admin.firestore.FieldValue.increment(1),
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
-    // ----- Visit history: close any dangling visit, then open a new one -----
-    // Safely read the checkedInAt from the new active_users doc
+    // read checkedInAt from the new doc
     const payload =
-      event.data && typeof event.data.data === "function"
-        ? event.data.data()
-        : {};
+      event.data && typeof event.data.data === "function" ? event.data.data() : {};
     let checkedInAt = new Date();
     if (payload && payload.checkedInAt && typeof payload.checkedInAt.toDate === "function") {
       checkedInAt = payload.checkedInAt.toDate();
     }
 
-    // Try to close any previous open visit for this park/user
     try {
       await closeLatestOpenVisit({
-        parkId: parkId,
+        parkId,
         userId: uid,
         closedBy: "system(auto-close-on-new-checkin)",
         checkoutDate: checkedInAt,
@@ -328,16 +346,15 @@ exports.onCheckInIncrementCount = onDocumentCreated(
       console.warn("closeLatestOpenVisit failed; continuing:", e);
     }
 
-    // Always create a fresh visit record
     try {
       const day = dateToDayUTCString(checkedInAt);
       await db.collection("park_visits").add({
-        parkId: parkId,
+        parkId,
         userId: uid,
         checkInAt: admin.firestore.Timestamp.fromDate(checkedInAt),
         checkOutAt: null,
         durationMinutes: null,
-        day: day,                 // for reporting/grouping
+        day, // for reporting/grouping
         openedBy: uid,
         closedBy: null,
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
@@ -350,26 +367,22 @@ exports.onCheckInIncrementCount = onDocumentCreated(
   }
 );
 
-
 exports.onCheckOutDecrementCount = onDocumentDeleted(
   "parks/{parkId}/active_users/{uid}",
   async (event) => {
     const parkId = event.params.parkId;
     const uid = event.params.uid;
 
-    // Decrement the counter
     await db.collection("parks").doc(parkId).update({
       userCount: admin.firestore.FieldValue.increment(-1),
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
-    // Close the latest open visit for this park/user
     try {
       await closeLatestOpenVisit({
-        parkId: parkId,
+        parkId,
         userId: uid,
         closedBy: "system(or-user)",
-        // checkoutDate omitted -> use now()
       });
     } catch (e) {
       console.error("Failed to close park_visits on checkout:", e);
@@ -377,55 +390,29 @@ exports.onCheckOutDecrementCount = onDocumentDeleted(
   }
 );
 
-/* =========================
-   Public profile mirror
-   ========================= */
-
+// =========================
+// Public profile mirror
+// =========================
 exports.mirrorOwnerToPublicProfile = onDocumentWritten(
   "owners/{uid}",
   async (event) => {
     const uid = event.params.uid;
     const pubRef = db.collection("public_profiles").doc(uid);
 
-    // Get "after" snapshot safely (no optional chaining)
-    const afterSnap =
-      event.data && event.data.after ? event.data.after : null;
-    const after =
-      afterSnap && typeof afterSnap.data === "function"
-        ? afterSnap.data()
-        : null;
+    const afterSnap = event.data && event.data.after ? event.data.after : null;
+    const after = afterSnap && typeof afterSnap.data === "function" ? afterSnap.data() : null;
 
-    // If owners/{uid} was deleted, delete public profile
     if (!after) {
-      try {
-        await pubRef.delete();
-      } catch (e) {
-        // ignore missing doc
-      }
+      try { await pubRef.delete(); } catch (_) {}
       return;
     }
 
-    // Build displayName
-    const firstName =
-      after.firstName && typeof after.firstName === "string"
-        ? after.firstName.trim()
-        : "";
-    const lastName =
-      after.lastName && typeof after.lastName === "string"
-        ? after.lastName.trim()
-        : "";
-    let displayName = "";
-    if (firstName && lastName) {
-      displayName = (firstName + " " + lastName).trim();
-    } else if (after.displayName) {
-      displayName = String(after.displayName).trim();
-    }
+    const firstName = typeof after.firstName === "string" ? after.firstName.trim() : "";
+    const lastName  = typeof after.lastName === "string" ? after.lastName.trim()  : "";
+    let displayName = firstName && lastName ? `${firstName} ${lastName}`.trim()
+                     : (after.displayName ? String(after.displayName).trim() : "");
 
-    // Optional photoUrl
-    const photoUrl =
-      after.photoUrl && typeof after.photoUrl === "string"
-        ? after.photoUrl
-        : undefined;
+    const photoUrl = typeof after.photoUrl === "string" ? after.photoUrl : undefined;
 
     const publicData = {
       displayName: (displayName || "User").slice(0, 60),
@@ -437,136 +424,79 @@ exports.mirrorOwnerToPublicProfile = onDocumentWritten(
   }
 );
 
-// Top of file with your other imports:
-const { DateTime } = require("luxon");
-
-// ---- Helpers for timezone day window + formatting ----
-function todayWindowInTz(tz) {
-  const now = DateTime.now().setZone(tz || "UTC");
-  const start = now.startOf("day");
-  const end = start.plus({ days: 1 });
-  return {
-    start: start.toJSDate(),
-    end: end.toJSDate(),
-    todayKey: start.toFormat("yyyy-LL-dd"),
-    now, // keep luxon object for hour/min
-  };
-}
-
-async function sumStepsForUserDay(uid, start, end) {
-  const snap = await db
-    .collection("owners").doc(uid)
-    .collection("walks")
-    .where("endedAt", ">=", start)
-    .where("endedAt", "<", end)
-    .select("steps") // bandwidth-friendly
-    .get();
-
-  let steps = 0;
-  snap.forEach(d => {
-    const n = d.get("steps");
-    if (typeof n === "number" && isFinite(n)) steps += n;
-  });
-  return steps;
-}
-
-async function alreadySentToday(uid, todayKey) {
-  const doc = await db
-    .collection("owners").doc(uid)
-    .collection("stats").doc("dailyStepsNudge")
-    .get();
-  return doc.exists && doc.get("lastSentDay") === todayKey;
-}
-
-async function markSent(uid, todayKey, tz) {
-  await db.collection("owners").doc(uid)
-    .collection("stats").doc("dailyStepsNudge")
-    .set({
-      lastSentDay: todayKey,
-      lastSentAt: admin.firestore.FieldValue.serverTimestamp(),
-      tz: tz || "UTC",
-    }, { merge: true });
-}
-
-function buildMessage(steps) {
-  if (steps > 0) {
-    return `🐶💥 Woohoo! You and your pup crushed ${steps.toLocaleString()} steps today! 🐾 Keep the zoomies going!`;
-  }
-  // Upbeat prompt when there were no walks today
-  return "🐾 You haven’t taken a walk yet today — quick lap time! Even 10 minutes counts. Let’s go! 🐕💨";
-}
-
-// ---- Scheduled sender: every 5 min; deliver at ~9:00–9:09pm local time ----
+// =========================
+// Daily steps recap (with local time + minutes)
+// =========================
 exports.sendDailyStepsRecap = onSchedule(
   { schedule: "every 5 minutes", timeZone: "UTC" },
   async () => {
-    // Get all owners who can receive pushes and opted in
+    // All owners that can receive pushes (opt-out supported with dailyStepsOptIn=false)
     const ownersSnap = await db.collection("owners")
-      .where("fcmToken", "!=", null)           // token present
+      .where("fcmToken", "!=", null)
       .get();
 
     const owners = ownersSnap.docs.filter(d => {
       const data = d.data() || {};
-      // default ON unless explicitly false
-      return data.dailyStepsOptIn !== false && typeof data.fcmToken === "string" && data.fcmToken.trim();
+      return data.dailyStepsOptIn !== false
+          && typeof data.fcmToken === "string"
+          && data.fcmToken.trim();
     });
 
-    // Process in small parallel chunks
-    const chunkSize = 50;
-    for (let i = 0; i < owners.length; i += chunkSize) {
-      const chunk = owners.slice(i, i + chunkSize);
-      await Promise.all(chunk.map(async (doc) => {
+    const chunk = (arr, n) =>
+      arr.reduce((a,_,i)=> (i%n? a[a.length-1].push(arr[i]) : a.push([arr[i]]), a), []);
+
+    for (const group of chunk(owners, 50)) {
+      await Promise.all(group.map(async (doc) => {
         const uid = doc.id;
         const data = doc.data() || {};
         const tz = typeof data.tz === "string" && data.tz ? data.tz : "UTC";
         const token = data.fcmToken;
 
-        // Determine local time window for this user
         let win = todayWindowInTz(tz);
-        if (!win.now.isValid) {
-          win = todayWindowInTz("UTC");
-        }
+        if (!win.now.isValid) win = todayWindowInTz("UTC");
 
-        // Only send between 21:00–21:09 local time, and only once per day
+        // Send between 21:00–21:09 local time, once per day
         if (win.now.hour !== 21 || win.now.minute >= 10) return;
         if (await alreadySentToday(uid, win.todayKey)) return;
 
-        // Sum today's steps from walks
-        const steps = await sumStepsForUserDay(uid, win.start, win.end);
+        const { steps, minutes } = await sumStepsAndMinutesForUserDay(uid, win.start, win.end);
 
-        // Build and send notification
-        const body = buildMessage(steps);
+        const timePart = win.now.toFormat("h:mm a");
+        const niceTime = minutes > 0 ? formatWalkMinutes(minutes) : null;
+
+        // ——— Upbeat, “feel-good” copy ———
+        let body;
+        if (steps > 0 && niceTime) {
+          body = `🐶💖 Pawsome day! ${steps.toLocaleString()} steps and ${niceTime} of together-time • ${timePart}`;
+        } else if (steps > 0) {
+          body = `🐶💖 You and your pup got in ${steps.toLocaleString()} steps today—love that quality time • ${timePart}`;
+        } else {
+          body = `🐾 Still time to make memories—try a quick 10-minute lap with your best buddy • ${timePart}`;
+        }
+
         try {
           await getMessaging().send({
             token,
             notification: {
-              title: "🎉 Daily Dog Walk Recap",
+              title: "Daily Dog Walk Recap",
               body,
             },
             data: {
               type: "daily_steps",
               day: win.todayKey,
               steps: String(steps),
+              minutes: String(minutes),
+              localTime: timePart,
               click_action: "FLUTTER_NOTIFICATION_CLICK",
             },
             android: {
-              notification: {
-                channelId: "daily_reminders", // create this channel in-app for nicer behavior
-                priority: "HIGH",
-              },
+              notification: { channelId: "daily_reminders", priority: "HIGH" },
             },
-            apns: {
-              payload: {
-                aps: {
-                  sound: "default",
-                },
-              },
-            },
+            apns: { payload: { aps: { sound: "default" } } },
           });
           await markSent(uid, win.todayKey, tz);
         } catch (e) {
           console.error("Failed sending daily steps to", uid, e);
-          // Don't mark as sent on failure
         }
       }));
     }
@@ -574,12 +504,15 @@ exports.sendDailyStepsRecap = onSchedule(
   }
 );
 
+
+// =========================
+// Park chat broadcast (unchanged)
+// =========================
 function toSafeTopic(s) {
   return s.replace(/[^A-Za-z0-9_\-\.~%]/g, '_');
 }
-
-// helper: batch an array
-const chunk = (arr, n) => arr.reduce((a,_,i)=> (i%n? a[a.length-1].push(arr[i]) : a.push([arr[i]]), a), []);
+const chunk = (arr, n) =>
+  arr.reduce((a,_,i)=> (i%n? a[a.length-1].push(arr[i]) : a.push([arr[i]]), a), []);
 
 exports.notifyParkChat = require("firebase-functions/v2/firestore")
   .onDocumentCreated("parks/{parkId}/chat/{messageId}", async (event) => {
@@ -589,35 +522,25 @@ exports.notifyParkChat = require("firebase-functions/v2/firestore")
     const text = String(msg.text || "").slice(0, 120);
     if (!text) return;
 
-
-  // Park name
-  let parkName = "this park";
-  try {
-    const parkSnap = await db.collection("parks").doc(parkId).get();
-    const n = parkSnap.exists ? parkSnap.get("name") : null;
-    if (typeof n === "string" && n.trim()) parkName = n.trim();
-  } catch (_) {}
+    let parkName = "this park";
+    try {
+      const parkSnap = await db.collection("parks").doc(parkId).get();
+      const n = parkSnap.exists ? parkSnap.get("name") : null;
+      if (typeof n === "string" && n.trim()) parkName = n.trim();
+    } catch (_) {}
 
     console.log("notifyParkChat fanout → park:", parkId, "messageId:", messageId, "sender:", senderId);
 
-    // 1) Who enabled notifications for this park?
     const subsSnap = await db
       .collectionGroup("chat_subscriptions")
       .where("parkId", "==", parkId)
       .where("enabled", "==", true)
       .get();
 
-    // 2) Collect distinct ownerIds (parent of sub doc)
-    const ownerIds = Array.from(new Set(subsSnap.docs.map(d => d.ref.parent.parent.id)))
-      .filter(id => id && id !== senderId); // optional: skip sender
-
-    if (!ownerIds.length) {
-      console.log("No subscribers for park", parkId);
-      return;
-    }
-
-    // 3) Fetch owners in batches of 10 (limit of 'in' query)
     let tokens = [];
+    const ownerIds = Array.from(new Set(subsSnap.docs.map(d => d.ref.parent.parent.id)))
+      .filter(id => id && id !== senderId);
+
     for (const group of chunk(ownerIds, 10)) {
       const ownersSnap = await db.collection("owners")
         .where(FieldPath.documentId(), "in", group)
@@ -629,16 +552,13 @@ exports.notifyParkChat = require("firebase-functions/v2/firestore")
       });
     }
 
-    // safety: dedupe tokens
     const seen = new Set();
     tokens = tokens.filter(t => !seen.has(t.token) && seen.add(t.token));
-
     if (!tokens.length) {
       console.log("No valid tokens for park", parkId);
       return;
     }
 
-    // 4) Send in chunks of 500
     const payload = {
       notification: { title: `New message in ${parkName}`, body: text },
       data: { parkId, senderId, messageId, type: "park_chat", click_action: "FLUTTER_NOTIFICATION_CLICK" },
@@ -655,13 +575,13 @@ exports.notifyParkChat = require("firebase-functions/v2/firestore")
       success += res.successCount;
       failure += res.failureCount;
 
-      // 5) Clean up dead tokens
       for (let i = 0; i < res.responses.length; i++) {
         const r = res.responses[i];
         if (!r.success && r.error && String(r.error.code).includes("registration-token-not-registered")) {
           const dead = group[i];
           console.log("Cleaning dead token for uid", dead.uid);
-          await db.collection("owners").doc(dead.uid).set({ fcmToken: admin.firestore.FieldValue.delete() }, { merge: true });
+          await db.collection("owners").doc(dead.uid)
+            .set({ fcmToken: admin.firestore.FieldValue.delete() }, { merge: true });
         }
       }
     }

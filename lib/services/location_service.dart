@@ -13,7 +13,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 /// Uses Places API (New) with a strict field mask to avoid
 /// Atmosphere & Contact data charges.
-/// Requested fields: places.id, places.displayName, places.location
+/// Requested: id, displayName, location, types, primaryType (still "basic")
 class LocationService {
   final loc.Location _location = loc.Location();
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
@@ -48,12 +48,40 @@ class LocationService {
   static const _placesHost = 'places.googleapis.com';
   static const _nearbyPath = '/v1/places:searchNearby';
 
+  // Types to exclude even if the result says "park"
+  static const Set<String> _bannedTypes = {
+    'parking',
+    'rv_park',
+    'campground',
+    'car_rental',
+    'car_repair',
+    'gas_station',
+    'cemetery',
+    'funeral_home',
+    'church',
+    'synagogue',
+    'mosque',
+    'hindu_temple',
+    'taxi_stand',
+    'subway_station',
+    'train_station',
+    'bus_station',
+    'light_rail_station',
+    'airport',
+    'hospital',
+    'doctor',
+    'pharmacy',
+    'police',
+    'fire_station',
+    'courthouse',
+  };
+
   /// Core POST to Places API (New) Nearby Search with a tight field mask.
   Future<List<Map<String, dynamic>>> _placesSearchNearby({
     required double lat,
     required double lng,
-    double radiusMeters = 800, // keep small; scale by zoom if desired
-    int maxResultCount = 20, // hard cap to avoid extra costs
+    double radiusMeters = 650, // tighter default
+    int maxResultCount = 16, // lower cap
     List<String> includedTypes = const ['park'],
   }) async {
     final uri = Uri.https(_placesHost, _nearbyPath);
@@ -74,8 +102,9 @@ class LocationService {
       headers: {
         "Content-Type": "application/json",
         "X-Goog-Api-Key": _googlePlacesApiKey,
-        // IMPORTANT: Field mask avoids Contact/Atmosphere charges.
-        "X-Goog-FieldMask": "places.id,places.displayName,places.location",
+        // BASIC fields only → avoids contact/atmosphere charges.
+        "X-Goog-FieldMask":
+            "places.id,places.displayName,places.location,places.types,places.primaryType",
       },
       body: body,
     );
@@ -87,16 +116,23 @@ class LocationService {
 
     final data = jsonDecode(resp.body);
     final List places = (data["places"] as List?) ?? const [];
-    // Normalize to simple maps with id, name, lat, lng
+
+    // Normalize to simple maps with id, name, lat, lng, types
     return places
         .map<Map<String, dynamic>>((p) {
           final loc = p["location"] as Map<String, dynamic>? ?? const {};
           final nameObj = p["displayName"] as Map<String, dynamic>? ?? const {};
+          final types = ((p["types"] as List?) ?? const [])
+              .map((e) => (e as String).toLowerCase())
+              .toList(growable: false);
+          final primaryType = (p["primaryType"] as String? ?? '').toLowerCase();
           return {
             "id": p["id"] ?? "",
             "name": (nameObj["text"] ?? "").toString(),
             "lat": (loc["latitude"] as num?)?.toDouble(),
             "lng": (loc["longitude"] as num?)?.toDouble(),
+            "types": types,
+            "primaryType": primaryType,
           };
         })
         .where((m) =>
@@ -106,9 +142,94 @@ class LocationService {
         .toList();
   }
 
+  // ---------- Filtering helpers ----------
+  bool _looksLikeRealPark(Map<String, dynamic> p) {
+    final name = (p['name'] as String).trim();
+    final primary = (p['primaryType'] as String);
+    final types = (p['types'] as List).cast<String>();
+
+    // Must be a park by primary or secondary type
+    final isPark = primary == 'park' || types.contains('park');
+    if (!isPark) return false;
+
+    // Exclude noisy categories
+    if (types.any(_bannedTypes.contains)) return false;
+
+    // Name-based guards
+    final lower = name.toLowerCase();
+    const badNameSnippets = [
+      'parking',
+      'garage',
+      'lot',
+      'trailhead',
+      'drop-off',
+      'pickup',
+      'car park',
+      'parkade'
+    ];
+    if (badNameSnippets.any((s) => lower.contains(s))) return false;
+
+    return true;
+  }
+
+  double _haversine(double lat1, double lng1, double lat2, double lng2) {
+    const R = 6371000.0;
+    final dLat = _deg2rad(lat2 - lat1);
+    final dLng = _deg2rad(lng2 - lng1);
+    final a = sin(dLat / 2) * sin(dLat / 2) +
+        cos(_deg2rad(lat1)) *
+            cos(_deg2rad(lat2)) *
+            sin(dLng / 2) *
+            sin(dLng / 2);
+    return 2 * R * atan2(sqrt(a), sqrt(1 - a));
+  }
+
+  double _deg2rad(double deg) => deg * (pi / 180.0);
+
+  /// Merge places that are within [thresholdM] of each other.
+  /// Prefer names containing 'Park'; else prefer longer name.
+  List<Map<String, dynamic>> _dedupeByProximity(
+    List<Map<String, dynamic>> items, {
+    double thresholdM = 120,
+  }) {
+    final kept = <Map<String, dynamic>>[];
+
+    for (final p in items) {
+      final plat = p['lat'] as double;
+      final plng = p['lng'] as double;
+      int? sameIdx;
+
+      for (var i = 0; i < kept.length; i++) {
+        final k = kept[i];
+        final d =
+            _haversine(plat, plng, k['lat'] as double, k['lng'] as double);
+        if (d <= thresholdM) {
+          sameIdx = i;
+          break;
+        }
+      }
+
+      if (sameIdx == null) {
+        kept.add(p);
+      } else {
+        final current = kept[sameIdx];
+        final cName = (current['name'] as String);
+        final pName = (p['name'] as String);
+        final cHasPark = cName.toLowerCase().contains('park');
+        final pHasPark = pName.toLowerCase().contains('park');
+
+        final pickP = (!cHasPark && pHasPark) ||
+            (cHasPark == pHasPark && pName.length > cName.length);
+
+        if (pickP) kept[sameIdx] = p;
+      }
+    }
+    return kept;
+  }
+
   // ---------- Public API ----------
   /// Find nearby parks around (userLat,userLng).
-  /// Uses Places (New) Nearby with tight field mask → Basic data only.
+  /// Uses Places (New) Nearby with basic fields only, then filters locally.
   Future<List<Park>> findNearbyParks(double userLat, double userLng) async {
     final parks = <Park>[];
 
@@ -116,15 +237,20 @@ class LocationService {
       final raw = await _placesSearchNearby(
         lat: userLat,
         lng: userLng,
-        radiusMeters: 800, // ~0.8 km; adjust to taste/zoom
-        maxResultCount: 20,
+        radiusMeters: 650, // ~0.65 km; adjust to taste/zoom
+        maxResultCount: 16,
         includedTypes: const ['park'],
       );
 
-      // Dedup by (lowercased) name to mimic your previous behavior.
-      final seenNames = <String>{};
+      // Keep only valid parks
+      final filtered = raw.where(_looksLikeRealPark).toList();
 
-      for (final p in raw) {
+      // Spatial de-dupe of large areas that produce multiple sub-entries
+      final deduped = _dedupeByProximity(filtered, thresholdM: 120);
+
+      // Name de-dupe (safety)
+      final seenNames = <String>{};
+      for (final p in deduped) {
         final name = (p['name'] as String).trim();
         final lat = p['lat'] as double;
         final lng = p['lng'] as double;
@@ -135,7 +261,6 @@ class LocationService {
 
         parks.add(
           Park(
-            // Keep your existing stable ID scheme used elsewhere:
             id: generateParkID(lat, lng, name),
             name: name,
             latitude: lat,
@@ -150,8 +275,7 @@ class LocationService {
     return parks;
   }
 
-  /// Determine if user is within ~150m of a park.
-  /// Rewritten to Places (New) Nearby with small radius, Basic fields only.
+  /// Determine if user is within ~150m of a valid park.
   Future<Park?> isUserAtPark(double userLat, double userLng) async {
     try {
       final list = await _placesSearchNearby(
@@ -162,56 +286,28 @@ class LocationService {
         includedTypes: const ['park'],
       );
 
-      if (list.isEmpty) return null;
+      final candidates = list.where(_looksLikeRealPark).toList();
+      if (candidates.isEmpty) return null;
 
-      // Pick the closest by haversine distance.
-      double minDistance = double.infinity;
-      Map<String, dynamic>? closest;
+      // Closest valid candidate
+      candidates.sort((a, b) {
+        final da = _haversine(userLat, userLng, a['lat'], a['lng']);
+        final db = _haversine(userLat, userLng, b['lat'], b['lng']);
+        return da.compareTo(db);
+      });
 
-      for (final p in list) {
-        final lat = p['lat'] as double;
-        final lng = p['lng'] as double;
-        final d = _calculateDistance(userLat, userLng, lat, lng);
-        if (d < minDistance) {
-          minDistance = d;
-          closest = p;
-        }
-      }
-
-      if (closest == null) return null;
-
-      final name = (closest['name'] as String).trim();
-      final lat = closest['lat'] as double;
-      final lng = closest['lng'] as double;
-
+      final c = candidates.first;
+      final name = (c['name'] as String).trim();
       return Park(
-        id: generateParkID(lat, lng, name),
+        id: generateParkID(c['lat'], c['lng'], name),
         name: name,
-        latitude: lat,
-        longitude: lng,
+        latitude: c['lat'],
+        longitude: c['lng'],
       );
     } catch (_) {
       return null;
     }
   }
-
-  // ---------- Geometry ----------
-  // Haversine distance in meters
-  double _calculateDistance(
-      double lat1, double lng1, double lat2, double lng2) {
-    const earthRadius = 6371000.0;
-    final dLat = _deg2rad(lat2 - lat1);
-    final dLng = _deg2rad(lng2 - lng1);
-    final a = sin(dLat / 2) * sin(dLat / 2) +
-        cos(_deg2rad(lat1)) *
-            cos(_deg2rad(lat2)) *
-            sin(dLng / 2) *
-            sin(dLng / 2);
-    final c = 2 * atan2(sqrt(a), sqrt(1 - a));
-    return earthRadius * c;
-  }
-
-  double _deg2rad(double deg) => deg * (pi / 180.0);
 
   // ---------- Firestore helpers (unchanged) ----------
   Future<void> ensureParkExists(Park park) async {

@@ -81,6 +81,13 @@ class _MapTabState extends State<MapTab>
   final Map<String, List<String>> _parkServicesById = {}; // cache per parkId
   List<Park> _allParks = []; // current parks list
 
+  bool _celebratePending = false;
+  int? _pcSteps;
+  double? _pcMeters;
+  int? _pcStreakCur;
+  int? _pcStreakLongest;
+  bool _pcIsNewRecord = false;
+
   // Precomputed visible sets (don’t rebuild in build())
   Set<Marker> _visibleMarkers = {};
   Set<Polyline> _visiblePolylines = {};
@@ -101,6 +108,7 @@ class _MapTabState extends State<MapTab>
   // Flags & UI state
   bool _isSearching = false;
   bool _finishingWalk = false; // disables End Walk + shows loader
+  bool _startingWalk = false; // <<< add this
   bool _isCentering = false; // prevent spam taps on center FAB
 
   // Debounces & listeners
@@ -885,6 +893,31 @@ class _MapTabState extends State<MapTab>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       _onFastResume();
+      // ★ Show any queued celebration
+      if (_celebratePending && mounted) {
+        _celebratePending = false;
+        final s = _pcSteps ?? 0;
+        final m = _pcMeters ?? 0.0;
+        final sc = _pcStreakCur;
+        final sl = _pcStreakLongest;
+        final nr = _pcIsNewRecord;
+        // clear payload
+        _pcSteps = null;
+        _pcMeters = null;
+        _pcStreakCur = null;
+        _pcStreakLongest = null;
+        _pcIsNewRecord = false;
+
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _showCelebrationDialog(
+            steps: s,
+            meters: m,
+            streakCurrent: sc,
+            streakLongest: sl,
+            streakIsNewRecord: nr,
+          );
+        });
+      }
     }
   }
 
@@ -953,8 +986,7 @@ class _MapTabState extends State<MapTab>
       {bool auto = false, bool silent = false}) async {
     if (_finishingWalk) return;
     _finishingWalk = true;
-    if (mounted) setState(() {}); // disable End Walk button
-
+    if (mounted) setState(() {});
     _stopUiTicker();
 
     try {
@@ -963,7 +995,6 @@ class _MapTabState extends State<MapTab>
     } catch (_) {}
 
     if (!_walk.meetsMinimum) {
-      // Nothing is saved anymore because we never created the doc
       _resetLiveRoute();
       if (!silent && mounted) {
         setState(() => _finishingWalk = false);
@@ -980,9 +1011,8 @@ class _MapTabState extends State<MapTab>
     _StreakResult? streak;
     try {
       final saved = await _persistWalkSession();
-      if (saved) {
-        streak = await _updateDailyStreak();
-      }
+      if (!saved) return; // bail before queuing/showing
+      streak = await _updateDailyStreak();
     } catch (e) {
       if (!silent && mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -994,23 +1024,38 @@ class _MapTabState extends State<MapTab>
       if (mounted) setState(() {});
     }
 
-    if (!silent && mounted) {
-      final steps_ = _walk.steps;
-      final meters_ = _walk.meters;
-      final streakCurrent_ = streak?.current;
-      final streakLongest_ = streak?.longest;
-      final streakIsNewRecord_ = streak?.isNewRecord ?? false;
+    if (silent) return;
 
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _showCelebrationDialog(
-          steps: steps_,
-          meters: meters_,
-          streakCurrent: streakCurrent_,
-          streakLongest: streakLongest_,
-          streakIsNewRecord: streakIsNewRecord_,
-        );
-      });
+    final steps_ = _walk.steps;
+    final meters_ = _walk.meters;
+    final streakCurrent_ = streak?.current;
+    final streakLongest_ = streak?.longest;
+    final streakIsNewRecord_ = streak?.isNewRecord ?? false;
+
+    // If the app is not in foreground, queue celebration for later.
+    final life = WidgetsBinding.instance.lifecycleState;
+    final isForeground = (life == AppLifecycleState.resumed);
+
+    if (!isForeground || !mounted) {
+      _celebratePending = true;
+      _pcSteps = steps_;
+      _pcMeters = meters_;
+      _pcStreakCur = streakCurrent_;
+      _pcStreakLongest = streakLongest_;
+      _pcIsNewRecord = streakIsNewRecord_;
+      return;
     }
+
+    // Foreground → show now
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _showCelebrationDialog(
+        steps: steps_,
+        meters: meters_,
+        streakCurrent: streakCurrent_,
+        streakLongest: streakLongest_,
+        streakIsNewRecord: streakIsNewRecord_,
+      );
+    });
   }
 
   Future<void> _toggleWalk() async {
@@ -1023,76 +1068,99 @@ class _MapTabState extends State<MapTab>
         _manualFinishing = false;
       }
       return;
-    } else {
+    }
+
+    if (_startingWalk) return;
+    setState(() => _startingWalk = true);
+
+    try {
+      // 1) Only require "when-in-use" to START (fast)
       if (!await _ensureLocationPermission()) {
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-              content:
-                  Text("Location permission is required to start a walk.")),
-        );
-        return;
-      }
-
-      await _ensureNotifPermission();
-
-      final ok = await _explainAndRequestBackgroundLocation(context);
-      if (!ok) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
-                content: Text(
-                    "Background location is required to track with the screen off.")),
+                content: Text("Location permission is required to start.")),
           );
         }
         return;
       }
 
-      bool bgOk = false;
-      try {
-        bgOk = await _location.enableBackgroundMode(enable: true);
-      } on PlatformException catch (e) {
-        debugPrint('enable BG mode failed: $e');
-      }
-      if (!bgOk) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-                content: Text(
-                    "Couldn’t enable background mode. Make sure 'Allow all the time' is on in Settings.")),
-          );
-        }
-        return;
-      }
-
+      // 3) Begin tracking immediately (don’t await slow background setup)
       await _location.changeSettings(
         accuracy: loc.LocationAccuracy.high,
         interval: 2000,
         distanceFilter: 3,
       );
 
-      final startFuture = _walk.start();
-      if (mounted) setState(() {});
-      _startUiTicker();
+      // If your WalkManager supports seeding, pass it; otherwise ignore.
+      await _walk.start();
 
-      startFuture.catchError((e, _) {
-        () async {
-          try {
-            await _location.enableBackgroundMode(enable: false);
-            await _location.changeSettings(
-                accuracy: loc.LocationAccuracy.balanced);
-          } catch (_) {}
-        }();
-        if (!mounted) return;
+      _startUiTicker();
+      if (mounted) {
+        setState(() {}); // show "End Walk"
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("Walk started. Have fun!")),
+        );
+      }
+
+      // 4) Kick off background requirements without blocking start
+      unawaited(_postStartBackgroundHardening());
+    } catch (e, st) {
+      debugPrint('start walk error: $e\n$st');
+      // best-effort rollback
+      unawaited(() async {
+        try {
+          await _location.enableBackgroundMode(enable: false);
+          await _location.changeSettings(
+              accuracy: loc.LocationAccuracy.balanced);
+        } catch (_) {}
+      }());
+      if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text("Couldn't start walk: $e")),
         );
-      });
+      }
+    } finally {
+      if (mounted) setState(() => _startingWalk = false);
+    }
+  }
 
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Walk started. Have fun!")),
-      );
+  Future<void> _postStartBackgroundHardening() async {
+    try {
+      await _ensureNotifPermission();
+
+      // Ask for background *after* starting, and only on Android
+      final ok = await _explainAndRequestBackgroundLocation(context);
+      if (!ok) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+                "Walk is tracking now. Enable background to keep tracking with screen off."),
+            duration: Duration(seconds: 4),
+          ),
+        );
+        return;
+      }
+
+      bool bgOk = false;
+      try {
+        bgOk = await _location.enableBackgroundMode(enable: true);
+      } catch (e) {
+        debugPrint('enable BG mode failed: $e');
+      }
+
+      if (!bgOk && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+                "Couldn’t enable background mode. Walk continues while the app is open."),
+            duration: Duration(seconds: 4),
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('postStart hardening error: $e');
     }
   }
 
@@ -2207,16 +2275,16 @@ class _MapTabState extends State<MapTab>
                             },
                           ),
                         ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: _BigActionButton(
-                            label: "Add Event",
-                            onPressed: () {
-                              Navigator.of(context).pop();
-                              _addEvent(parkId, parkLatitude, parkLongitude);
-                            },
-                          ),
-                        ),
+                        // const SizedBox(width: 12),
+                        // Expanded(
+                        //   child: _BigActionButton(
+                        //    label: "Add Event",
+                        //   onPressed: () {
+                        //    Navigator.of(context).pop();
+                        //    _addEvent(parkId, parkLatitude, parkLongitude);
+                        //  },
+                        //),
+                        //),
                       ],
                     ),
                   ),
@@ -2635,7 +2703,9 @@ class _MapTabState extends State<MapTab>
                       elevation: 6,
                       padding: const EdgeInsets.symmetric(vertical: 14),
                     ),
-                    onPressed: _finishingWalk ? null : _toggleWalk,
+                    onPressed: (_finishingWalk || _startingWalk)
+                        ? null
+                        : _toggleWalk, // <<< disable while starting/finishing
                     child: _finishingWalk
                         ? const SizedBox(
                             height: 24,
@@ -2646,47 +2716,70 @@ class _MapTabState extends State<MapTab>
                                   AlwaysStoppedAnimation<Color>(Colors.white),
                             ),
                           )
-                        : Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              if (_walk.isActive)
-                                const Icon(Icons.flag,
-                                    size: 24, color: Colors.white)
-                              else ...[
-                                const Icon(Icons.directions_walk,
-                                    size: 24, color: Colors.white),
-                                const SizedBox(width: 6),
-                                const Icon(Icons.pets,
-                                    size: 22, color: Colors.white),
-                              ],
-                              const SizedBox(width: 10),
-                              Text(
-                                _walk.isActive ? "End Walk" : "Start New Walk",
-                                style: const TextStyle(
-                                    fontSize: 18, fontWeight: FontWeight.w800),
-                              ),
-                              if (_walk.isActive) ...[
-                                const SizedBox(width: 12),
-                                Container(
-                                  padding: const EdgeInsets.symmetric(
-                                      horizontal: 10, vertical: 6),
-                                  decoration: BoxDecoration(
-                                    color: Colors.white.withOpacity(0.15),
-                                    borderRadius: BorderRadius.circular(12),
-                                  ),
-                                  child: ValueListenableBuilder<String>(
-                                    valueListenable: _elapsedText,
-                                    builder: (_, t, __) => Text(
-                                      t,
-                                      style: const TextStyle(
-                                          color: Colors.white,
-                                          fontWeight: FontWeight.w800),
+                        : _startingWalk
+                            ? Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: const [
+                                  SizedBox(
+                                    height: 22,
+                                    width: 22,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 3,
+                                      valueColor: AlwaysStoppedAnimation<Color>(
+                                          Colors.white),
                                     ),
                                   ),
-                                ),
-                              ],
-                            ],
-                          ),
+                                  SizedBox(width: 10),
+                                  Text("Starting…",
+                                      style: TextStyle(
+                                          fontSize: 18,
+                                          fontWeight: FontWeight.w800)),
+                                ],
+                              )
+                            : Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  if (_walk.isActive)
+                                    const Icon(Icons.flag,
+                                        size: 24, color: Colors.white)
+                                  else ...[
+                                    const Icon(Icons.directions_walk,
+                                        size: 24, color: Colors.white),
+                                    const SizedBox(width: 6),
+                                    const Icon(Icons.pets,
+                                        size: 22, color: Colors.white),
+                                  ],
+                                  const SizedBox(width: 10),
+                                  Text(
+                                    _walk.isActive
+                                        ? "End Walk"
+                                        : "Start New Walk",
+                                    style: const TextStyle(
+                                        fontSize: 18,
+                                        fontWeight: FontWeight.w800),
+                                  ),
+                                  if (_walk.isActive) ...[
+                                    const SizedBox(width: 12),
+                                    Container(
+                                      padding: const EdgeInsets.symmetric(
+                                          horizontal: 10, vertical: 6),
+                                      decoration: BoxDecoration(
+                                        color: Colors.white.withOpacity(0.15),
+                                        borderRadius: BorderRadius.circular(12),
+                                      ),
+                                      child: ValueListenableBuilder<String>(
+                                        valueListenable: _elapsedText,
+                                        builder: (_, t, __) => Text(
+                                          t,
+                                          style: const TextStyle(
+                                              color: Colors.white,
+                                              fontWeight: FontWeight.w800),
+                                        ),
+                                      ),
+                                    ),
+                                  ],
+                                ],
+                              ),
                   ),
                 ),
               ],

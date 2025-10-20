@@ -45,6 +45,8 @@ import 'package:inthepark/screens/wait_screen.dart';
 import 'package:inthepark/services/notification_prefs.dart';
 import 'package:app_tracking_transparency/app_tracking_transparency.dart';
 
+import 'package:flutter_app_badger/flutter_app_badger.dart';
+
 bool _appCheckActivated = false;
 
 /// Configure Mobile Ads (test devices in debug, content rating, etc.)
@@ -196,8 +198,35 @@ Future<void> _ensureFcmTokenPersistenceForSignedInUser() async {
 /// Your app
 /// ───────────────────────────────────────────────────────────────────────────
 
-class MyApp extends StatelessWidget {
+class MyApp extends StatefulWidget {
   const MyApp({Key? key}) : super(key: key);
+  @override
+  State<MyApp> createState() => _MyAppState();
+}
+
+// Badge clearer: clear on launch and whenever the app resumes
+class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    // Clear any lingering app icon badge when the app starts
+    FlutterAppBadger.removeBadge();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      // Clear badge again when returning to the foreground
+      FlutterAppBadger.removeBadge();
+    }
+  }
 
   @override
   Widget build(BuildContext context) {

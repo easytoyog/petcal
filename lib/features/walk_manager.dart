@@ -23,6 +23,10 @@ class WalkManager extends ChangeNotifier {
     this.minSteps = 50,
   });
 
+  static const _persistKey = 'active_walk';
+  static const inactivityLimit = Duration(minutes: 15);
+  static const maxWalkLimit = Duration(hours: 24);
+
   // ---- Public state (read-only via getters)
   bool _active = false;
   bool get isActive => _active;
@@ -70,12 +74,20 @@ class WalkManager extends ChangeNotifier {
   int? _stepBaseline;
   DateTime? _lastMoveAt;
 
-  static const _persistKey = 'active_walk';
-  static const inactivityLimit = Duration(minutes: 10);
-  static const maxWalkLimit = Duration(hours: 24);
+  Future<bool> _ensureLocationReady() async {
+    final svc =
+        await location.serviceEnabled() || await location.requestService();
+    if (!svc) return false;
+    var perm = await location.hasPermission();
+    if (perm == loc.PermissionStatus.denied) {
+      perm = await location.requestPermission();
+    }
+    return perm == loc.PermissionStatus.granted;
+  }
 
   // ————— API —————
-  Future<void> start() async {
+  Future<void> start({LatLng? seed}) async {
+    if (!await _ensureLocationReady()) return;
     await _enableNavMode();
 
     _active = true;

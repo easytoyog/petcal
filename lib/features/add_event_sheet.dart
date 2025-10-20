@@ -2,6 +2,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
+import 'package:firebase_core/firebase_core.dart';
 
 class AddEventSheet extends StatefulWidget {
   final String parkId;
@@ -29,6 +30,14 @@ class _AddEventSheetState extends State<AddEventSheet> {
   String? _weekday;
   TimeOfDay? _start;
   TimeOfDay? _end;
+
+  void _logFirebaseContext() {
+    final app = Firebase.app();
+    final opts = app.options;
+    debugPrint('FIREBASE projectId=${opts.projectId}');
+    debugPrint('FIREBASE appId=${opts.appId}');
+    debugPrint('AUTH uid=${FirebaseAuth.instance.currentUser?.uid}');
+  }
 
   @override
   void dispose() {
@@ -208,6 +217,13 @@ class _AddEventSheetState extends State<AddEventSheet> {
   }
 
   Future<void> _submit() async {
+    _logFirebaseContext();
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) {
+      _toast("Please sign in to add an event.");
+      return;
+    }
+
     final name = _nameCtrl.text.trim();
     final desc = _descCtrl.text.trim();
     if (name.isEmpty || _start == null || _end == null || _recurrence == null) {
@@ -240,6 +256,7 @@ class _AddEventSheetState extends State<AddEventSheet> {
       endDt = DateTime(
           now.year, now.month, _monthlyDate!.day, _end!.hour, _end!.minute);
     } else {
+      // Daily or Weekly
       startDt =
           DateTime(now.year, now.month, now.day, _start!.hour, _start!.minute);
       endDt = DateTime(now.year, now.month, now.day, _end!.hour, _end!.minute);
@@ -256,28 +273,36 @@ class _AddEventSheetState extends State<AddEventSheet> {
       'parkLongitude': widget.parkLongitude,
       'name': name,
       'description': desc,
-      'startDateTime': startDt,
-      'endDateTime': endDt,
+      // explicit Firestore timestamps to satisfy rules
+      'startDateTime': Timestamp.fromDate(startDt),
+      'endDateTime': Timestamp.fromDate(endDt),
       'recurrence': _recurrence,
-      'likes': [],
-      'createdBy': FirebaseAuth.instance.currentUser?.uid ?? "",
-      'createdAt': FieldValue.serverTimestamp(),
+      if (_recurrence == "Weekly") 'weekday': _weekday,
+      if (_recurrence == "One Time")
+        'eventDate': Timestamp.fromDate(_oneTimeDate!),
+      if (_recurrence == "Monthly") 'eventDay': _monthlyDate!.day,
+      'likes': <String>[],
+      'createdBy': uid,
+      // EITHER omit createdAt entirely...
+      // (your rules allow it to be absent)
+      // OR send a real timestamp instead of a sentinel:
+      // 'createdAt': Timestamp.now(),
     };
-    if (_recurrence == "Weekly") eventData['weekday'] = _weekday;
-    if (_recurrence == "One Time") eventData['eventDate'] = _oneTimeDate;
-    if (_recurrence == "Monthly") eventData['eventDay'] = _monthlyDate!.day;
 
-    await FirebaseFirestore.instance
-        .collection('parks')
-        .doc(widget.parkId)
-        .collection('events')
-        .add(eventData);
-
-    if (mounted) {
-      Navigator.pop(context);
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text("Event '$name' added")));
+    try {
+      await FirebaseFirestore.instance
+          .collection('parks')
+          .doc(widget.parkId)
+          .collection('events')
+          .add(eventData);
+    } on FirebaseException catch (e) {
+      _toast('Add failed: ${e.message ?? e.code}');
+      return;
     }
+
+    if (!mounted) return;
+    Navigator.pop(context);
+    _toast("Event '$name' added");
   }
 
   void _toast(String msg) {

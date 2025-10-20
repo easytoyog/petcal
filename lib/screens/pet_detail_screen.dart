@@ -21,8 +21,15 @@ class _AddPetScreenState extends State<AddPetScreen> {
   /// Index of the pet chosen as "main pet"
   int? mainPetIndex;
 
-  // Add this line:
-  Set<int> uploadingIndexes = {};
+  /// Track which avatar is currently uploading (spinner per card)
+  final Set<int> uploadingIndexes = {};
+
+  /// Validation flag – becomes true after the first save attempt
+  bool _attemptedSave = false;
+
+  bool get _allPetsNamed =>
+      pets.isNotEmpty &&
+      pets.every((p) => ((p['name'] as String?)?.trim().isNotEmpty ?? false));
 
   @override
   void initState() {
@@ -59,7 +66,6 @@ class _AddPetScreenState extends State<AddPetScreen> {
     });
 
     final petIdForStorage = DateTime.now().millisecondsSinceEpoch.toString();
-
     final downloadUrl =
         await ImageUploadUtil.pickAndUploadPetPhoto(petIdForStorage);
 
@@ -73,42 +79,55 @@ class _AddPetScreenState extends State<AddPetScreen> {
 
   /// Save pets to Firestore
   Future<void> savePets() async {
-  if (pets.isEmpty) {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text("Please add at least one pet.")),
-    );
-    return;
-  }
-  mainPetIndex ??= 0;
+    setState(() => _attemptedSave = true);
 
-  try {
-    final uid = FirebaseAuth.instance.currentUser!.uid;
-    final col = FirebaseFirestore.instance.collection('pets');
-
-    for (int i = 0; i < pets.length; i++) {
-      final pet = pets[i];
-      await col.add({
-        'ownerId' : uid,
-        'name'    : (pet['name'] as String?)?.trim() ?? '',
-        'photoUrl': pet['photoUrl'],         // may be null or string
-        'isMain'  : (i == mainPetIndex),
-        'createdAt': FieldValue.serverTimestamp(),
-        'updatedAt': FieldValue.serverTimestamp(),
-      });
+    if (pets.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Please add at least one pet.")),
+      );
+      return;
     }
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text("Pets saved successfully!")),
-    );
-    Navigator.pushNamed(context, '/allsetup');
-  } catch (e) {
-    debugPrint("Error saving pets: $e");
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text("Error: $e")),
-    );
-  }
-}
+    // Block continuing if any pet name is blank
+    if (!_allPetsNamed) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content: Text("Please name all pets before continuing.")),
+      );
+      return;
+    }
 
+    mainPetIndex ??= 0;
+
+    try {
+      final uid = FirebaseAuth.instance.currentUser!.uid;
+      final col = FirebaseFirestore.instance.collection('pets');
+
+      for (int i = 0; i < pets.length; i++) {
+        final pet = pets[i];
+        await col.add({
+          'ownerId': uid,
+          'name': (pet['name'] as String).trim(),
+          'photoUrl': pet['photoUrl'], // may be null or string
+          'isMain': (i == mainPetIndex),
+          'createdAt': FieldValue.serverTimestamp(),
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+      }
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Pets saved successfully!")),
+      );
+      Navigator.pushNamed(context, '/allsetup');
+    } catch (e) {
+      debugPrint("Error saving pets: $e");
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Error: $e")),
+      );
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -117,7 +136,7 @@ class _AddPetScreenState extends State<AddPetScreen> {
         title: const Text("Add Pets"),
         backgroundColor: const Color(0xFF567D46),
       ),
-      body: SafeArea( // <-- Wrap with SafeArea
+      body: SafeArea(
         child: Container(
           decoration: const BoxDecoration(
             gradient: LinearGradient(
@@ -150,6 +169,14 @@ class _AddPetScreenState extends State<AddPetScreen> {
                       shrinkWrap: true,
                       physics: const NeverScrollableScrollPhysics(),
                       itemBuilder: (context, index) {
+                        final String name =
+                            (pets[index]['name'] as String?) ?? '';
+                        final bool nameEmpty = name.trim().isEmpty;
+                        final String? photoUrl =
+                            pets[index]['photoUrl'] as String?;
+                        final bool isUploading =
+                            uploadingIndexes.contains(index);
+
                         return Card(
                           margin: const EdgeInsets.symmetric(vertical: 10.0),
                           color: Colors.white.withOpacity(0.1),
@@ -161,30 +188,64 @@ class _AddPetScreenState extends State<AddPetScreen> {
                             child: Column(
                               children: [
                                 Row(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
-                                    // Pet Name field
+                                    // Pet Name field + inline error
                                     Expanded(
-                                      child: TextField(
-                                        onChanged: (value) {
-                                          pets[index]['name'] = value;
-                                        },
-                                        style:
-                                            const TextStyle(color: Colors.white),
-                                        decoration: InputDecoration(
-                                          filled: true,
-                                          fillColor:
-                                              Colors.white.withOpacity(0.1),
-                                          hintText: "Pet Name",
-                                          hintStyle: const TextStyle(
-                                              color: Colors.white70),
-                                          prefixIcon: const Icon(Icons.pets,
-                                              color: Colors.white),
-                                          border: OutlineInputBorder(
-                                            borderRadius:
-                                                BorderRadius.circular(12),
-                                            borderSide: BorderSide.none,
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          TextField(
+                                            onChanged: (value) {
+                                              pets[index]['name'] = value;
+                                              if (_attemptedSave) {
+                                                setState(() {}); // refresh UI
+                                              }
+                                            },
+                                            style: const TextStyle(
+                                                color: Colors.white),
+                                            decoration: InputDecoration(
+                                              filled: true,
+                                              fillColor:
+                                                  Colors.white.withOpacity(0.1),
+                                              hintText: "Pet Name",
+                                              hintStyle: const TextStyle(
+                                                  color: Colors.white70),
+                                              prefixIcon: const Icon(
+                                                Icons.pets,
+                                                color: Colors.white,
+                                              ),
+                                              border: OutlineInputBorder(
+                                                borderRadius:
+                                                    BorderRadius.circular(12),
+                                                borderSide: BorderSide.none,
+                                              ),
+                                              enabledBorder: OutlineInputBorder(
+                                                borderRadius:
+                                                    BorderRadius.circular(12),
+                                                borderSide: (_attemptedSave &&
+                                                        nameEmpty)
+                                                    ? const BorderSide(
+                                                        color: Colors.redAccent,
+                                                        width: 1.2,
+                                                      )
+                                                    : BorderSide.none,
+                                              ),
+                                            ),
                                           ),
-                                        ),
+                                          if (_attemptedSave && nameEmpty)
+                                            const Padding(
+                                              padding: EdgeInsets.only(
+                                                  top: 6.0, left: 8.0),
+                                              child: Text(
+                                                'Name is required',
+                                                style: TextStyle(
+                                                    color: Colors.redAccent,
+                                                    fontSize: 12.5),
+                                              ),
+                                            ),
+                                        ],
                                       ),
                                     ),
                                     const SizedBox(width: 10),
@@ -195,15 +256,22 @@ class _AddPetScreenState extends State<AddPetScreen> {
                                         radius: 40,
                                         backgroundColor:
                                             Colors.white.withOpacity(0.1),
-                                        backgroundImage: (pets[index]['photoUrl'] != null && !uploadingIndexes.contains(index))
-                                            ? NetworkImage(pets[index]['photoUrl'])
-                                            : null,
-                                        child: uploadingIndexes.contains(index)
+                                        backgroundImage:
+                                            (photoUrl != null && !isUploading)
+                                                ? NetworkImage(photoUrl)
+                                                : null,
+                                        child: isUploading
                                             ? const CircularProgressIndicator(
-                                                valueColor: AlwaysStoppedAnimation<Color>(Colors.tealAccent),
+                                                valueColor:
+                                                    AlwaysStoppedAnimation<
+                                                            Color>(
+                                                        Colors.tealAccent),
                                               )
-                                            : (pets[index]['photoUrl'] == null
-                                                ? const Icon(Icons.add_a_photo, color: Colors.white)
+                                            : (photoUrl == null
+                                                ? const Icon(
+                                                    Icons.add_a_photo,
+                                                    color: Colors.white,
+                                                  )
                                                 : null),
                                       ),
                                     ),
@@ -225,12 +293,14 @@ class _AddPetScreenState extends State<AddPetScreen> {
                                               mainPetIndex = value;
                                             });
                                           },
-                                          fillColor: WidgetStateProperty.all(
-                                              Colors.tealAccent),
+                                          fillColor:
+                                              MaterialStateProperty.all<Color>(
+                                                  Colors.tealAccent),
                                         ),
                                         const Text(
                                           "Set as Main Pet",
-                                          style: TextStyle(color: Colors.white70),
+                                          style:
+                                              TextStyle(color: Colors.white70),
                                         ),
                                       ],
                                     ),
@@ -268,8 +338,7 @@ class _AddPetScreenState extends State<AddPetScreen> {
                 padding: EdgeInsets.only(
                   left: 24.0,
                   right: 24.0,
-                  bottom: MediaQuery.of(context).viewPadding.bottom + 24.0, // <-- Add dynamic bottom padding
-                  top: 0,
+                  bottom: MediaQuery.of(context).viewPadding.bottom + 24.0,
                 ),
                 child: SizedBox(
                   width: MediaQuery.of(context).size.width / 2,
@@ -282,8 +351,23 @@ class _AddPetScreenState extends State<AddPetScreen> {
                         borderRadius: BorderRadius.circular(12),
                       ),
                     ),
-                    onPressed: savePets,
-                    child: const Text("Save Pets", style: TextStyle(fontSize: 18)),
+                    onPressed: () {
+                      if (_allPetsNamed) {
+                        savePets();
+                      } else {
+                        setState(() => _attemptedSave = true);
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content:
+                                Text("Please name all pets before continuing."),
+                          ),
+                        );
+                      }
+                    },
+                    child: const Text(
+                      "Save Pets",
+                      style: TextStyle(fontSize: 18),
+                    ),
                   ),
                 ),
               ),

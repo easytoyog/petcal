@@ -17,6 +17,7 @@ import 'package:flutter/services.dart'
     show Clipboard, ClipboardData, rootBundle;
 import 'dart:ui' as ui;
 import 'dart:async';
+import 'package:inthepark/widgets/ad_banner.dart';
 
 /// ---------- Enticing gradient Share CTA ----------
 class ShareAppCta extends StatelessWidget {
@@ -134,6 +135,35 @@ class _ProfileTabState extends State<ProfileTab> {
       context,
       MaterialPageRoute(builder: (_) => const WalksListScreen()),
     );
+  }
+
+  Future<void> _confirmAndDeletePet(Pet pet) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Delete ${pet.name}?'),
+        content: const Text('This will permanently remove this pet.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+
+    if (ok == true) {
+      await _removePet(pet.id);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Deleted ${pet.name}')),
+      );
+    }
   }
 
   void _autoUppercasePostal() {
@@ -1004,7 +1034,7 @@ class _ProfileTabState extends State<ProfileTab> {
                                   IconButton(
                                     icon: const Icon(Icons.delete,
                                         color: Colors.red),
-                                    onPressed: () => _removePet(pet.id),
+                                    onPressed: () => _confirmAndDeletePet(pet),
                                   ),
                                 ],
                               ),
@@ -1060,6 +1090,9 @@ class _ProfileTabState extends State<ProfileTab> {
               ),
             ),
         ],
+      ),
+      bottomNavigationBar: const SafeArea(
+        child: AdBanner(), // uses your adaptive banner + auto init/consent hook
       ),
     );
   }
@@ -1292,6 +1325,16 @@ class WalksListScreen extends StatelessWidget {
                     .orderBy('startedAt', descending: true)
                     .snapshots(),
                 builder: (context, snap) {
+                  String _fmtTotalDuration(int s) {
+                    if (s <= 0) return '0m';
+                    final h = s ~/ 3600;
+                    final m = (s % 3600) ~/ 60;
+                    final sec = s % 60;
+                    if (h > 0) return '${h}h ${m}m';
+                    if (m > 0) return '${m}m ${sec}s';
+                    return '${sec}s';
+                  }
+
                   if (snap.connectionState == ConnectionState.waiting) {
                     return const Center(child: CircularProgressIndicator());
                   }
@@ -1345,10 +1388,23 @@ class WalksListScreen extends StatelessWidget {
                     itemBuilder: (context, dayIndex) {
                       final day = days[dayIndex];
                       final dayDocs = byDay[day]!;
-                      // total steps for the day
                       final totalSteps = dayDocs.fold<int>(0, (sum, d) {
                         final m = d.data() as Map<String, dynamic>? ?? {};
                         return sum + ((m['steps'] as num?)?.toInt() ?? 0);
+                      });
+
+// total duration (sec) for the day
+                      final totalDurationSec = dayDocs.fold<int>(0, (sum, d) {
+                        final m = d.data() as Map<String, dynamic>? ?? {};
+                        final startedAt =
+                            (m['startedAt'] as Timestamp?)?.toDate();
+                        final endedAt = (m['endedAt'] as Timestamp?)?.toDate();
+                        final stored = (m['durationSec'] as num?)?.toInt();
+                        final dur = stored ??
+                            ((startedAt != null && endedAt != null)
+                                ? endedAt.difference(startedAt).inSeconds
+                                : 0);
+                        return sum + dur;
                       });
 
                       // nice date label
@@ -1375,7 +1431,8 @@ class WalksListScreen extends StatelessWidget {
                         children: [
                           _DayHeader(
                             label: dateLabel,
-                            stepsText: '${stepsFmt.format(totalSteps)} steps',
+                            stepsText:
+                                '${stepsFmt.format(totalSteps)} steps • ${_fmtTotalDuration(totalDurationSec)}',
                           ),
                           const SizedBox(height: 8),
                           ...dayDocs.map((doc) {
@@ -1856,12 +1913,15 @@ class _WalkDetailScreenState extends State<WalkDetailScreen> {
             case 'pee':
               icon = _peeIcon!;
               title = 'Pee';
+              break;
             case 'poop':
               icon = _poopIcon!;
               title = 'Poop';
+              break;
             default:
               icon = _cautionIcon!;
               title = 'Caution';
+              break;
           }
 
           final latLng = LatLng(pos.latitude, pos.longitude);
