@@ -28,7 +28,7 @@ class _EventsTabState extends State<EventsTab> {
   bool _isLoading = true;
   bool _isPaging = false;
   bool _hasMore = true;
-  DocumentSnapshot? _lastDoc;
+  DocumentSnapshot<Map<String, dynamic>>? _lastDoc;
 
   final List<ParkEvent> _allEvents = [];
   List<ParkEvent> _likedEvents = [];
@@ -40,6 +40,9 @@ class _EventsTabState extends State<EventsTab> {
   // Location
   loc.LocationData? _userLocation;
   final ScrollController _scroll = ScrollController();
+
+  // If the startDateTime CG index is missing, switch to fallback ordering.
+  bool _useFallbackOrder = false; // orderBy(__name__) + client sort
 
   @override
   void initState() {
@@ -56,8 +59,30 @@ class _EventsTabState extends State<EventsTab> {
   }
 
   Future<void> _init() async {
-    await _fetchUserLocation(); // if this fails, screen shows a message
-    await _fetchEvents(reset: true); // still fetch so we’re ready when enabled
+    await _fetchUserLocation(); // if this fails, we still fetch events
+    await _fetchEvents(reset: true);
+  }
+
+  void logFirestoreError(Object error, [StackTrace? stack]) {
+    if (error is FirebaseException) {
+      debugPrint('🔥 Firestore error');
+      debugPrint('  plugin: ${error.plugin}');
+      debugPrint('  code:   ${error.code}');
+      debugPrint('  msg:    ${error.message}');
+      if (error.message != null) {
+        final m = RegExp(r'https://console\.firebase\.google\.com\S+')
+            .firstMatch(error.message!);
+        if (m != null) {
+          debugPrint('  index link: ${m.group(0)}');
+        }
+      }
+    } else {
+      debugPrint('🔥 Non-Firebase error: $error');
+    }
+    if (stack != null) {
+      debugPrint('—— stack ——');
+      debugPrintStack(stackTrace: stack);
+    }
   }
 
   // ------------------ Location ------------------
@@ -75,9 +100,10 @@ class _EventsTabState extends State<EventsTab> {
         if (permission != loc.PermissionStatus.granted) return;
       }
       final data = await l.getLocation();
-      if (mounted) setState(() => _userLocation = data);
+      if (!mounted) return;
+      setState(() => _userLocation = data);
     } catch (_) {
-      // Do nothing — UI will ask user to enable location.
+      // UI will show inline prompt; we still show events list.
     }
   }
 
@@ -99,56 +125,83 @@ class _EventsTabState extends State<EventsTab> {
         _hasMore = true;
         _lastDoc = null;
         _allEvents.clear();
+        _useFallbackOrder = false; // retry fast path on hard refresh
       });
     } else {
       setState(() => _isPaging = true);
     }
 
     try {
-      Query baseQuery;
-      if (widget.parkIdFilter != null && widget.parkIdFilter!.isNotEmpty) {
-        baseQuery = FirebaseFirestore.instance
-            .collection('parks')
-            .doc(widget.parkIdFilter)
-            .collection('events');
-      } else {
-        baseQuery = FirebaseFirestore.instance.collectionGroup('events');
-      }
+      final Query<Map<String, dynamic>> baseQuery =
+          (widget.parkIdFilter != null && widget.parkIdFilter!.isNotEmpty)
+              ? FirebaseFirestore.instance
+                  .collection('parks')
+                  .doc(widget.parkIdFilter)
+                  .collection('events')
+              : FirebaseFirestore.instance.collectionGroup('events');
 
-      // Page by createdAt; client filters upcoming/recurring.
-      Query q =
-          baseQuery.orderBy('createdAt', descending: true).limit(pageSize);
+      // Primary: orderBy startDateTime (needs collection_group_asc single-field index)
+      Query<Map<String, dynamic>> q = _useFallbackOrder
+          ? baseQuery.orderBy(FieldPath.documentId).limit(pageSize)
+          : baseQuery.orderBy('startDateTime').limit(pageSize);
+
       if (_lastDoc != null) q = q.startAfterDocument(_lastDoc!);
 
-      final snap = await q.get();
+      late QuerySnapshot<Map<String, dynamic>> snap;
+
+      try {
+        snap = await q.get();
+      } on FirebaseException catch (e, st) {
+        logFirestoreError(e, st);
+        final msg = e.message ?? e.code;
+        final isMissingCgAsc = e.code == 'failed-precondition' &&
+            msg.contains('collection_group_asc') &&
+            msg.contains('startDateTime');
+
+        if (!_useFallbackOrder && isMissingCgAsc) {
+          // Switch to fallback and retry this page.
+          _useFallbackOrder = true;
+          Query<Map<String, dynamic>> fq =
+              baseQuery.orderBy(FieldPath.documentId).limit(pageSize);
+          if (_lastDoc != null) fq = fq.startAfterDocument(_lastDoc!);
+          snap = await fq.get();
+        } else {
+          rethrow;
+        }
+      }
+
       if (snap.docs.isNotEmpty) _lastDoc = snap.docs.last;
 
-      // Keep upcoming or recurring
       final now = DateTime.now();
+
+      // Keep upcoming or recurring
       final fetched =
           snap.docs.map((d) => ParkEvent.fromFirestore(d)).where((e) {
-        final recurring = (e.recurrence.toLowerCase() != 'one time' &&
-            e.recurrence.toLowerCase() != 'one-time' &&
-            e.recurrence.toLowerCase() != 'none');
+        final r = e.recurrence.toLowerCase();
+        final recurring = r != 'one time' && r != 'one-time' && r != 'none';
         final upcoming = e.endDateTime.isAfter(now);
         return recurring || upcoming;
       }).toList();
 
+      // If using fallback ordering, sort this page by startDateTime client-side.
+      if (_useFallbackOrder) {
+        fetched.sort((a, b) => a.startDateTime.compareTo(b.startDateTime));
+      }
+
       _allEvents.addAll(fetched);
 
-      // Prefetch park names
-      await _warmParkNames(_allEvents);
+      // Prefetch park names for any new events only
+      await _warmParkNames(fetched);
 
-      // Build visible sections (will respect “no location” in build)
+      // Build visible sections
       _recomputeSections();
 
-      if (mounted) {
-        setState(() {
-          _isLoading = false;
-          _isPaging = false;
-          _hasMore = snap.docs.length == pageSize;
-        });
-      }
+      if (!mounted) return;
+      setState(() {
+        _isLoading = false;
+        _isPaging = false;
+        _hasMore = snap.docs.length == pageSize;
+      });
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -165,7 +218,6 @@ class _EventsTabState extends State<EventsTab> {
   void _recomputeSections() {
     final uid = FirebaseAuth.instance.currentUser?.uid;
 
-    // Liked regardless of distance (we still compute, but won’t show if no location)
     _likedEvents = uid == null
         ? <ParkEvent>[]
         : _allEvents.where((e) => e.likes.contains(uid)).toList();
@@ -188,11 +240,11 @@ class _EventsTabState extends State<EventsTab> {
   }
 
   // ------------------ Helpers ------------------
-  Future<void> _warmParkNames(List<ParkEvent> events) async {
-    final missing = <String>{};
-    for (final e in events) {
-      if (!_parkNameById.containsKey(e.parkId)) missing.add(e.parkId);
-    }
+  Future<void> _warmParkNames(List<ParkEvent> justFetched) async {
+    final missing = <String>{
+      for (final e in justFetched)
+        if (!_parkNameById.containsKey(e.parkId)) e.parkId
+    };
     if (missing.isEmpty) return;
 
     final ids = missing.toList();
@@ -210,6 +262,12 @@ class _EventsTabState extends State<EventsTab> {
         _parkNameById.putIfAbsent(id, () => 'Park');
       }
     }
+  }
+
+  List<ParkEvent> _allEventsSortedByStart() {
+    final list = List<ParkEvent>.from(_allEvents);
+    list.sort((a, b) => a.startDateTime.compareTo(b.startDateTime));
+    return list;
   }
 
   double _distanceKm(double lat1, double lng1, double lat2, double lng2) {
@@ -230,64 +288,66 @@ class _EventsTabState extends State<EventsTab> {
   // ------------------ UI ------------------
   @override
   Widget build(BuildContext context) {
-    // If location is missing, show only the message — no fallbacks, no lists.
     final noLocation =
         _userLocation?.latitude == null || _userLocation?.longitude == null;
 
     return Scaffold(
-        body: Stack(
-          children: [
-            SafeArea(
-              child: _isLoading
-                  ? const Center(child: CircularProgressIndicator())
-                  : noLocation
-                      ? _EnableLocationMessage(onRetry: _fetchUserLocation)
-                      : RefreshIndicator(
-                          onRefresh: () => _fetchEvents(reset: true),
-                          child: ListView(
-                            controller: _scroll,
-                            padding: const EdgeInsets.fromLTRB(8, 8, 8, 120),
-                            children: [
-                              if (_likedEvents.isNotEmpty) ...[
-                                const _SectionTitle('Your Liked Events'),
-                                ..._likedEvents.map(
-                                    (e) => _eventCard(e, isFavorite: true)),
-                                const Divider(),
-                              ],
-                              const _SectionTitle('Nearby (within 2 km)'),
-                              if (_nearbyEvents.isEmpty)
-                                const _EmptyHint(
-                                    text: 'No events within 2 km.'),
-                              ..._nearbyEvents.map(_eventCard),
-                              if (_isPaging) ...[
-                                const SizedBox(height: 12),
-                                const Center(
-                                    child: CircularProgressIndicator()),
-                                const SizedBox(height: 12),
-                              ],
-                              if (!_isPaging &&
-                                  !_hasMore &&
-                                  (_likedEvents.isNotEmpty ||
-                                      _nearbyEvents.isNotEmpty))
-                                const Padding(
-                                  padding: EdgeInsets.symmetric(vertical: 16),
-                                  child: Center(child: Text('No more events')),
-                                ),
-                            ],
+      body: Stack(
+        children: [
+          SafeArea(
+            child: _isLoading
+                ? const Center(child: CircularProgressIndicator())
+                : RefreshIndicator(
+                    onRefresh: () => _fetchEvents(reset: true),
+                    child: ListView(
+                      controller: _scroll,
+                      padding: const EdgeInsets.fromLTRB(8, 8, 8, 120),
+                      children: [
+                        if (noLocation)
+                          _EnableLocationInline(onRetry: _fetchUserLocation),
+                        if (_likedEvents.isNotEmpty) ...[
+                          const _SectionTitle('Your Liked Events'),
+                          ..._likedEvents
+                              .map((e) => _eventCard(e, isFavorite: true)),
+                          const Divider(),
+                        ],
+                        if (!noLocation) ...[
+                          const _SectionTitle('Nearby (within 2 km)'),
+                          if (_nearbyEvents.isEmpty)
+                            const _EmptyHint(text: 'No events within 2 km.'),
+                          ..._nearbyEvents.map(_eventCard),
+                        ] else ...[
+                          const _SectionTitle('All Upcoming & Recurring'),
+                          ..._allEventsSortedByStart().map(_eventCard),
+                        ],
+                        if (_isPaging) ...[
+                          const SizedBox(height: 12),
+                          const Center(child: CircularProgressIndicator()),
+                          const SizedBox(height: 12),
+                        ],
+                        if (!_isPaging &&
+                            !_hasMore &&
+                            (_likedEvents.isNotEmpty ||
+                                _nearbyEvents.isNotEmpty ||
+                                (!noLocation && _allEvents.isNotEmpty)))
+                          const Padding(
+                            padding: EdgeInsets.symmetric(vertical: 16),
+                            child: Center(child: Text('No more events')),
                           ),
-                        ),
-            ),
-
-            // Fixed banner ad
-            const Positioned(
-              left: 0,
-              right: 0,
-              bottom: 0,
-              child: SafeArea(top: false, child: AdBanner()),
-            ),
-          ],
-        ),
-        floatingActionButton: null);
+                      ],
+                    ),
+                  ),
+          ),
+          const Positioned(
+            left: 0,
+            right: 0,
+            bottom: 0,
+            child: SafeArea(top: false, child: AdBanner()),
+          ),
+        ],
+      ),
+      floatingActionButton: null,
+    );
   }
 
   Widget _eventCard(ParkEvent e, {bool isFavorite = false}) {
@@ -395,8 +455,10 @@ class _EventsTabState extends State<EventsTab> {
                   IconButton(
                     tooltip: liked ? 'Unlike' : 'Like',
                     onPressed: () => _toggleLike(e),
-                    icon: Icon(liked ? Icons.favorite : Icons.favorite_border,
-                        color: liked ? Colors.green : Colors.grey),
+                    icon: Icon(
+                      liked ? Icons.favorite : Icons.favorite_border,
+                      color: liked ? Colors.green : Colors.grey,
+                    ),
                   ),
                   Text('${e.likes.length}',
                       style: const TextStyle(fontSize: 12)),
@@ -563,7 +625,8 @@ class _EventsTabState extends State<EventsTab> {
     final petList = <Map<String, dynamic>>[];
     try {
       for (var i = 0; i < userIds.length; i += 10) {
-        final chunk = userIds.sublist(i, (i + 10).clamp(0, userIds.length));
+        final end = (i + 10) > userIds.length ? userIds.length : (i + 10);
+        final chunk = userIds.sublist(i, end);
         final snapshots = await FirebaseFirestore.instance
             .collection('pets')
             .where('ownerId', whereIn: chunk)
@@ -632,43 +695,37 @@ class _EmptyHint extends StatelessWidget {
   }
 }
 
-class _EnableLocationMessage extends StatelessWidget {
+class _EnableLocationInline extends StatelessWidget {
   final Future<void> Function() onRetry;
-  const _EnableLocationMessage({Key? key, required this.onRetry})
+  const _EnableLocationInline({Key? key, required this.onRetry})
       : super(key: key);
 
   @override
   Widget build(BuildContext context) {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(24, 24, 24, 120),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Icon(Icons.location_off, size: 48, color: Colors.grey),
-            const SizedBox(height: 12),
-            const Text(
-              'Turn on Location Services to use Events Nearby.',
-              textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 16),
+    return Container(
+      margin: const EdgeInsets.fromLTRB(8, 4, 8, 12),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.orange.shade50,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.orange.shade200),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.location_off, color: Colors.orange),
+          const SizedBox(width: 10),
+          const Expanded(
+            child: Text(
+              'Turn on Location Services to see events near you (2 km).',
+              style: TextStyle(fontSize: 13),
             ),
-            const SizedBox(height: 8),
-            const Text(
-              'We use your location to find park events within 2 km.',
-              textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 13, color: Colors.black54),
-            ),
-            const SizedBox(height: 16),
-            ElevatedButton.icon(
-              onPressed: onRetry,
-              icon: const Icon(Icons.my_location),
-              label: const Text('Enable / Retry'),
-              style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFF567D46),
-                  foregroundColor: Colors.white),
-            ),
-          ],
-        ),
+          ),
+          TextButton.icon(
+            onPressed: onRetry,
+            icon: const Icon(Icons.my_location, size: 16),
+            label: const Text('Enable'),
+          ),
+        ],
       ),
     );
   }

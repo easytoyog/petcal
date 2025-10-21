@@ -853,19 +853,10 @@ class _MapTabState extends State<MapTab>
 
   @override
   void dispose() {
-    if (_walk.isActive && !_finishingWalk) {
-      _manualFinishing = true;
-      // We cannot show UI here; do a silent finalize best-effort
-      // ignore: discarded_futures
-      () async {
-        try {
-          await _walk.stop();
-          await _handleWalkFinished(auto: true, silent: true);
-        } finally {
-          _manualFinishing = false;
-        }
-      }();
-    }
+    // ❌ Do NOT stop/finish the walk here. Users may just be switching tabs.
+    // (Removed: the _walk.stop() + _handleWalkFinished(...) block)
+
+    // Optional: keep background mode relaxed when leaving the map UI
     () async {
       try {
         await _location.enableBackgroundMode(enable: false);
@@ -878,14 +869,20 @@ class _MapTabState extends State<MapTab>
       s.cancel();
     }
     _parksSubs.clear();
+
     _locationSaveDebounce?.cancel();
     _filterDebounce?.cancel();
     _parksUiDebounce?.cancel();
     _uiTicker?.cancel();
     _adManager.dispose();
     _mapController?.dispose();
-    _walk.removeListener(_walkListener);
-    _walk.dispose();
+
+    // ❌ Don’t dispose the WalkManager here; let it keep running.
+    // _walk.removeListener(_walkListener);  // <-- keep or remove based on your needs:
+    _walk.removeListener(
+        _walkListener); // keep this so MapTab doesn’t hold callbacks
+    // _walk.dispose();                      // <-- remove this line
+
     super.dispose();
   }
 
@@ -2275,16 +2272,16 @@ class _MapTabState extends State<MapTab>
                             },
                           ),
                         ),
-                        // const SizedBox(width: 12),
-                        // Expanded(
-                        //   child: _BigActionButton(
-                        //    label: "Add Event",
-                        //   onPressed: () {
-                        //    Navigator.of(context).pop();
-                        //    _addEvent(parkId, parkLatitude, parkLongitude);
-                        //  },
-                        //),
-                        //),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: _BigActionButton(
+                            label: "Add Event",
+                            onPressed: () {
+                              Navigator.of(context).pop();
+                              _addEvent(parkId, parkLatitude, parkLongitude);
+                            },
+                          ),
+                        ),
                       ],
                     ),
                   ),
