@@ -47,6 +47,56 @@ function todayWindowInTz(tz) {
   };
 }
 
+// --- Message rotation helpers ---
+function hashStr(s) {
+  // simple djb2
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h) + s.charCodeAt(i);
+  return h >>> 0; // uint32
+}
+
+function pickDailyRecapBody({ uid, dayKey, steps, minutes, niceTime }) {
+  // pools: use short, cheerful lines that fit push limits
+  const withTime = [
+    (s,t) => `🐶💖 Pawsome day! ${s.toLocaleString()} steps and ${t} of together-time`,
+    (s,t) => `🐾 You guys got moving—${s.toLocaleString()} steps and ${t}!`,
+    (s,t) => `🌟 Nice work! ${s.toLocaleString()} steps + ${t} out and about`,
+    (s,t) => `👏 High fives! ${s.toLocaleString()} steps and ${t} with your pup`,
+    (s,t) => `💚 Quality time: ${s.toLocaleString()} steps, ${t} together`,
+    (s,t) => `🏅 You crushed it—${s.toLocaleString()} steps and ${t}!`,
+    (s,t) => `🌿 Fresh air score: ${s.toLocaleString()} steps + ${t}`,
+  ];
+  const stepsOnly = [
+    s => `🐶💖 You and your pup got in ${s.toLocaleString()} steps today—love that quality time`,
+    s => `🌟 Nice! ${s.toLocaleString()} steps together today`,
+    s => `👏 Great job—${s.toLocaleString()} steps with your best buddy`,
+    s => `🐾 Way to go! ${s.toLocaleString()} steps logged`,
+    s => `🏅 Strong day: ${s.toLocaleString()} steps`,
+    s => `🌿 You moved! ${s.toLocaleString()} steps today`,
+  ];
+
+  const zeroDay = [
+    () => `🐾 Still time to make memories—try a quick 10-minute lap with your best buddy`,
+    () => `🌿 A short stroll feels great—how about a quick loop?`,
+    () => `🐕 A little walk goes a long way—want to step outside?`,
+    () => `💚 Tiny wins count—take a few minutes with your pup`,
+    () => `✨ Quick stretch break? Your buddy will love it`,
+    () => `🙂 Even a short walk can brighten the day`,
+  ];
+
+  let pool;
+  if (steps > 0 && minutes > 0 && niceTime) pool = withTime;
+  else if (steps > 0) pool = stepsOnly;
+  else pool = zeroDay;
+
+  const seed = `${uid}|${dayKey}`;
+  const idx = hashStr(seed) % pool.length;
+
+  const template = pool[idx];
+  return (niceTime ? template(steps, niceTime) : template(steps));
+}
+
+
 async function sumStepsAndMinutesForUserDay(uid, start, end) {
   const snap = await db
     .collection("owners").doc(uid)
@@ -461,18 +511,16 @@ exports.sendDailyStepsRecap = onSchedule(
 
         const { steps, minutes } = await sumStepsAndMinutesForUserDay(uid, win.start, win.end);
 
-        const timePart = win.now.toFormat("h:mm a");
         const niceTime = minutes > 0 ? formatWalkMinutes(minutes) : null;
 
         // ——— Upbeat, “feel-good” copy ———
-        let body;
-        if (steps > 0 && niceTime) {
-          body = `🐶💖 Pawsome day! ${steps.toLocaleString()} steps and ${niceTime} of together-time • ${timePart}`;
-        } else if (steps > 0) {
-          body = `🐶💖 You and your pup got in ${steps.toLocaleString()} steps today—love that quality time • ${timePart}`;
-        } else {
-          body = `🐾 Still time to make memories—try a quick 10-minute lap with your best buddy • ${timePart}`;
-        }
+        const body = pickDailyRecapBody({
+          uid,
+          dayKey: win.todayKey,
+          steps,
+          minutes,
+          niceTime,
+        });
 
         try {
           await getMessaging().send({
@@ -486,7 +534,6 @@ exports.sendDailyStepsRecap = onSchedule(
               day: win.todayKey,
               steps: String(steps),
               minutes: String(minutes),
-              localTime: timePart,
               click_action: "FLUTTER_NOTIFICATION_CLICK",
             },
             android: {
