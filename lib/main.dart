@@ -45,7 +45,7 @@ import 'package:inthepark/screens/wait_screen.dart';
 import 'package:inthepark/services/notification_prefs.dart';
 import 'package:app_tracking_transparency/app_tracking_transparency.dart';
 
-import 'package:flutter_app_badger/flutter_app_badger.dart';
+import 'package:app_badge_plus/app_badge_plus.dart';
 
 bool _appCheckActivated = false;
 
@@ -211,7 +211,7 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     // Clear any lingering app icon badge when the app starts
-    FlutterAppBadger.removeBadge();
+    AppBadgePlus.updateBadge(0);
   }
 
   @override
@@ -224,7 +224,7 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       // Clear badge again when returning to the foreground
-      FlutterAppBadger.removeBadge();
+      AppBadgePlus.updateBadge(0);
     }
   }
 

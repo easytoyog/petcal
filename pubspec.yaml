@@ -53,8 +53,8 @@ dependencies:
   flutter_timezone: ^5.0.0
   permission_handler: ^12.0.1  
   app_tracking_transparency: ^2.0.4
-  flutter_app_badger: ^1.5.0   # or latest
   flutter_native_splash: ^2.4.6
+  app_badge_plus: ^1.2.3
 
 flutter_launcher_icons:
   ios: true
@@ -70,6 +70,8 @@ dev_dependencies:
   flutter_lints: ^2.0.0
 
 flutter_native_splash:
+  android: false
+  ios: true
   color: "#FDF8E1"              # background color (light)
   image: assets/icon/icon.png # centered logo
   android_gravity: center
