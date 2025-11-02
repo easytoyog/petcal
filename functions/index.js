@@ -20,6 +20,56 @@ admin.initializeApp();
 const db = getFirestore();
 
 // ---------- Small helpers ----------
+// add these helpers near the top (you already have similar ones)
+// New helpers
+function sendKeyDocRef(uid, utcKey) {
+  return db.collection("owners").doc(uid)
+    .collection("stats").doc("dailyStepsNudge")
+    .collection("sends").doc(utcKey); // canonical per-UTC-day
+}
+
+async function tryReserveSend(uid, todayKey, tz) {
+  const ref = sendKeyDocRef(uid, todayKey);
+  await ref.create({
+    reservedAt: admin.firestore.FieldValue.serverTimestamp(),
+    tz: tz || "UTC",
+    status: "reserved", // reserved | sent | failed
+  }); // throws if already exists
+  return ref;
+}
+
+async function markSendStatus(ref, status, extra = {}) {
+  await ref.set({
+    status,
+    ...extra,
+    updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+  }, { merge: true });
+}
+
+function utcDayKey(date = DateTime.utc()) {
+  return date.toUTC().toFormat("yyyy-LL-dd");
+}
+
+async function getOwnerName(uid) {
+  try {
+    const p = await db.collection("public_profiles").doc(uid).get();
+    const n = p.exists ? String(p.get("displayName") || "").trim() : "";
+    return n || "Someone";
+  } catch (e) {                          // ← this trips ESLint/parser
+    return "Someone";
+  }
+}
+
+async function getParkNameSafe(parkId) {
+  try {
+    const p = await db.collection("parks").doc(parkId).get();
+    const n = p.exists ? String(p.get("name") || "").trim() : "";
+    return n || "this park";
+  } catch (e) {                         // ← same here
+    return "this park";
+  }
+}
+
 function dateToDayUTCString(d) {
   const y = d.getUTCFullYear();
   const m = String(d.getUTCMonth() + 1).padStart(2, "0");
@@ -58,13 +108,22 @@ function hashStr(s) {
 function pickDailyRecapBody({ uid, dayKey, steps, minutes, niceTime }) {
   // pools: use short, cheerful lines that fit push limits
   const withTime = [
-    (s,t) => `🐶💖 Pawsome day! ${s.toLocaleString()} steps and ${t} of together-time`,
-    (s,t) => `🐾 You guys got moving—${s.toLocaleString()} steps and ${t}!`,
-    (s,t) => `🌟 Nice work! ${s.toLocaleString()} steps + ${t} out and about`,
-    (s,t) => `👏 High fives! ${s.toLocaleString()} steps and ${t} with your pup`,
-    (s,t) => `💚 Quality time: ${s.toLocaleString()} steps, ${t} together`,
-    (s,t) => `🏅 You crushed it—${s.toLocaleString()} steps and ${t}!`,
-    (s,t) => `🌿 Fresh air score: ${s.toLocaleString()} steps + ${t}`,
+    (s,t) => `🐶✨ What a day! You and your buddy logged ${s.toLocaleString()} steps and ${t} of pure together-time. Tails up!`,
+    (s,t) => `🌟 Proud parent moment: ${s.toLocaleString()} steps and ${t} outside together. Your pup’s heart (and paws) thank you.`,
+    (s,t) => `🥇 Gold-star walk team! ${s.toLocaleString()} steps + ${t} exploring the world—what a gift to your pup.`,
+    (s,t) => `💚 Quality time unlocked: ${s.toLocaleString()} steps and ${t} of sniffing, strolling, and smiles. Nice work!`,
+    (s,t) => `🦴 You showed up today—${s.toLocaleString()} steps and ${t} making memories with your best friend. So good!`,
+    (s,t) => `🌿 Fresh-air champions: ${s.toLocaleString()} steps over ${t}. That’s love, routine, and wag-worthy effort.`,
+    (s,t) => `👏 High-five to the hooman! ${s.toLocaleString()} steps and ${t} focused on your pup. That’s real dedication.`,
+    (s,t) => `🏅 You crushed it: ${s.toLocaleString()} steps + ${t} of adventure. Your pup’s zoomies are well earned!`,
+    (s,t) => `💫 Everyday hero stuff—${s.toLocaleString()} steps and ${t} together. Healthy, happy, and deeply loved.`,
+    (s,t) => `🎉 Big win for the pack: ${s.toLocaleString()} steps and ${t} of bond-building. Keep that momentum!`,
+    (s,t) => `🌞 Sunshine or not, you did it—${s.toLocaleString()} steps and ${t} walking with your pup. Heart full, paws tired.`,
+    (s,t) => `🐾 Pack pride! ${s.toLocaleString()} steps and ${t} outside. Little habits, huge love. Way to show up.`,
+    (s,t) => `🧡 Together time FTW: ${s.toLocaleString()} steps in ${t}. Your pup will be dreaming happy tonight.`,
+    (s,t) => `🚶‍♀️+🐕 = 💖 ${s.toLocaleString()} steps and ${t} of connection. That’s the good stuff—nicely done!`,
+    (s,t) => `🌈 You made today count—${s.toLocaleString()} steps and ${t} focused on your four-legged fave. Proud of you!`,
+    (s,t) => `🔥 Consistency looks good on you: ${s.toLocaleString()} steps and ${t} out there together. Keep it rolling!`,
   ];
   const stepsOnly = [
     s => `🐶💖 You and your pup got in ${s.toLocaleString()} steps today—love that quality time`,
@@ -115,24 +174,6 @@ async function sumStepsAndMinutesForUserDay(uid, start, end) {
     if (typeof dur === "number" && isFinite(dur)) minutes += dur / 60;
   });
   return { steps, minutes: Math.round(minutes) };
-}
-
-async function alreadySentToday(uid, todayKey) {
-  const doc = await db
-    .collection("owners").doc(uid)
-    .collection("stats").doc("dailyStepsNudge")
-    .get();
-  return doc.exists && doc.get("lastSentDay") === todayKey;
-}
-
-async function markSent(uid, todayKey, tz) {
-  await db.collection("owners").doc(uid)
-    .collection("stats").doc("dailyStepsNudge")
-    .set({
-      lastSentDay: todayKey,
-      lastSentAt: admin.firestore.FieldValue.serverTimestamp(),
-      tz: tz || "UTC",
-    }, { merge: true });
 }
 
 async function getOwnerDisplayName(uid) {
@@ -286,33 +327,71 @@ exports.notifyFriendCheckIn = onDocumentCreated(
   }
 );
 
-// =========================
-// Auto-checkout (3 hours) — runs every 10 minutes
-// =========================
-exports.autoCheckoutInactiveUsers = onSchedule(
-  { schedule: "every 10 minutes" },
-  async () => {
-    const threeHoursAgo = new Date(Date.now() - 3 * 60 * 60 * 1000);
+exports.autoCheckoutInactiveUsers = onSchedule({ schedule: "every 10 minutes" }, async () => {
+  const now = new Date();
+  const THREE_HOURS = 3 * 60 * 60 * 1000;
+  const threeHoursAgo = new Date(now.getTime() - THREE_HOURS);
+  const twelveHoursAhead = new Date(now.getTime() + 12 * 60 * 60 * 1000);
 
-    const parksSnapshot = await db.collection("parks").get();
-    for (const parkDoc of parksSnapshot.docs) {
-      const activeUsersRef = parkDoc.ref.collection("active_users");
-      const activeUsersSnapshot = await activeUsersRef.get();
+  const collectRefs = async () => {
+    const uniq = new Map();
 
-      for (const userDoc of activeUsersSnapshot.docs) {
-        const checkedInAt = userDoc.get("checkedInAt");
-        const hasToDate =
-          checkedInAt && typeof checkedInAt.toDate === "function";
+    // 1) Properly stamped & stale
+    const q1 = await db.collectionGroup("active_users")
+      .where("checkedInAt", "<", threeHoursAgo).get();
+    q1.docs.forEach(d => uniq.set(d.ref.path, d.ref));
 
-        if (hasToDate && checkedInAt.toDate() < threeHoursAgo) {
-          // Deleting triggers onDocumentDeleted below.
-          await userDoc.ref.delete();
-        }
-      }
+    // 2) Bad future timestamps (client clock wrong)
+    const q3 = await db.collectionGroup("active_users")
+      .where("checkedInAt", ">", twelveHoursAhead).get();
+    q3.docs.forEach(d => uniq.set(d.ref.path, d.ref));
+
+    // 3) Legacy field `checkInAt` (no checkedInAt)
+    const qLegacy = await db.collectionGroup("active_users")
+      .where("checkInAt", "<", threeHoursAgo).get();
+    qLegacy.docs.forEach(d => uniq.set(d.ref.path, d.ref));
+
+    // 4) Unknown/missing `checkedInAt`: can’t query “missing”, so scan a bounded window
+    // Pull candidates by createdAt and inspect in process.
+    const qCreated = await db.collectionGroup("active_users")
+      .where("createdAt", "<", threeHoursAgo).get();
+    qCreated.docs.forEach(d => uniq.set(d.ref.path, d.ref));
+
+    return Array.from(uniq.values());
+  };
+
+  const refs = await collectRefs();
+  if (!refs.length) return null;
+
+  // Filter & normalize before deciding to delete
+  const toDelete = [];
+  for (const ref of refs) {
+    const snap = await ref.get();
+    if (!snap.exists) continue;
+    const x = snap.data() || {};
+
+    // Prefer checkedInAt; fallback to legacy checkInAt; fallback to createdAt
+    const ts = x.checkedInAt || x.checkInAt || x.createdAt;
+    const checkInDate = (ts && typeof ts.toDate === "function") ? ts.toDate() : null;
+
+    // If we still can’t tell when they checked in, or it’s clearly stale → delete
+    if (!checkInDate || checkInDate < threeHoursAgo || checkInDate > twelveHoursAhead) {
+      toDelete.push(ref);
     }
-    return null;
   }
-);
+
+  if (!toDelete.length) return null;
+
+  // Bulk delete → will trigger onDocumentDeleted to decrement counts + close visit
+  const writer = db.bulkWriter();
+  toDelete.forEach(r => writer.delete(r));
+  await writer.close();
+
+  console.log(`[autoCheckout] Deleted ${toDelete.length} stale active_users.`);
+  return null;
+});
+
+
 
 // =========================
 // Admin callables
@@ -477,79 +556,72 @@ exports.mirrorOwnerToPublicProfile = onDocumentWritten(
 // =========================
 // Daily steps recap (with local time + minutes)
 // =========================
-exports.sendDailyStepsRecap = onSchedule(
-  { schedule: "every 5 minutes", timeZone: "UTC" },
-  async () => {
-    // All owners that can receive pushes (opt-out supported with dailyStepsOptIn=false)
-    const ownersSnap = await db.collection("owners")
-      .where("fcmToken", "!=", null)
-      .get();
+exports.sendDailyStepsRecap = onSchedule({ schedule: "every 5 minutes", timeZone: "UTC" }, async () => {
+  const ownersSnap = await db.collection("owners").where("fcmToken", "!=", null).get();
+  const owners = ownersSnap.docs.filter(d => {
+    const x = d.data() || {};
+    return x.dailyStepsOptIn !== false && typeof x.fcmToken === "string" && x.fcmToken.trim();
+  });
 
-    const owners = ownersSnap.docs.filter(d => {
-      const data = d.data() || {};
-      return data.dailyStepsOptIn !== false
-          && typeof data.fcmToken === "string"
-          && data.fcmToken.trim();
-    });
+  const seenTokens = new Set();
+  const chunk = (arr, n) => arr.reduce((a,_,i)=> (i%n? a[a.length-1].push(arr[i]) : a.push([arr[i]]), a), []);
 
-    const chunk = (arr, n) =>
-      arr.reduce((a,_,i)=> (i%n? a[a.length-1].push(arr[i]) : a.push([arr[i]]), a), []);
+  for (const group of chunk(owners, 50)) {
+    await Promise.all(group.map(async (doc) => {
+      const uid = doc.id;
+      const data = doc.data() || {};
+      const tz = typeof data.tz === "string" && data.tz ? data.tz : "UTC";
+      const token = String(data.fcmToken || "").trim();
+      if (!token) return;
 
-    for (const group of chunk(owners, 50)) {
-      await Promise.all(group.map(async (doc) => {
-        const uid = doc.id;
-        const data = doc.data() || {};
-        const tz = typeof data.tz === "string" && data.tz ? data.tz : "UTC";
-        const token = data.fcmToken;
+      // token de-dupe across owners
+      if (seenTokens.has(token)) return;
+      seenTokens.add(token);
 
-        let win = todayWindowInTz(tz);
-        if (!win.now.isValid) win = todayWindowInTz("UTC");
+      let win = todayWindowInTz(tz);
+      if (!win.now.isValid) win = todayWindowInTz("UTC");
 
-        // Send between 21:00–21:09 local time, once per day
-        if (win.now.hour !== 21 || win.now.minute >= 10) return;
-        if (await alreadySentToday(uid, win.todayKey)) return;
+      // only send between 21:00–21:09 local time
+      if (win.now.hour !== 21 || win.now.minute >= 10) return;
 
-        const { steps, minutes } = await sumStepsAndMinutesForUserDay(uid, win.start, win.end);
+      const utcKey = utcDayKey();
+      const localKey = win.todayKey;
 
-        const niceTime = minutes > 0 ? formatWalkMinutes(minutes) : null;
+      let sendRef;
+      try {
+        sendRef = await tryReserveSend(uid, utcKey, tz);
+        await markSendStatus(sendRef, "reserved", { localDay: localKey });
+      } catch (e) {
+        return; // already reserved/sent for this UTC day
+      }
 
-        // ——— Upbeat, “feel-good” copy ———
-        const body = pickDailyRecapBody({
-          uid,
-          dayKey: win.todayKey,
-          steps,
-          minutes,
-          niceTime,
+      const { steps, minutes } = await sumStepsAndMinutesForUserDay(uid, win.start, win.end);
+      const niceTime = minutes > 0 ? formatWalkMinutes(minutes) : null;
+      const body = pickDailyRecapBody({ uid, dayKey: localKey, steps, minutes, niceTime });
+
+      try {
+        await getMessaging().send({
+          token,
+          notification: { title: "Daily Dog Walk Recap", body },
+          data: {
+            type: "daily_steps",
+            utcDay: utcKey,
+            localDay: localKey,
+            steps: String(steps),
+            minutes: String(minutes),
+            click_action: "FLUTTER_NOTIFICATION_CLICK",
+          },
+          android: { notification: { channelId: "daily_reminders", priority: "HIGH" } },
+          apns: { payload: { aps: { sound: "default" } } },
         });
-
-        try {
-          await getMessaging().send({
-            token,
-            notification: {
-              title: "Daily Dog Walk Recap",
-              body,
-            },
-            data: {
-              type: "daily_steps",
-              day: win.todayKey,
-              steps: String(steps),
-              minutes: String(minutes),
-              click_action: "FLUTTER_NOTIFICATION_CLICK",
-            },
-            android: {
-              notification: { channelId: "daily_reminders", priority: "HIGH" },
-            },
-            apns: { payload: { aps: { sound: "default" } } },
-          });
-          await markSent(uid, win.todayKey, tz);
-        } catch (e) {
-          console.error("Failed sending daily steps to", uid, e);
-        }
-      }));
-    }
-    return null;
+        await markSendStatus(sendRef, "sent", { steps, minutes });
+      } catch (e) {
+        await markSendStatus(sendRef, "failed", { error: String((e && e.message) || e) });
+      }
+    }));
   }
-);
+  return null;
+});
 
 
 // =========================
@@ -635,3 +707,86 @@ exports.notifyParkChat = require("firebase-functions/v2/firestore")
 
     console.log(`Chat fanout done → park=${parkId} success=${success} failure=${failure} recipients=${tokens.length}`);
   });
+
+exports.mirrorVisit = onDocumentWritten('park_visits/{visitId}', async (event) => {
+  const visitId = event.params.visitId;
+
+  const afterSnap = (event.data && event.data.after) ? event.data.after : null;
+  const beforeSnap = (event.data && event.data.before) ? event.data.before : null;
+  const after = (afterSnap && typeof afterSnap.data === "function") ? afterSnap.data() : null;
+  const before = (beforeSnap && typeof beforeSnap.data === "function") ? beforeSnap.data() : null;
+
+  // Delete → remove mirrors
+  if (!after) {
+    if (before && before.userId && before.parkId) {
+      await Promise.allSettled([
+        db.collection('owners').doc(before.userId).collection('visit_history').doc(visitId).delete(),
+        db.collection('parks').doc(before.parkId).collection('visit_history').doc(visitId).delete(),
+      ]);
+    }
+    return;
+  }
+
+  const userId = after.userId;
+  const parkId = after.parkId;
+  const checkInAt = after.checkInAt;
+  const checkOutAt = after.checkOutAt;
+  const durationMinutes = after.durationMinutes;
+  const day = after.day;
+
+  if (typeof userId !== 'string' || typeof parkId !== 'string') return;
+
+  const norm = {
+    checkInAt: checkInAt ? checkInAt : admin.firestore.FieldValue.serverTimestamp(),
+    checkOutAt: checkOutAt ? checkOutAt : null,
+    durationMinutes: Number.isFinite(durationMinutes) ? durationMinutes : null,
+    day: (typeof day === 'string' && day) ? day : dateToDayUTCString(new Date()),
+  };
+
+  const [ownerName, parkName] = await Promise.all([
+    getOwnerName(userId),
+    getParkNameSafe(parkId),
+  ]);
+
+  const mirrorData = {
+    ...after,
+    ...norm,
+    visitId,
+    ownerName,
+    parkName,
+    mirroredAt: admin.firestore.FieldValue.serverTimestamp(),
+  };
+
+  await Promise.allSettled([
+    db.collection('owners').doc(userId).collection('visit_history').doc(visitId).set(mirrorData, { merge: true }),
+    db.collection('parks').doc(parkId).collection('visit_history').doc(visitId).set(mirrorData, { merge: true }),
+  ]);
+});
+
+exports.onActiveUserCreated = onDocumentCreated(
+  "parks/{parkId}/active_users/{uid}",
+  async (event) => {
+    const ref = event.data && event.data.ref ? event.data.ref : null;
+    if (!ref) return;
+     const d = (event.data && typeof event.data.data === "function")
+   ? event.data.data()
+   : {};
+
+    // Normalize to `checkedInAt` (the field your cleaner expects)
+    const updates = {
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    };
+
+    if (!d.checkedInAt && d.checkInAt && typeof d.checkInAt.toDate === "function") {
+      updates.checkedInAt = d.checkInAt;        // migrate if client wrote checkInAt
+    } else if (!d.checkedInAt) {
+      updates.checkedInAt = admin.firestore.FieldValue.serverTimestamp();
+    }
+
+    if (!d.createdAt) {
+      updates.createdAt = admin.firestore.FieldValue.serverTimestamp();
+    }
+
+    await ref.set(updates, { merge: true });
+  }
+);

@@ -7,7 +7,7 @@ class OwnerDetailsScreen extends StatefulWidget {
   const OwnerDetailsScreen({Key? key}) : super(key: key);
 
   @override
-  _OwnerDetailsScreenState createState() => _OwnerDetailsScreenState();
+  State<OwnerDetailsScreen> createState() => _OwnerDetailsScreenState();
 }
 
 class _OwnerDetailsScreenState extends State<OwnerDetailsScreen> {
@@ -15,6 +15,8 @@ class _OwnerDetailsScreenState extends State<OwnerDetailsScreen> {
   final FocusNode firstNameFocusNode = FocusNode();
   final TextEditingController lastNameController = TextEditingController();
   final TextEditingController phoneController = TextEditingController();
+
+  bool _isSaving = false;
 
   @override
   void initState() {
@@ -34,6 +36,7 @@ class _OwnerDetailsScreenState extends State<OwnerDetailsScreen> {
   }
 
   Future<void> saveOwnerDetails() async {
+    if (_isSaving) return; // prevent re-entry
     if (firstNameController.text.trim().isEmpty ||
         lastNameController.text.trim().isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -42,6 +45,7 @@ class _OwnerDetailsScreenState extends State<OwnerDetailsScreen> {
       return;
     }
 
+    setState(() => _isSaving = true);
     try {
       final user = FirebaseAuth.instance.currentUser!;
       final uid = user.uid;
@@ -80,15 +84,22 @@ class _OwnerDetailsScreenState extends State<OwnerDetailsScreen> {
         }
       });
 
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text("Owner details saved successfully!")),
       );
-      Navigator.pushNamed(context, '/petDetails');
+
+      // Avoid back-navigation to resubmit; replace the page.
+      Navigator.pushReplacementNamed(context, '/petDetails');
     } catch (e) {
       debugPrint("Error saving owner details: $e");
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Error saving details: $e")),
-      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("Error saving details: $e")),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isSaving = false);
     }
   }
 
@@ -125,8 +136,7 @@ class _OwnerDetailsScreenState extends State<OwnerDetailsScreen> {
         ),
       ),
       child: Scaffold(
-        backgroundColor: Colors
-            .transparent, // important so the gradient shows everywhere (no white gap)
+        backgroundColor: Colors.transparent, // so the gradient shows everywhere
         appBar: AppBar(
           title: const Text("Owner Details"),
           backgroundColor: const Color(0xFF567D46),
@@ -146,10 +156,11 @@ class _OwnerDetailsScreenState extends State<OwnerDetailsScreen> {
                     fontSize: 28,
                     fontWeight: FontWeight.bold,
                   ),
+                  textAlign: TextAlign.center,
                 ),
                 const SizedBox(height: 30),
 
-                // First name (icon: person)
+                // First name
                 TextField(
                   controller: firstNameController,
                   focusNode: firstNameFocusNode,
@@ -158,22 +169,21 @@ class _OwnerDetailsScreenState extends State<OwnerDetailsScreen> {
                   cursorColor: Colors.tealAccent,
                   decoration: _inputDecoration(
                     hint: "First Name (Required)",
-                    icon: Icons.person, // nicer for first name
+                    icon: Icons.person,
                   ),
                 ),
                 const SizedBox(height: 20),
 
-                // Last name (auto-capitalize words, icon: badge)
+                // Last name
                 TextField(
                   controller: lastNameController,
                   textInputAction: TextInputAction.next,
-                  textCapitalization: TextCapitalization
-                      .words, // auto-capitalize last name as you type
+                  textCapitalization: TextCapitalization.words,
                   style: const TextStyle(color: Colors.white),
                   cursorColor: Colors.tealAccent,
                   decoration: _inputDecoration(
                     hint: "Last Name (Required)",
-                    icon: Icons.account_circle, // clearer for surname/identity
+                    icon: Icons.account_circle,
                   ),
                 ),
                 const SizedBox(height: 20),
@@ -196,18 +206,25 @@ class _OwnerDetailsScreenState extends State<OwnerDetailsScreen> {
                   width: MediaQuery.of(context).size.width / 2,
                   child: ElevatedButton(
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.tealAccent,
+                      backgroundColor:
+                          _isSaving ? Colors.grey : Colors.tealAccent,
                       foregroundColor: Colors.black,
                       padding: const EdgeInsets.symmetric(vertical: 16.0),
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(12),
                       ),
                     ),
-                    onPressed: saveOwnerDetails,
-                    child: const Text(
-                      "Next Add Pets",
-                      style: TextStyle(fontSize: 18),
-                    ),
+                    onPressed: _isSaving ? null : saveOwnerDetails,
+                    child: _isSaving
+                        ? const SizedBox(
+                            height: 22,
+                            width: 22,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Text(
+                            "Next Add Pets",
+                            style: TextStyle(fontSize: 18),
+                          ),
                   ),
                 ),
                 const SizedBox(height: 30),

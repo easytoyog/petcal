@@ -5,6 +5,7 @@ import 'package:inthepark/screens/events_tab.dart';
 import 'package:inthepark/screens/friends_tab.dart';
 import 'package:inthepark/screens/profile_tab.dart';
 import 'package:inthepark/screens/service_tab.dart';
+import 'package:inthepark/widgets/streak_chip.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({Key? key}) : super(key: key);
@@ -50,21 +51,73 @@ class _HomeScreenState extends State<HomeScreen> {
     });
   }
 
+  void _goToMapTab() {
+    setState(() => _selectedIndex = 1); // assuming index 1 is MapTab
+  }
+
+  void _openWalkHistory(BuildContext context) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => WalksListScreen(onGoToMapTab: _goToMapTab),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final titles = ["Parks", "Explore", "Events", "Friends", "Services"];
 
     return Scaffold(
       appBar: AppBar(
-        title: Text(titles[_selectedIndex]),
         backgroundColor: const Color(0xFF567D46),
+        automaticallyImplyLeading: false,
+        title: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            // Left: Streak chip
+            Padding(
+              padding: const EdgeInsets.only(left: 8),
+              child: StreakChip(
+                elevation: 0,
+                background: Colors.white.withOpacity(0.95),
+                textStyle: const TextStyle(
+                  fontWeight: FontWeight.w800,
+                  fontSize: 12,
+                ),
+                onTap: () => _openWalkHistory(context),
+              ),
+            ),
+
+            // Center: Title text (expanded to truly center)
+            Expanded(
+              child: Center(
+                child: Text(
+                  titles[_selectedIndex],
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w700,
+                    fontSize: 24,
+                    color: Colors.black,
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+            ),
+
+            // Right: same width as left padding + icon size to balance visually
+            const SizedBox(width: 18),
+          ],
+        ),
         actions: [
           IconButton(
             icon: const Icon(Icons.person),
             onPressed: () {
               Navigator.push(
                 context,
-                MaterialPageRoute(builder: (_) => const ProfileTab()),
+                MaterialPageRoute(
+                  settings: const RouteSettings(name: '/profile'),
+                  builder: (_) => const ProfileTab(),
+                ),
               );
             },
           ),

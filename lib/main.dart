@@ -48,6 +48,36 @@ import 'package:app_tracking_transparency/app_tracking_transparency.dart';
 import 'package:app_badge_plus/app_badge_plus.dart';
 
 bool _appCheckActivated = false;
+final RouteObserver<PageRoute> routeObserver = RouteObserver<PageRoute>();
+final ValueNotifier<String?> currentRouteName = ValueNotifier<String?>('/');
+
+class RouteNameObserver extends RouteObserver<PageRoute<dynamic>> {
+  void _set(Route<dynamic>? route) {
+    if (route is PageRoute) {
+      currentRouteName.value = route.settings.name;
+    }
+  }
+
+  @override
+  void didPush(Route route, Route? previousRoute) {
+    _set(route);
+    super.didPush(route, previousRoute);
+  }
+
+  @override
+  void didPop(Route route, Route? previousRoute) {
+    _set(previousRoute);
+    super.didPop(route, previousRoute);
+  }
+
+  @override
+  void didReplace({Route? newRoute, Route? oldRoute}) {
+    _set(newRoute);
+    super.didReplace(newRoute: newRoute, oldRoute: oldRoute);
+  }
+}
+
+final routeNameObserver = RouteNameObserver();
 
 /// Configure Mobile Ads (test devices in debug, content rating, etc.)
 Future<void> _configureMobileAds() async {
@@ -240,11 +270,9 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
           secondary: const Color(0xFF365A38),
         ),
         textTheme: GoogleFonts.nunitoTextTheme(),
+        // Add any additional theme customization here
       ),
-
-      // Optional: keep a soft-update banner inside the app as well
-      builder: (context, child) => _SoftUpdateBanner(child: child),
-
+      navigatorObservers: [routeNameObserver],
       home: StreamBuilder<User?>(
         stream: FirebaseAuth.instance.authStateChanges(),
         builder: (context, snapshot) {
@@ -643,6 +671,7 @@ class _ForceUpdateScreen extends StatelessWidget {
 /// Login
 /// ───────────────────────────────────────────────────────────────────────────
 
+// --- ModernLoginScreen (drop-in) ---
 class ModernLoginScreen extends StatefulWidget {
   const ModernLoginScreen({Key? key}) : super(key: key);
 
@@ -665,22 +694,43 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
     super.dispose();
   }
 
+  InputDecoration _decoration({
+    required String hint,
+    required IconData icon,
+    double fillOpacity = 0.15,
+  }) {
+    return InputDecoration(
+      filled: true,
+      fillColor: Colors.white.withOpacity(fillOpacity),
+      hintText: hint,
+      hintStyle: const TextStyle(color: Colors.white70),
+      prefixIcon: Icon(icon, color: Colors.white),
+      border: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(12),
+        borderSide: BorderSide.none,
+      ),
+      focusedBorder: OutlineInputBorder(
+        borderRadius: BorderRadius.circular(12),
+        borderSide: const BorderSide(color: Colors.tealAccent, width: 2),
+      ),
+    );
+  }
+
   Future<void> _attemptLogin() async {
     if (_isLoading) return;
     setState(() => _isLoading = true);
 
     try {
-      await loginUsingEmailPassword(
+      await _loginUsingEmailPassword(
         email: emailController.text.trim(),
         password: passwordController.text,
-        context: context,
       );
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
   }
 
-  Future<void> saveUserFcmToken(User user) async {
+  Future<void> _saveUserFcmToken(User user) async {
     final messaging = FirebaseMessaging.instance;
     try {
       final settings = await messaging.getNotificationSettings();
@@ -708,56 +758,61 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
     }
   }
 
-  Future<User?> loginUsingEmailPassword({
+  Future<User?> _loginUsingEmailPassword({
     required String email,
     required String password,
-    required BuildContext context,
   }) async {
-    FirebaseAuth auth = FirebaseAuth.instance;
-    User? user;
+    final auth = FirebaseAuth.instance;
     try {
-      final userCredential = await auth.signInWithEmailAndPassword(
+      final cred = await auth.signInWithEmailAndPassword(
         email: email,
         password: password,
       );
-      user = userCredential.user;
+      final user = cred.user;
+      if (user == null) return null;
 
-      if (user != null) {
-        await user.reload();
-        if (!user.emailVerified) {
+      await user.reload();
+      if (!user.emailVerified) {
+        if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
-              content: Text("Please verify your email before logging in."),
-            ),
+                content: Text("Please verify your email before logging in.")),
           );
-          await FirebaseAuth.instance.signOut();
-          return null;
         }
+        await auth.signOut();
+        return null;
+      }
 
-        final doc = await FirebaseFirestore.instance
-            .collection('owners')
-            .doc(user.uid)
-            .get();
-        final data = doc.data() ?? {};
-        if (data['active'] == false) {
+      // App-side checks
+      final doc = await FirebaseFirestore.instance
+          .collection('owners')
+          .doc(user.uid)
+          .get();
+      final data = doc.data() ?? {};
+      if (data['active'] == false) {
+        if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
               content: Text(
-                "Your account has been deactivated. Please contact support.",
-              ),
+                  "Your account has been deactivated. Please contact support."),
             ),
           );
-          await FirebaseAuth.instance.signOut();
-          return null;
         }
+        await auth.signOut();
+        return null;
+      }
 
-        await saveUserFcmToken(user);
-        await upsertNotificationPrefs();
+      await _saveUserFcmToken(user);
+      await upsertNotificationPrefs();
 
-        if (!mounted) return user;
+      // NOTE: Removed TextInput.finishAutofillContext(shouldSave: true);
+
+      if (mounted) {
         Navigator.of(context).pushReplacementNamed('/profile');
       }
+      return user;
     } on FirebaseAuthException catch (e) {
+      if (!mounted) rethrow;
       switch (e.code) {
         case "user-not-found":
           ScaffoldMessenger.of(context).showSnackBar(
@@ -773,103 +828,71 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text("Login error: ${e.message}")),
           );
-          break;
       }
+      return null;
     }
-    return user;
   }
 
   @override
   Widget build(BuildContext context) {
     final screenWidth = MediaQuery.of(context).size.width;
-    print("✅ ModernLoginScreen.build");
+
     return Scaffold(
       body: Stack(
         children: [
-          // Main content
+          // Background
           Container(
             decoration: const BoxDecoration(
               gradient: LinearGradient(
-                colors: [Color(0xFF567D46), Color(0xFF365A38)],
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-              ),
+                  colors: [Color(0xFF567D46), Color(0xFF365A38)],
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight),
             ),
             child: Center(
               child: SingleChildScrollView(
                 padding: const EdgeInsets.symmetric(horizontal: 24.0),
+                // NOTE: Removed AutofillGroup; using plain Column now.
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
-                  crossAxisAlignment: CrossAxisAlignment.center,
                   children: [
-                    Image.asset(
-                      "assets/images/home_icon.png",
-                      width: screenWidth / 3,
-                    ),
+                    Image.asset("assets/images/home_icon.png",
+                        width: screenWidth / 3),
                     const SizedBox(height: 20),
                     Text(
                       "Connect, Play, Explore",
                       style: GoogleFonts.nunito(
-                        fontSize: 32,
-                        fontWeight: FontWeight.bold,
-                        color: Colors.white,
-                      ),
+                          fontSize: 32,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.white),
                     ),
                     const SizedBox(height: 40),
+
+                    // Email (no autofillHints)
                     TextField(
                       controller: emailController,
                       enabled: !_isLoading,
                       cursorColor: Colors.tealAccent,
                       style: const TextStyle(color: Colors.white),
-                      decoration: InputDecoration(
-                        filled: true,
-                        fillColor: Colors.white.withOpacity(0.15),
-                        hintText: "Email",
-                        hintStyle: const TextStyle(color: Colors.white70),
-                        prefixIcon: const Icon(Icons.mail, color: Colors.white),
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(12),
-                          borderSide: BorderSide.none,
-                        ),
-                        focusedBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(12),
-                          borderSide: const BorderSide(
-                            color: Colors.tealAccent,
-                            width: 2,
-                          ),
-                        ),
-                      ),
+                      decoration: _decoration(hint: "Email", icon: Icons.mail),
                       keyboardType: TextInputType.emailAddress,
                       textInputAction: TextInputAction.next,
                     ),
                     const SizedBox(height: 20),
+
+                    // Password (no autofillHints)
                     TextField(
                       controller: passwordController,
                       enabled: !_isLoading,
                       obscureText: true,
+                      enableSuggestions: false,
                       cursorColor: Colors.tealAccent,
                       style: const TextStyle(color: Colors.white),
-                      decoration: InputDecoration(
-                        filled: true,
-                        fillColor: Colors.white.withOpacity(0.15),
-                        hintText: "Password",
-                        hintStyle: const TextStyle(color: Colors.white70),
-                        prefixIcon: const Icon(Icons.lock, color: Colors.white),
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(12),
-                          borderSide: BorderSide.none,
-                        ),
-                        focusedBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(12),
-                          borderSide: const BorderSide(
-                            color: Colors.tealAccent,
-                            width: 2,
-                          ),
-                        ),
-                      ),
-                      onSubmitted: (_) => _attemptLogin(),
+                      decoration:
+                          _decoration(hint: "Password", icon: Icons.lock),
                       textInputAction: TextInputAction.done,
+                      onSubmitted: (_) => _attemptLogin(),
                     ),
+
                     const SizedBox(height: 10),
                     Align(
                       alignment: Alignment.centerRight,
@@ -883,20 +906,17 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
                                   arguments: emailController.text.trim(),
                                 );
                                 if (result is String && result.isNotEmpty) {
-                                  setState(() {
-                                    emailController.text = result;
-                                  });
+                                  setState(() => emailController.text = result);
                                 }
                               },
                         child: Text(
                           "Forgot password?",
                           style: GoogleFonts.nunito(
-                            color: Colors.lightBlueAccent,
-                            fontSize: 14,
-                          ),
+                              color: Colors.lightBlueAccent, fontSize: 14),
                         ),
                       ),
                     ),
+
                     const SizedBox(height: 30),
                     SizedBox(
                       width: MediaQuery.of(context).size.width / 2,
@@ -906,8 +926,7 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
                           backgroundColor: Colors.tealAccent,
                           foregroundColor: Colors.black,
                           shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
+                              borderRadius: BorderRadius.circular(12)),
                           elevation: 5,
                         ),
                         onPressed: _isLoading ? null : _attemptLogin,
@@ -916,25 +935,22 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
                                 height: 22,
                                 width: 22,
                                 child:
-                                    CircularProgressIndicator(strokeWidth: 2),
-                              )
+                                    CircularProgressIndicator(strokeWidth: 2))
                             : const Text("Log in",
                                 style: TextStyle(fontSize: 18)),
                       ),
                     ),
+
                     const SizedBox(height: 20),
                     GestureDetector(
                       onTap: _isLoading
                           ? null
-                          : () {
-                              Navigator.pushNamed(context, '/accountCreation');
-                            },
+                          : () =>
+                              Navigator.pushNamed(context, '/accountCreation'),
                       child: Text(
                         "Create New Account",
                         style: GoogleFonts.nunito(
-                          fontSize: 16,
-                          color: Colors.tealAccent,
-                        ),
+                            fontSize: 16, color: Colors.tealAccent),
                       ),
                     ),
                   ],

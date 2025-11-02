@@ -19,6 +19,65 @@ import 'dart:ui' as ui;
 import 'dart:async';
 import 'package:inthepark/widgets/ad_banner.dart';
 
+class VisitHistoryCta extends StatelessWidget {
+  const VisitHistoryCta({super.key, required this.onTap});
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.transparent,
+      child: Ink(
+        decoration: BoxDecoration(
+          // subtle “frosted glass” on top of your green gradient
+          color: Colors.white.withOpacity(0.92),
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: Colors.black.withOpacity(0.06)),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.12),
+              blurRadius: 16,
+              offset: const Offset(0, 8),
+            ),
+          ],
+        ),
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(16),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 40,
+                  height: 40,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF567D46),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: const Icon(Icons.park, color: Colors.white, size: 22),
+                ),
+                const SizedBox(width: 12),
+                const Text(
+                  'Visit History',
+                  style: TextStyle(
+                    fontSize: 15.5,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Icon(Icons.chevron_right,
+                    color: Colors.black.withOpacity(0.55)),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 /// ---------- Enticing gradient Share CTA ----------
 class ShareAppCta extends StatelessWidget {
   const ShareAppCta({super.key, required this.onPressed});
@@ -177,6 +236,13 @@ class _ProfileTabState extends State<ProfileTab> {
         composing: TextRange.empty,
       );
     }
+  }
+
+  void _openVisitHistory() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const VisitHistoryScreen()),
+    );
   }
 
   @override
@@ -965,7 +1031,11 @@ class _ProfileTabState extends State<ProfileTab> {
                     ),
                     const SizedBox(height: 16),
                     _buildStreakCard(),
-
+                    const SizedBox(height: 12),
+                    SizedBox(
+                      width: double.infinity,
+                      child: VisitHistoryCta(onTap: _openVisitHistory),
+                    ),
                     const SizedBox(height: 16),
 
                     // Pets header + add
@@ -1290,7 +1360,9 @@ class _AvatarPicker extends StatelessWidget {
 }
 
 class WalksListScreen extends StatelessWidget {
-  const WalksListScreen({super.key});
+  final VoidCallback? onGoToMapTab;
+
+  const WalksListScreen({super.key, this.onGoToMapTab});
 
   @override
   Widget build(BuildContext context) {
@@ -1347,12 +1419,53 @@ class WalksListScreen extends StatelessWidget {
                     );
                   }
                   final docs = snap.data?.docs ?? [];
+// ---------- EMPTY STATE (only when no walks) ----------
                   if (docs.isEmpty) {
-                    return const Center(
-                      child: Text(
-                        'No walks yet.\nStart a walk from the map!',
-                        textAlign: TextAlign.center,
-                        style: TextStyle(color: Colors.white70, fontSize: 16),
+                    return Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Padding(
+                            padding: EdgeInsets.symmetric(horizontal: 24.0),
+                            child: Text(
+                              'No walks yet? Your next adventure starts now — grab the leash and explore!',
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 17,
+                                fontWeight: FontWeight.w800,
+                                height: 1.4,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 18),
+                          ElevatedButton.icon(
+                            onPressed: () {
+                              Navigator.pop(context);
+                              onGoToMapTab?.call();
+                            },
+                            icon: const Icon(Icons.pets, color: Colors.black),
+                            label: const Text(
+                              'Start Walking 🐾',
+                              style: TextStyle(
+                                fontWeight: FontWeight.bold,
+                                fontSize: 15.5,
+                                color: Colors.black,
+                              ),
+                            ),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.tealAccent,
+                              foregroundColor: Colors.black,
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 20, vertical: 14),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(14),
+                              ),
+                              shadowColor: Colors.black.withOpacity(0.2),
+                              elevation: 4,
+                            ),
+                          ),
+                        ],
                       ),
                     );
                   }
@@ -2079,6 +2192,249 @@ class _MiniHintPill extends StatelessWidget {
         borderRadius: BorderRadius.circular(999),
         onTap: onTap,
         child: pill,
+      ),
+    );
+  }
+}
+
+class VisitHistoryScreen extends StatelessWidget {
+  const VisitHistoryScreen({super.key});
+
+  String _fmtRange(Timestamp? inTs, Timestamp? outTs) {
+    final inDt = inTs?.toDate();
+    final outDt = outTs?.toDate();
+
+    if (inDt == null) return 'Unknown time';
+    final inStr = DateFormat('h:mm a').format(inDt);
+    final outStr = (outDt != null) ? DateFormat('h:mm a').format(outDt) : '—';
+    return '$inStr → $outStr';
+  }
+
+  String _fmtDuration(num? minutes) {
+    final m = (minutes ?? 0).toInt();
+    if (m <= 0) return '—';
+    final h = m ~/ 60;
+    final r = m % 60;
+    if (h > 0 && r > 0) return '${h}h ${r}m';
+    if (h > 0) return '${h}h';
+    return '${r}m';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final user = FirebaseAuth.instance.currentUser;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Visit History'),
+        backgroundColor: const Color(0xFF567D46),
+        elevation: 2,
+      ),
+      body: Container(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            colors: [Color(0xFF567D46), Color(0xFF365A38)],
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+          ),
+        ),
+        child: user == null
+            ? const Center(
+                child: Text('Please sign in.',
+                    style: TextStyle(color: Colors.white)),
+              )
+            : StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+                stream: FirebaseFirestore.instance
+                    .collection('owners')
+                    .doc(user.uid)
+                    .collection('visit_history')
+                    .orderBy('checkInAt', descending: true)
+                    .snapshots(),
+                builder: (context, snap) {
+                  if (snap.connectionState == ConnectionState.waiting) {
+                    return const Center(child: CircularProgressIndicator());
+                  }
+                  if (snap.hasError) {
+                    return Center(
+                      child: Text('Error: ${snap.error}',
+                          style: const TextStyle(color: Colors.white)),
+                    );
+                  }
+                  final docs = snap.data?.docs ?? [];
+                  if (docs.isEmpty) {
+                    return const Center(
+                      child: Text(
+                        'No visits yet.',
+                        style: TextStyle(color: Colors.white70, fontSize: 16),
+                      ),
+                    );
+                  }
+
+                  // Group by day string if present; otherwise by date(checkInAt)
+                  final Map<String,
+                          List<QueryDocumentSnapshot<Map<String, dynamic>>>>
+                      groups = {};
+                  for (final d in docs) {
+                    final data = d.data();
+                    final dayStr = (data['day'] as String?)?.trim();
+                    if (dayStr != null && dayStr.isNotEmpty) {
+                      groups.putIfAbsent(dayStr, () => []).add(d);
+                    } else {
+                      final ts = data['checkInAt'] as Timestamp?;
+                      final dt = ts?.toDate();
+                      final key = (dt == null)
+                          ? 'Unknown'
+                          : DateFormat('yyyy-MM-dd').format(dt.toLocal());
+                      groups.putIfAbsent(key, () => []).add(d);
+                    }
+                  }
+
+                  // Sort groups by date desc; push "Unknown" to bottom
+                  final keys = groups.keys.toList()
+                    ..sort((a, b) {
+                      if (a == 'Unknown') return 1;
+                      if (b == 'Unknown') return -1;
+                      return b.compareTo(a); // yyyy-mm-dd desc
+                    });
+
+                  return ListView.builder(
+                    padding: const EdgeInsets.fromLTRB(12, 12, 12, 24),
+                    itemCount: keys.length,
+                    itemBuilder: (_, i) {
+                      final key = keys[i];
+                      final items = groups[key]!;
+                      // Pretty date header
+                      String header;
+                      if (key == 'Unknown') {
+                        header = 'Unknown date';
+                      } else {
+                        final dt = DateTime.tryParse(key);
+                        if (dt == null) {
+                          header = key;
+                        } else {
+                          final today = DateTime.now();
+                          final d0 =
+                              DateTime(today.year, today.month, today.day);
+                          final dk = DateTime(dt.year, dt.month, dt.day);
+                          if (dk == d0) {
+                            header = 'Today';
+                          } else if (dk ==
+                              d0.subtract(const Duration(days: 1))) {
+                            header = 'Yesterday';
+                          } else {
+                            header = DateFormat('EEE, MMM d, yyyy').format(dt);
+                          }
+                        }
+                      }
+
+                      return Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          // header
+                          Padding(
+                            padding: const EdgeInsets.only(
+                                left: 4, bottom: 6, top: 8),
+                            child: Text(
+                              header,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 16.5,
+                                fontWeight: FontWeight.w800,
+                                letterSpacing: 0.2,
+                              ),
+                            ),
+                          ),
+                          ...items.map((d) {
+                            final data = d.data();
+                            final parkName =
+                                (data['parkName'] as String?)?.trim();
+                            final checkInAt = data['checkInAt'] as Timestamp?;
+                            final checkOutAt = data['checkOutAt'] as Timestamp?;
+                            final durationMin = data['durationMinutes'] as num?;
+                            final active = checkOutAt == null;
+
+                            return Padding(
+                              padding: const EdgeInsets.only(bottom: 10),
+                              child: Material(
+                                color: Colors.transparent,
+                                child: Ink(
+                                  decoration: BoxDecoration(
+                                    color: Colors.white.withOpacity(0.92),
+                                    borderRadius: BorderRadius.circular(16),
+                                    border: Border.all(
+                                      color: Colors.black.withOpacity(0.06),
+                                    ),
+                                    boxShadow: [
+                                      BoxShadow(
+                                        color: Colors.black.withOpacity(0.12),
+                                        blurRadius: 16,
+                                        offset: const Offset(0, 8),
+                                      ),
+                                    ],
+                                  ),
+                                  child: ListTile(
+                                    contentPadding: const EdgeInsets.symmetric(
+                                        horizontal: 14, vertical: 10),
+                                    leading: Container(
+                                      width: 44,
+                                      height: 44,
+                                      decoration: BoxDecoration(
+                                        color: const Color(0xFF567D46),
+                                        borderRadius: BorderRadius.circular(12),
+                                      ),
+                                      child: const Icon(Icons.park,
+                                          color: Colors.white, size: 26),
+                                    ),
+                                    title: Text(
+                                      parkName?.isNotEmpty == true
+                                          ? parkName!
+                                          : 'This park',
+                                      style: const TextStyle(
+                                          fontWeight: FontWeight.w700),
+                                    ),
+                                    subtitle: Padding(
+                                      padding: const EdgeInsets.only(top: 2),
+                                      child: Text(
+                                        _fmtRange(checkInAt, checkOutAt),
+                                        style: TextStyle(
+                                            color:
+                                                Colors.black.withOpacity(0.75)),
+                                      ),
+                                    ),
+                                    trailing: Container(
+                                      padding: const EdgeInsets.symmetric(
+                                          horizontal: 10, vertical: 6),
+                                      decoration: BoxDecoration(
+                                        color: active
+                                            ? Colors.orange.withOpacity(0.15)
+                                            : Colors.black.withOpacity(0.06),
+                                        borderRadius:
+                                            BorderRadius.circular(999),
+                                      ),
+                                      child: Text(
+                                        active
+                                            ? 'Active'
+                                            : _fmtDuration(durationMin),
+                                        style: TextStyle(
+                                          color: active
+                                              ? Colors.orange.shade700
+                                              : Colors.black87,
+                                          fontSize: 12.5,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            );
+                          }),
+                        ],
+                      );
+                    },
+                  );
+                },
+              ),
       ),
     );
   }

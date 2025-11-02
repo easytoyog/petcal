@@ -3,7 +3,7 @@ description: Connect, explore and meet new friends in your local park.
 
 publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 
-version: 1.0.19+19
+version: 1.0.21+21
 
 environment:
   sdk: ^3.1.1
@@ -77,13 +77,13 @@ flutter_native_splash:
   android_gravity: center
   ios_content_mode: center
 
-  color_dark: "#000000"               # background color (dark mode)
+  color_dark: "#FDF8E1"               # background color (dark mode)
   image_dark: assets/icon/icon.png
 
   android_12:
     color: "#FDF8E1"
     image: assets/icon/icon.png
-    color_dark: "#000000"
+    color_dark: "#FDF8E1"
     image_dark: assets/icon/icon.png
 
 flutter:

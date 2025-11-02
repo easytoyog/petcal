@@ -67,6 +67,9 @@ class _ParksTabState extends State<ParksTab>
   static const _kCacheTs = 'parksTab.ts.v1';
   static const Duration _cacheTtl = Duration(hours: 2);
 
+  bool get _shouldAutoFetchNearby =>
+      _favoriteParks.isEmpty && _favoriteParkIds.isEmpty;
+
   // Debounces
   Timer? _checkinDebounce;
   Timer? _cacheDebounce;
@@ -110,11 +113,13 @@ class _ParksTabState extends State<ParksTab>
   }
 
   Future<void> _bootstrap() async {
-    await Future.wait([
-      _fetchFavoriteParks(),
-      _refreshCheckedInSet(),
-      _fetchNearbyParksFast(), // spinner-less fast pass
-    ]);
+    // Fetch favourites first so we can decide about auto nearby
+    await _fetchFavoriteParks();
+    await _refreshCheckedInSet();
+
+    if (_shouldAutoFetchNearby) {
+      await _fetchNearbyParksFast(); // spinner-less fast pass
+    }
   }
 
   // ---------- Resume: fast, spinner-less refresh ----------
@@ -122,6 +127,9 @@ class _ParksTabState extends State<ParksTab>
     if (!mounted || _resumeRefreshing) return;
     _resumeRefreshing = true;
     try {
+      // 🚫 Do not auto-refresh nearby if the user has favourites
+      if (!_shouldAutoFetchNearby) return;
+
       final saved = await _locationService.getSavedUserLocation();
       final movedFar = (saved != null && _lastRefreshLoc != null)
           ? _approxMeters(saved, _lastRefreshLoc!) > 150
@@ -134,12 +142,10 @@ class _ParksTabState extends State<ParksTab>
         _lastNearbyRefresh = DateTime.now();
         _lastRefreshLoc = saved ?? _lastRefreshLoc;
 
-        // quietly hydrate meta updates in the background
         final ids = _nearbyParks.map(_parkIdOf).toList();
         final toHydrate =
             ids.where((id) => !_hydratedMeta.contains(id)).toList();
         if (toHydrate.isNotEmpty) {
-          // fire-and-forget
           // ignore: discarded_futures
           _hydrateMetaForIds(toHydrate);
         }
@@ -308,6 +314,9 @@ class _ParksTabState extends State<ParksTab>
 
   // ---------- Nearby (FAST first, then precise) ----------
   Future<void> _fetchNearbyParksFast() async {
+    // 🚫 Skip auto nearby fetch if favourites are present
+    if (!_shouldAutoFetchNearby) return;
+
     try {
       final cached = await _locationService.getUserLocationOrCached();
       if (cached == null) return;
@@ -317,7 +326,6 @@ class _ParksTabState extends State<ParksTab>
         cached.longitude,
       );
 
-      // Only update UI if list actually changed
       bool changed = parks.length != _nearbyParks.length;
       if (!changed) {
         for (int i = 0; i < parks.length; i++) {
@@ -329,7 +337,6 @@ class _ParksTabState extends State<ParksTab>
       }
       if (!changed) return;
 
-      // hydrate meta lightly (fire-and-forget)
       final ids = parks.map(_parkIdOf).toList();
       final toHydrate = ids.where((id) => !_hydratedMeta.contains(id)).toList();
       if (toHydrate.isNotEmpty) {
@@ -970,17 +977,32 @@ class _ParksTabState extends State<ParksTab>
                 ],
 
                 // Nearby header
-                const Padding(
-                  padding: EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                  child: Text("Nearby Parks",
-                      style:
-                          TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+                Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                  child: Row(
+                    children: [
+                      const Text(
+                        "Nearby Parks",
+                        style: TextStyle(
+                            fontSize: 16, fontWeight: FontWeight.bold),
+                      ),
+                      const Spacer(),
+                      TextButton.icon(
+                        onPressed: _isSearching ? null : _fetchNearbyParks,
+                        icon: const Icon(Icons.near_me, size: 16),
+                        label: const Text("Find Nearby"),
+                        style: TextButton.styleFrom(
+                          visualDensity:
+                              const VisualDensity(horizontal: -2, vertical: -2),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
 
                 // CTA to fetch nearby (only shows if we didn’t have a cached fix)
-                if (!_hasFetchedNearby &&
-                    !_isSearching &&
-                    nearbyVisible.isEmpty)
+                if (!_isSearching && nearbyVisible.isEmpty)
                   Padding(
                     padding:
                         const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
