@@ -205,8 +205,8 @@ class _MapTabState extends State<MapTab>
     final mPerDegLng =
         111412.84 * math.cos(latRad) - 93.5 * math.cos(3 * latRad);
 
-    final ax = 0.0;
-    final ay = 0.0;
+    const ax = 0.0;
+    const ay = 0.0;
     final bx = (b.longitude - a.longitude) * mPerDegLng;
     final by = (b.latitude - a.latitude) * mPerDegLat;
     final px = (p.longitude - a.longitude) * mPerDegLng;
@@ -788,11 +788,9 @@ class _MapTabState extends State<MapTab>
       case 'pee':
         iconBitmap = _peeIcon!;
         title = 'Pee';
-        break;
       case 'poop':
         iconBitmap = _poopIcon!;
         title = 'Poop';
-        break;
       default:
         iconBitmap = _cautionIcon!;
         title = 'Caution';
@@ -1300,11 +1298,9 @@ class _MapTabState extends State<MapTab>
           case 'pee':
             icon = _peeIcon!;
             title = 'Pee';
-            break;
           case 'poop':
             icon = _poopIcon!;
             title = 'Poop';
-            break;
           default:
             icon = _cautionIcon!;
             title = 'Caution';
@@ -2065,8 +2061,9 @@ class _MapTabState extends State<MapTab>
                                   },
                                 );
 
-                                if (newService == null || newService.isEmpty)
+                                if (newService == null || newService.isEmpty) {
                                   return;
+                                }
 
                                 try {
                                   // Write to Firestore

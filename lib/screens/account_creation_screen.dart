@@ -101,19 +101,14 @@ class _AccountCreationScreenState extends State<AccountCreationScreen> {
           // Give a helpful message without leaking details
           _toast(
               'That email is already in use. Try signing in, or use “Forgot password”.');
-          break;
         case 'invalid-email':
           _toast('Please enter a valid email address.');
-          break;
         case 'weak-password':
           _toast('Please choose a stronger password (at least 6 characters).');
-          break;
         case 'operation-not-allowed':
           _toast('Email sign up is disabled. Please contact support.');
-          break;
         case 'credential-already-in-use':
           _toast('This credential is already linked to another account.');
-          break;
         default:
           _toast(e.message ?? 'Auth error. Please try again.');
       }
@@ -146,8 +141,8 @@ class _AccountCreationScreenState extends State<AccountCreationScreen> {
   // --------------- UI ---------------
   @override
   Widget build(BuildContext context) {
-    final themeGreen = const Color(0xFF567D46);
-    final accentGreen = const Color(0xFF365A38);
+    const themeGreen = Color(0xFF567D46);
+    const accentGreen = Color(0xFF365A38);
 
     return Scaffold(
       appBar: AppBar(
@@ -275,10 +270,12 @@ class _AccountCreationScreenState extends State<AccountCreationScreen> {
                       ),
                       validator: (v) {
                         final value = v ?? '';
-                        if (value.isEmpty)
+                        if (value.isEmpty) {
                           return 'Please confirm your password';
-                        if (value != _passCtl.text)
+                        }
+                        if (value != _passCtl.text) {
                           return 'Passwords do not match';
+                        }
                         return null;
                       },
                       onFieldSubmitted: (_) => _createAccount(),

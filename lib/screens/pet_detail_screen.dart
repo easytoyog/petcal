@@ -294,7 +294,7 @@ class _AddPetScreenState extends State<AddPetScreen> {
                                             });
                                           },
                                           fillColor:
-                                              MaterialStateProperty.all<Color>(
+                                              WidgetStateProperty.all<Color>(
                                                   Colors.tealAccent),
                                         ),
                                         const Text(
