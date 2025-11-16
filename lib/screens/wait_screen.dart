@@ -29,14 +29,23 @@ class _WaitForEmailVerificationScreenState
   void _startVerificationCheck() {
     _timer = Timer.periodic(const Duration(seconds: 3), (timer) async {
       try {
+        // Reload the user that initiated this flow
         await widget.user.reload();
+
+        // Get the latest currentUser from Firebase
         final refreshedUser = FirebaseAuth.instance.currentUser;
+
+        // Optional: extra reload to reduce race conditions
+        await refreshedUser?.reload();
+
         if (!mounted) return;
+
         if (refreshedUser != null && refreshedUser.emailVerified) {
           setState(() {
             _isVerified = true;
           });
           _timer?.cancel();
+
           // Navigate to the next step after verification
           Navigator.pushReplacement(
             context,
@@ -120,19 +129,26 @@ class _WaitForEmailVerificationScreenState
                 style: const TextStyle(fontSize: 18),
               ),
               const SizedBox(height: 24),
-              if (!_isVerified) const CircularProgressIndicator(),
-              if (!_isVerified) const SizedBox(height: 16),
-              if (!_isVerified)
-                const Text(
-                  "Waiting for verification...",
-                  style: TextStyle(color: Colors.white70),
-                ),
-              if (_isVerified)
-                const Text(
-                  "Email verified! Redirecting...",
-                  style: TextStyle(color: Colors.greenAccent),
-                ),
+
+              // Smoothly switch between "waiting" and "verified" text
+              AnimatedSwitcher(
+                duration: const Duration(milliseconds: 300),
+                child: _isVerified
+                    ? const Text(
+                        "Email verified! Redirecting...",
+                        key: ValueKey('verified'),
+                        style: TextStyle(color: Colors.greenAccent),
+                      )
+                    : const Text(
+                        "Once you've clicked the link, this page will update automatically.",
+                        key: ValueKey('waiting'),
+                        textAlign: TextAlign.center,
+                        style: TextStyle(color: Colors.white70),
+                      ),
+              ),
+
               const SizedBox(height: 24),
+
               TextButton(
                 onPressed: (_resendCooldown > 0)
                     ? null
@@ -142,15 +158,18 @@ class _WaitForEmailVerificationScreenState
                           if (!mounted) return;
                           ScaffoldMessenger.of(context).showSnackBar(
                             const SnackBar(
-                                content: Text("Verification email resent.")),
+                              content: Text("Verification email resent."),
+                            ),
                           );
                           _startResendCooldown();
                         } catch (e) {
                           if (!mounted) return;
                           ScaffoldMessenger.of(context).showSnackBar(
                             SnackBar(
-                                content: Text(
-                                    "Couldn't resend verification email: $e")),
+                              content: Text(
+                                "Couldn't resend verification email: $e",
+                              ),
+                            ),
                           );
                         }
                       },
@@ -158,8 +177,9 @@ class _WaitForEmailVerificationScreenState
                     ? Text("Resend in $_resendCooldown s")
                     : const Text("Resend Verification Email"),
               ),
+
               const SizedBox(height: 8),
-              // Optional: a visible logout button in the body as well
+
               OutlinedButton.icon(
                 onPressed: _logout,
                 icon: const Icon(Icons.logout),

@@ -1,12 +1,12 @@
 // lib/screens/map_tab.dart
 import 'dart:async';
-import 'dart:convert';
 import 'dart:ui' as ui;
 import 'dart:io' show Platform;
 import 'dart:math' as math;
+import 'dart:convert';
+
 import 'package:flutter/services.dart' show rootBundle, PlatformException;
 import 'package:cloud_firestore/cloud_firestore.dart'; // FirebaseException
-import 'dart:developer' as dev;
 
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
@@ -20,11 +20,12 @@ import 'package:inthepark/features/add_event_sheet.dart';
 import 'package:inthepark/features/celebration_dialog.dart';
 import 'package:inthepark/features/walk_manager.dart';
 import 'package:inthepark/models/park_model.dart';
-import 'package:inthepark/screens/chatroom_screen.dart';
 import 'package:inthepark/services/firestore_service.dart';
 import 'package:inthepark/services/location_service.dart';
-import 'package:inthepark/utils/utils.dart';
 import 'package:inthepark/widgets/interstitial_ad_manager.dart';
+import 'package:inthepark/widgets/rewarded_streak_ads.dart';
+import 'package:inthepark/widgets/map_surface.dart';
+import 'package:inthepark/features/park_users_dialog.dart';
 
 // ---------- Filter Option ----------
 class _FilterOption {
@@ -108,7 +109,7 @@ class _MapTabState extends State<MapTab>
   // Flags & UI state
   bool _isSearching = false;
   bool _finishingWalk = false; // disables End Walk + shows loader
-  bool _startingWalk = false; // <<< add this
+  bool _startingWalk = false;
   bool _isCentering = false; // prevent spam taps on center FAB
 
   // Debounces & listeners
@@ -307,166 +308,83 @@ class _MapTabState extends State<MapTab>
     return true;
   }
 
-  Future<bool> _explainAndRequestBackgroundLocation(
-      BuildContext context) async {
-    if (!Platform.isAndroid) return true;
+  /// Call this only AFTER a rewarded ad completes successfully.
+  /// Revives the streak by restoring the pre-loss streak and
+  /// crediting both the missed day and today's walk.
+  Future<void> applyStreakReviveAfterReward() async {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) throw 'Not signed in';
 
-    final whenInUse = await Permission.location.status;
-    final bg = await Permission.locationAlways.status;
-    if (whenInUse.isGranted && bg.isGranted) return true;
-
-    final proceed = await showDialog<bool>(
-          context: context,
-          barrierDismissible: false,
-          builder: (ctx) => AlertDialog(
-            title: const Text('Enable background location'),
-            content: Text.rich(
-              const TextSpan(children: [
-                TextSpan(
-                    text:
-                        'To keep tracking your walk when the screen is off, Android requires you to choose '),
-                TextSpan(
-                    text: 'Allow all the time',
-                    style: TextStyle(fontWeight: FontWeight.w700)),
-                TextSpan(
-                    text:
-                        ' for Location. We only use your location while a walk is active, and you can stop anytime.'),
-              ]),
-            ),
-            actions: [
-              TextButton(
-                  onPressed: () => Navigator.of(ctx).pop(false),
-                  child: const Text('Not now')),
-              ElevatedButton(
-                  onPressed: () => Navigator.of(ctx).pop(true),
-                  child: const Text('Continue')),
-            ],
-          ),
-        ) ??
-        false;
-
-    if (!proceed) return false;
-
-    if (!whenInUse.isGranted) {
-      final r = await Permission.location.request();
-      if (!r.isGranted) return false;
+    String dayKey(DateTime d) {
+      final dd = DateTime(d.year, d.month, d.day);
+      final mm = dd.month.toString().padLeft(2, '0');
+      final dd2 = dd.day.toString().padLeft(2, '0');
+      return '${dd.year}-$mm-$dd2';
     }
 
-    var bg2 = await Permission.locationAlways.status;
-    if (!bg2.isGranted) bg2 = await Permission.locationAlways.request();
-    if (bg2.isGranted) return true;
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final todayKey = dayKey(today);
+    final y = today.subtract(const Duration(days: 1));
+    final yKey = dayKey(y);
 
-    final open = await showDialog<bool>(
-          context: context,
-          barrierDismissible: false,
-          builder: (ctx) => AlertDialog(
-            title: const Text('Turn on “Allow all the time”'),
-            content: const Text(
-                "Background location is currently off. To enable it:\n\n"
-                "Settings → Apps → InThePark → Permissions → Location → Allow all the time."),
-            actions: [
-              TextButton(
-                  onPressed: () => Navigator.of(ctx).pop(false),
-                  child: const Text('Cancel')),
-              ElevatedButton(
-                  onPressed: () => Navigator.of(ctx).pop(true),
-                  child: const Text('Open Settings')),
-            ],
-          ),
-        ) ??
-        false;
+    final docRef = FirebaseFirestore.instance
+        .collection('owners')
+        .doc(uid)
+        .collection('stats')
+        .doc('walkStreak');
 
-    if (open) {
-      await openAppSettings();
-      final bgAfter = await Permission.locationAlways.status;
-      if (bgAfter.isGranted) return true;
-    }
-    return false;
-  }
+    await FirebaseFirestore.instance.runTransaction((txn) async {
+      final snap = await txn.get(docRef);
+      if (!snap.exists) throw 'No streak to revive.';
 
-  Future<void> _ensureNotifPermission() async {
-    if (!Platform.isAndroid) return;
-    final status = await Permission.notification.status;
-    if (status.isDenied || status.isPermanentlyDenied) {
-      await Permission.notification.request();
-    }
-  }
+      final data = snap.data() as Map<String, dynamic>;
 
-  Future<LatLng?> _getFreshUserLatLng({
-    Duration freshTimeout = const Duration(milliseconds: 2500),
-    double minAccuracyMeters = 50,
-  }) async {
-    if (_walk.points.isNotEmpty) return _walk.points.last;
+      final canRevive = (data['canRevive'] as bool?) ?? false;
+      if (!canRevive) throw 'Revive not eligible.';
 
-    try {
-      await _location.changeSettings(
-        accuracy: loc.LocationAccuracy.high,
-        interval: 0,
-        distanceFilter: 0,
+      final prevBeforeLoss = (data['prevBeforeLoss'] as int?) ?? 0;
+      if (prevBeforeLoss <= 0) throw 'No previous streak to revive.';
+
+      final alreadyRevivedFor = (data['revivedForDay'] as String?)?.trim();
+      if (alreadyRevivedFor == yKey) {
+        throw 'Yesterday already revived.';
+      }
+
+      final lostAt = data['lostAt'];
+      if (lostAt is Timestamp) {
+        if (now.difference(lostAt.toDate()) > const Duration(hours: 48)) {
+          throw 'Revive window expired.';
+        }
+      }
+
+      int longest = (data['longest'] ?? 0) as int;
+
+      // ✅ Restore as if you never missed:
+      // prevBeforeLoss (up to the day before the missed day)
+      // + 1 for the missed day (yesterday)
+      // + 1 for today's walk that triggered this flow
+      final int newCurrent = prevBeforeLoss + 2;
+
+      if (newCurrent > longest) {
+        longest = newCurrent;
+      }
+
+      txn.set(
+        docRef,
+        {
+          'current': newCurrent,
+          'longest': longest,
+          'lastDate': todayKey, // streak now extends through today
+          'revivedForDay': yKey, // the day we "filled in"
+          'canRevive': false, // consume eligibility
+          'prevBeforeLoss': FieldValue.delete(),
+          'lostAt': FieldValue.delete(),
+          'updatedAt': FieldValue.serverTimestamp(),
+        },
+        SetOptions(merge: true),
       );
-
-      final fresh = await _location.onLocationChanged.firstWhere((l) {
-        final acc = l.accuracy ?? double.infinity;
-        return l.latitude != null &&
-            l.longitude != null &&
-            acc <= minAccuracyMeters;
-      }).timeout(freshTimeout);
-
-      if (fresh.latitude != null && fresh.longitude != null) {
-        return LatLng(fresh.latitude!, fresh.longitude!);
-      }
-    } catch (_) {
-    } finally {
-      try {
-        await _location.changeSettings(accuracy: loc.LocationAccuracy.balanced);
-      } catch (_) {}
-    }
-
-    try {
-      final l = await _location
-          .getLocation()
-          .timeout(const Duration(milliseconds: 800));
-      if (l.latitude != null && l.longitude != null) {
-        return LatLng(l.latitude!, l.longitude!);
-      }
-    } catch (_) {}
-
-    final saved = await _locationService.getUserLocationOrCached();
-    if (saved != null) return saved;
-
-    return _currentMapCenter;
-  }
-
-  // --- Assets -> Bitmap ---
-  Future<BitmapDescriptor> _bitmapFromAsset(
-    String assetPath, {
-    int width = 64,
-  }) async {
-    final data = await rootBundle.load(assetPath);
-    final codec = await ui.instantiateImageCodec(
-      data.buffer.asUint8List(),
-      targetWidth: width,
-      targetHeight: width,
-    );
-    final frame = await codec.getNextFrame();
-    final byteData =
-        await frame.image.toByteData(format: ui.ImageByteFormat.png);
-    return BitmapDescriptor.fromBytes(byteData!.buffer.asUint8List());
-  }
-
-  // --- Custom bitmaps for walk notes (pee/poop/caution) ---
-  BitmapDescriptor? _peeIcon;
-  BitmapDescriptor? _poopIcon;
-  BitmapDescriptor? _cautionIcon;
-
-  Future<void> _ensureNoteIcons() async {
-    _peeIcon ??= await _bitmapFromAsset('assets/icon/pee.png', width: 64);
-    _poopIcon ??= await _bitmapFromAsset('assets/icon/poop.png', width: 64);
-    _cautionIcon ??= await _bitmapFromIcon(
-      Icons.warning_amber_rounded,
-      fg: Colors.black87,
-      bg: Colors.amber.shade600,
-    );
+    });
   }
 
   String _dayKeyLocal(DateTime dt) {
@@ -476,6 +394,10 @@ class _MapTabState extends State<MapTab>
     return '${d.year}-$mm-$dd';
   }
 
+  /// Updates (or creates) the user's daily walk streak document atomically.
+  /// - Increments if yesterday was walked.
+  /// - Does NOT reset to 1 on a gap; it only sets revive flags.
+  /// - Fallback reset to 1 is applied explicitly when user declines revive.
   Future<_StreakResult> _updateDailyStreak() async {
     final uid = FirebaseAuth.instance.currentUser?.uid;
     if (uid == null) {
@@ -516,14 +438,55 @@ class _MapTabState extends State<MapTab>
       final alreadyToday = (lastDate == todayKey);
       bool incremented = false;
 
+      // Keep the value before we change it, to publish eligibility metadata if we broke the streak.
+      final previousStreak = current;
+
+      bool reviveEligible = false;
+      int? revivePrevBeforeLoss;
+
       if (!alreadyToday) {
         if (lastDate == yesterdayKey) {
-          current += 1;
+          // ✅ Chain continues
+          current += 0;
+          incremented = true;
+          lastDate = todayKey;
+
+          // Clear any stale revive flags because chain is intact.
+          txn.set(
+            docRef,
+            {
+              'prevBeforeLoss': FieldValue.delete(),
+              'lostAt': FieldValue.delete(),
+              'canRevive': false,
+              // don't touch revivedForDay here
+            },
+            SetOptions(merge: true),
+          );
         } else {
-          current = 1;
+          // ❌ Gap detected → streak broke (we'll treat it as "yesterday" for revive UX)
+          // Publish revive eligibility metadata so UI can offer a rewarded revive.
+          txn.set(
+            docRef,
+            {
+              'prevBeforeLoss':
+                  previousStreak, // 0 if there wasn't a prior streak
+              'lostAt': FieldValue.serverTimestamp(),
+              'revivedForDay': FieldValue.delete(), // clear per-miss tag
+              'canRevive':
+                  previousStreak > 0, // allow revive if there was a streak
+            },
+            SetOptions(merge: true),
+          );
+
+          reviveEligible = previousStreak > 0;
+          revivePrevBeforeLoss = previousStreak;
+
+          // ❗ IMPORTANT:
+          // Do NOT reset `current` or `lastDate` here.
+          // We only update streak numbers when:
+          //   - user revives (applyStreakReviveAfterReward), OR
+          //   - user skips revive (_applyStreakFallbackForToday).
         }
-        incremented = true;
-        lastDate = todayKey;
       }
 
       bool newRecord = false;
@@ -551,6 +514,57 @@ class _MapTabState extends State<MapTab>
         isNewRecord: newRecord,
         current: current,
         longest: longest,
+        reviveEligible: reviveEligible,
+        prevBeforeLoss: revivePrevBeforeLoss,
+      );
+    });
+  }
+
+  /// When user chooses NOT to revive their streak,
+  /// we commit the "new streak = 1 day (today)" fallback.
+  Future<void> _applyStreakFallbackForToday() async {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) return;
+
+    final docRef = FirebaseFirestore.instance
+        .collection('owners')
+        .doc(uid)
+        .collection('stats')
+        .doc('walkStreak');
+
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final todayKey = _dayKeyLocal(today);
+
+    await FirebaseFirestore.instance.runTransaction((txn) async {
+      final snap = await txn.get(docRef);
+
+      int current = 0;
+      int longest = 0;
+      String? lastDate;
+
+      if (snap.exists) {
+        final data = snap.data() as Map<String, dynamic>;
+        current = (data['current'] ?? 0) as int;
+        longest = (data['longest'] ?? 0) as int;
+        lastDate = (data['lastDate'] as String?)?.trim();
+      }
+
+      // If we've already marked today somewhere else, don't touch it.
+      if (lastDate == todayKey) return;
+
+      current = 1;
+      if (longest < current) longest = current;
+
+      txn.set(
+        docRef,
+        {
+          'current': current,
+          'longest': longest,
+          'lastDate': todayKey,
+          'updatedAt': FieldValue.serverTimestamp(),
+        },
+        SetOptions(merge: true),
       );
     });
   }
@@ -851,13 +865,12 @@ class _MapTabState extends State<MapTab>
 
   @override
   void dispose() {
-    // ❌ Do NOT stop/finish the walk here. Users may just be switching tabs.
-    // (Removed: the _walk.stop() + _handleWalkFinished(...) block)
-
     // Optional: keep background mode relaxed when leaving the map UI
     () async {
       try {
-        await _location.enableBackgroundMode(enable: false);
+        if (!_walk.isActive) {
+          await _location.enableBackgroundMode(enable: false);
+        }
         await _location.changeSettings(accuracy: loc.LocationAccuracy.balanced);
       } catch (_) {}
     }();
@@ -875,11 +888,7 @@ class _MapTabState extends State<MapTab>
     _adManager.dispose();
     _mapController?.dispose();
 
-    // ❌ Don’t dispose the WalkManager here; let it keep running.
-    // _walk.removeListener(_walkListener);  // <-- keep or remove based on your needs:
-    _walk.removeListener(
-        _walkListener); // keep this so MapTab doesn’t hold callbacks
-    // _walk.dispose();                      // <-- remove this line
+    _walk.removeListener(_walkListener);
 
     super.dispose();
   }
@@ -1026,6 +1035,8 @@ class _MapTabState extends State<MapTab>
     final streakCurrent_ = streak?.current;
     final streakLongest_ = streak?.longest;
     final streakIsNewRecord_ = streak?.isNewRecord ?? false;
+    final reviveEligible_ = streak?.reviveEligible == true;
+    final prevBeforeLoss_ = streak?.prevBeforeLoss;
 
     // If the app is not in foreground, queue celebration for later.
     final life = WidgetsBinding.instance.lifecycleState;
@@ -1043,13 +1054,24 @@ class _MapTabState extends State<MapTab>
 
     // Foreground → show now
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _showCelebrationDialog(
-        steps: steps_,
-        meters: meters_,
-        streakCurrent: streakCurrent_,
-        streakLongest: streakLongest_,
-        streakIsNewRecord: streakIsNewRecord_,
-      );
+      if (reviveEligible_ && (prevBeforeLoss_ ?? 0) > 0) {
+        _showReviveDialog(
+          previousStreak: prevBeforeLoss_!,
+          steps: steps_,
+          meters: meters_,
+          streakCurrent: streakCurrent_,
+          streakLongest: streakLongest_,
+          streakIsNewRecord: streakIsNewRecord_,
+        );
+      } else {
+        _showCelebrationDialog(
+          steps: steps_,
+          meters: meters_,
+          streakCurrent: streakCurrent_,
+          streakLongest: streakLongest_,
+          streakIsNewRecord: streakIsNewRecord_,
+        );
+      }
     });
   }
 
@@ -1087,7 +1109,6 @@ class _MapTabState extends State<MapTab>
         distanceFilter: 3,
       );
 
-      // If your WalkManager supports seeding, pass it; otherwise ignore.
       await _walk.start();
 
       _startUiTicker();
@@ -1118,6 +1139,134 @@ class _MapTabState extends State<MapTab>
     } finally {
       if (mounted) setState(() => _startingWalk = false);
     }
+  }
+
+  /// Ask for notification permission where required (iOS 10+, Android 13+).
+  Future<void> _ensureNotifPermission() async {
+    // ---- iOS notifications ----
+    // (Android automatically handles notification permission except 13+)
+    try {
+      // Flutter Local Notifications or Firebase Messaging permission check
+      // If you're using FirebaseMessaging:
+      /*
+    final settings = await FirebaseMessaging.instance.requestPermission(
+      alert: true,
+      badge: true,
+      sound: true,
+    );
+    */
+    } catch (e) {
+      debugPrint("Notification permission error: $e");
+    }
+
+    // ---- Android 13+ explicit notification permission ----
+    if (Platform.isAndroid) {
+      final status = await Permission.notification.status;
+      if (!status.isGranted) {
+        await Permission.notification.request();
+      }
+    }
+  }
+
+  /// Explains why background location is needed and then requests it on Android.
+  /// Returns true if we end up with background location allowed.
+  Future<bool> _explainAndRequestBackgroundLocation(
+      BuildContext context) async {
+    // Only relevant for Android; iOS handles this differently.
+    if (!Platform.isAndroid) return true;
+
+    // Check current permissions
+    final whenInUse = await Permission.location.status;
+    final bg = await Permission.locationAlways.status;
+
+    // Already have both → nothing to do
+    if (whenInUse.isGranted && bg.isGranted) return true;
+
+    // Show an explanation dialog before requesting
+    final proceed = await showDialog<bool>(
+          context: context,
+          barrierDismissible: false,
+          builder: (ctx) => AlertDialog(
+            title: const Text('Enable background location'),
+            content: Text.rich(
+              const TextSpan(
+                children: [
+                  TextSpan(
+                    text:
+                        'To keep tracking your walk when the screen is off, Android requires you to choose ',
+                  ),
+                  TextSpan(
+                    text: 'Allow all the time',
+                    style: TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                  TextSpan(
+                    text:
+                        ' for Location. We only use your location while a walk is active, and you can stop anytime.',
+                  ),
+                ],
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(false),
+                child: const Text('Not now'),
+              ),
+              ElevatedButton(
+                onPressed: () => Navigator.of(ctx).pop(true),
+                child: const Text('Continue'),
+              ),
+            ],
+          ),
+        ) ??
+        false;
+
+    if (!proceed) return false;
+
+    // First make sure "when in use" is granted
+    if (!whenInUse.isGranted) {
+      final r = await Permission.location.request();
+      if (!r.isGranted) return false;
+    }
+
+    // Then request "always"
+    var bgStatus = await Permission.locationAlways.status;
+    if (!bgStatus.isGranted) {
+      bgStatus = await Permission.locationAlways.request();
+    }
+
+    if (bgStatus.isGranted) return true;
+
+    // If still not granted, offer to open system Settings
+    final openSettings = await showDialog<bool>(
+          context: context,
+          barrierDismissible: false,
+          builder: (ctx) => AlertDialog(
+            title: const Text('Turn on “Allow all the time”'),
+            content: const Text(
+              'Background location is currently off. To enable it:\n\n'
+              'Settings → Apps → InThePark → Permissions → Location → Allow all the time.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(false),
+                child: const Text('Cancel'),
+              ),
+              ElevatedButton(
+                onPressed: () => Navigator.of(ctx).pop(true),
+                child: const Text('Open Settings'),
+              ),
+            ],
+          ),
+        ) ??
+        false;
+
+    if (openSettings) {
+      await openAppSettings();
+      final bgAfter = await Permission.locationAlways.status;
+      if (bgAfter.isGranted) return true;
+    }
+
+    return false;
   }
 
   Future<void> _postStartBackgroundHardening() async {
@@ -1645,737 +1794,115 @@ class _MapTabState extends State<MapTab>
     }
   }
 
-  // --------------- Park dialogs & actions ---------------
-  Future<void> _ensureParkDocExists(
-    String parkId,
-    String name,
-    double lat,
-    double lng, {
-    List<String> services = const [],
+  Future<LatLng?> _getFreshUserLatLng({
+    Duration freshTimeout = const Duration(milliseconds: 2500),
+    double minAccuracyMeters = 50,
   }) async {
-    if (_existingParkIds.contains(parkId)) return;
-    try {
-      final parkRef =
-          FirebaseFirestore.instance.collection('parks').doc(parkId);
-      final parkSnap = await parkRef.get();
-      if (!parkSnap.exists) {
-        await parkRef.set({
-          'id': parkId,
-          'name': name,
-          'latitude': lat,
-          'longitude': lng,
-          'services': services,
-          'createdAt': Timestamp.now(),
-        }, SetOptions(merge: true));
-      }
-      _existingParkIds.add(parkId);
-    } catch (e) {
-      debugPrint('ensureParkDocExists error: $e');
-    }
-  }
-
-  void _showCheckInDialog(Park park) async {
-    final currentUser = FirebaseAuth.instance.currentUser;
-    if (currentUser == null) return;
-
-    final parkId = generateParkID(park.latitude, park.longitude, park.name);
-    final activeDocRef = FirebaseFirestore.instance
-        .collection('parks')
-        .doc(parkId)
-        .collection('active_users')
-        .doc(currentUser.uid);
-    final activeDoc = await activeDocRef.get();
-    bool isCheckedIn = activeDoc.exists;
-    if (isCheckedIn) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-            content: Text("You are already checked in to this park.")),
-      );
-      return;
-    }
-
-    if (!mounted) return;
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) {
-        bool isProcessing = false;
-        return StatefulBuilder(
-          builder: (context, setStateDialog) {
-            return AlertDialog(
-              title: const Text("Check In"),
-              content:
-                  Text("You are at ${park.name}. Do you want to check in?"),
-              actions: [
-                TextButton(
-                  onPressed:
-                      isProcessing ? null : () => Navigator.of(context).pop(),
-                  child: const Text("No"),
-                ),
-                ElevatedButton(
-                  onPressed: isProcessing
-                      ? null
-                      : () async {
-                          setStateDialog(() => isProcessing = true);
-                          await _handleCheckIn(
-                              park, park.latitude, park.longitude, context);
-                          if (mounted) Navigator.of(context).pop();
-                        },
-                  child: isProcessing
-                      ? const SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Text("Yes, Check In"),
-                ),
-              ],
-            );
-          },
-        );
-      },
-    );
-  }
-
-  Future<Map<String, Map<String, dynamic>>> _loadPublicProfiles(
-      Set<String> uids) async {
-    final db = FirebaseFirestore.instance;
-    final out = <String, Map<String, dynamic>>{};
-    if (uids.isEmpty) return out;
-
-    for (final chunk in uids.toList().chunked(10)) {
-      final snap = await db
-          .collection('public_profiles')
-          .where(FieldPath.documentId, whereIn: chunk)
-          .get();
-      for (final d in snap.docs) {
-        final data = d.data();
-        out[d.id] = {
-          'displayName': (data['displayName'] ?? '') as String,
-          'photoUrl': (data['photoUrl'] ?? '') as String,
-        };
-      }
-    }
-    return out;
-  }
-
-  Future<void> _showUsersInPark(String parkId, String parkName,
-      double parkLatitude, double parkLongitude) async {
-    final currentUser = FirebaseAuth.instance.currentUser;
-    if (currentUser == null) return;
-
-    if (!mounted) return;
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (context) {
-        return const AlertDialog(
-          content: SizedBox(
-            height: 120,
-            child: Center(child: CircularProgressIndicator()),
-          ),
-        );
-      },
-    );
+    if (_walk.points.isNotEmpty) return _walk.points.last;
 
     try {
-      await _ensureParkDocExists(parkId, parkName, parkLatitude, parkLongitude);
-
-      final fs = FirestoreService();
-      bool isLiked = await fs.isParkLiked(parkId);
-
-      final likesCol = FirebaseFirestore.instance
-          .collection('parks')
-          .doc(parkId)
-          .collection('likes');
-
-      final parkDoc = await FirebaseFirestore.instance
-          .collection('parks')
-          .doc(parkId)
-          .get();
-
-      List<String> services = [];
-      if (parkDoc.exists &&
-          parkDoc.data() != null &&
-          parkDoc.data()!.containsKey('services')) {
-        services = List<String>.from(parkDoc['services'] ?? []);
-      }
-
-      final activeDocRef = FirebaseFirestore.instance
-          .collection('parks')
-          .doc(parkId)
-          .collection('active_users')
-          .doc(currentUser.uid);
-      final activeDoc = await activeDocRef.get();
-      bool isCheckedIn = activeDoc.exists;
-
-      if (isCheckedIn) {
-        final data = activeDoc.data() as Map<String, dynamic>;
-        if (data.containsKey('checkedInAt')) {
-          final checkedInAt = (data['checkedInAt'] as Timestamp).toDate();
-          if (DateTime.now().difference(checkedInAt) >
-              const Duration(minutes: 30)) {
-            await activeDocRef.delete();
-            isCheckedIn = false;
-          }
-        }
-      }
-
-      final parkRef =
-          FirebaseFirestore.instance.collection('parks').doc(parkId);
-      final usersSnapshot = await parkRef.collection('active_users').get();
-      final userIds = usersSnapshot.docs.map((doc) => doc.id).toList();
-      final profiles = await _loadPublicProfiles(userIds.toSet());
-
-      final List<Map<String, dynamic>> userList = [];
-      if (userIds.isNotEmpty) {
-        for (var i = 0; i < userIds.length; i += 10) {
-          final batchIds = userIds.sublist(
-              i, i + 10 > userIds.length ? userIds.length : i + 10);
-          final petsSnapshot = await FirebaseFirestore.instance
-              .collection('pets')
-              .where('ownerId', whereIn: batchIds)
-              .get();
-
-          final Map<String, List<Map<String, dynamic>>> petsByOwner = {};
-          for (final petDoc in petsSnapshot.docs) {
-            final petData = petDoc.data();
-            final ownerId = petData['ownerId'] as String;
-            (petsByOwner[ownerId] ??= []).add({
-              ...petData,
-              'petId': petDoc.id,
-            });
-          }
-
-          for (final ownerId in batchIds) {
-            final userDoc =
-                usersSnapshot.docs.firstWhere((d) => d.id == ownerId);
-            final checkInTime = (userDoc.data())['checkedInAt'] as Timestamp?;
-            final ownerPets = petsByOwner[ownerId] ?? [];
-
-            final prof = profiles[ownerId];
-            final ownerName = (prof?['displayName'] as String?)?.trim() ?? '';
-
-            for (final pet in ownerPets) {
-              userList.add({
-                'petId': pet['petId'],
-                'ownerId': ownerId,
-                'ownerName': ownerName,
-                'petName': pet['name'] ?? 'Unknown Pet',
-                'petPhotoUrl': pet['photoUrl'] ?? '',
-                'checkInTime': checkInTime != null
-                    ? _checkedInForSince(checkInTime.toDate())
-                    : '',
-              });
-            }
-          }
-        }
-      }
-
-      if (!mounted) return;
-      Navigator.of(context, rootNavigator: true).pop(); // close spinner
-
-      showDialog(
-        context: context,
-        barrierDismissible: false,
-        builder: (context) {
-          return StatefulBuilder(builder: (context, setStateDialog) {
-            return Scaffold(
-              appBar: AppBar(
-                backgroundColor: const Color(0xFF567D46),
-                title: Text(parkName),
-                leading: IconButton(
-                  icon: const Icon(Icons.close),
-                  onPressed: () => Navigator.of(context).pop(),
-                ),
-                actions: [
-                  StreamBuilder<QuerySnapshot>(
-                    stream: likesCol.snapshots(),
-                    builder: (context, snap) {
-                      final likeCount =
-                          snap.hasData ? snap.data!.docs.length : 0;
-
-                      return Row(
-                        children: [
-                          Padding(
-                            padding: const EdgeInsets.only(right: 2.0),
-                            child: Text(
-                              '$likeCount',
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                          ),
-                          IconButton(
-                            tooltip: isLiked ? 'Unlike' : 'Like Park',
-                            onPressed: () async {
-                              try {
-                                if (isLiked) {
-                                  await fs.unlikePark(parkId);
-                                  await likesCol.doc(currentUser.uid).delete();
-                                  if (context.mounted) {
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      const SnackBar(
-                                          content: Text("Removed park like")),
-                                    );
-                                  }
-                                } else {
-                                  await fs.likePark(parkId);
-                                  await likesCol.doc(currentUser.uid).set({
-                                    'uid': currentUser.uid,
-                                    'createdAt': FieldValue.serverTimestamp(),
-                                  });
-                                  if (context.mounted) {
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      const SnackBar(
-                                          content: Text("Park liked!")),
-                                    );
-                                  }
-                                }
-                                setStateDialog(() => isLiked = !isLiked);
-                              } catch (e) {
-                                if (context.mounted) {
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    SnackBar(
-                                        content:
-                                            Text("Error updating like: $e")),
-                                  );
-                                }
-                              }
-                            },
-                            icon: Icon(
-                              isLiked
-                                  ? Icons.thumb_up
-                                  : Icons.thumb_up_outlined,
-                            ),
-                          ),
-                        ],
-                      );
-                    },
-                  ),
-                ],
-              ),
-              body: Column(
-                children: [
-                  // Services chips
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
-                    child: Align(
-                      alignment: Alignment.centerLeft,
-                      child: SingleChildScrollView(
-                        scrollDirection: Axis.horizontal,
-                        child: Row(
-                          children: [
-                            // existing chips
-                            ...services.map((service) => Padding(
-                                  padding: const EdgeInsets.only(right: 8.0),
-                                  child: Chip(
-                                    avatar: Icon(
-                                      service == "Off-leash Dog Park"
-                                          ? Icons.pets
-                                          : service == "Off-leash Trail"
-                                              ? Icons.terrain
-                                              : service == "Off-leash Beach"
-                                                  ? Icons.beach_access
-                                                  : Icons.park,
-                                      size: 18,
-                                      color: Colors.green,
-                                    ),
-                                    label: Text(service,
-                                        style: const TextStyle(fontSize: 12)),
-                                    backgroundColor: Colors.green[50],
-                                  ),
-                                )),
-                            const SizedBox(width: 6),
-
-                            // ★ ADDED: "+ Add Activity" button (adds to parks/{id}.services)
-                            TextButton(
-                              style: TextButton.styleFrom(
-                                foregroundColor: Colors.green.shade800,
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 8, vertical: 4),
-                              ),
-                              onPressed: () async {
-                                // options you allow users to add
-                                const all = <String>[
-                                  "Off-leash Trail",
-                                  "Off-leash Dog Park",
-                                  "Off-leash Beach",
-                                  "On-leash Trail",
-                                ];
-
-                                // Only show ones not already added
-                                final options = all
-                                    .where((s) => !services.contains(s))
-                                    .toList();
-
-                                if (options.isEmpty) {
-                                  if (context.mounted) {
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      const SnackBar(
-                                        content: Text(
-                                            "All activities are already added."),
-                                      ),
-                                    );
-                                  }
-                                  return;
-                                }
-
-                                final newService = await showDialog<String>(
-                                  context: context,
-                                  builder: (ctx) {
-                                    String? selected = options.first;
-                                    return StatefulBuilder(
-                                      builder: (ctx, setState) {
-                                        return AlertDialog(
-                                          title: const Text("Add activity"),
-                                          content:
-                                              DropdownButtonFormField<String>(
-                                            value: selected,
-                                            items: options
-                                                .map((s) => DropdownMenuItem(
-                                                      value: s,
-                                                      child: Text(s),
-                                                    ))
-                                                .toList(),
-                                            onChanged: (val) =>
-                                                setState(() => selected = val),
-                                          ),
-                                          actions: [
-                                            TextButton(
-                                              onPressed: () =>
-                                                  Navigator.of(ctx).pop(),
-                                              child: const Text("Cancel"),
-                                            ),
-                                            ElevatedButton(
-                                              onPressed: () => Navigator.of(ctx)
-                                                  .pop(selected),
-                                              child: const Text("Add"),
-                                            ),
-                                          ],
-                                        );
-                                      },
-                                    );
-                                  },
-                                );
-
-                                if (newService == null || newService.isEmpty) {
-                                  return;
-                                }
-
-                                try {
-                                  // Write to Firestore
-                                  await FirebaseFirestore.instance
-                                      .collection('parks')
-                                      .doc(parkId)
-                                      .update({
-                                    'services':
-                                        FieldValue.arrayUnion([newService]),
-                                    'updatedAt': FieldValue.serverTimestamp(),
-                                  });
-
-                                  // Update local UI + cache so filters work immediately
-                                  services.add(newService);
-                                  _parkServicesById[parkId] =
-                                      List<String>.from(services);
-                                  setStateDialog(() {});
-
-                                  if (_selectedFilters.isNotEmpty) {
-                                    _applyFilters();
-                                  }
-
-                                  if (context.mounted) {
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      SnackBar(
-                                          content: Text("Added: $newService")),
-                                    );
-                                  }
-                                } catch (e) {
-                                  if (context.mounted) {
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      SnackBar(
-                                          content: Text(
-                                              "Couldn’t add activity: $e")),
-                                    );
-                                  }
-                                }
-                              },
-                              child: const Text(
-                                "Add Activity",
-                                style: TextStyle(fontWeight: FontWeight.w600),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-                  // Users list
-                  Expanded(
-                    child: ListView.separated(
-                      padding: const EdgeInsets.symmetric(horizontal: 12),
-                      itemCount: userList.length,
-                      separatorBuilder: (_, __) => const SizedBox(height: 6),
-                      itemBuilder: (ctx, i) {
-                        final petData = userList[i];
-                        final ownerId = petData['ownerId'] as String? ?? '';
-                        final petId = petData['petId'] as String? ?? '';
-                        final petName = petData['petName'] as String? ?? '';
-                        final petPhoto =
-                            petData['petPhotoUrl'] as String? ?? '';
-                        final checkIn = petData['checkInTime'] as String? ?? '';
-                        final ownerName =
-                            (petData['ownerName'] as String? ?? '').trim();
-                        final mine = (ownerId == currentUser.uid);
-
-                        return ListTile(
-                          leading: (petPhoto.isNotEmpty)
-                              ? ClipOval(
-                                  child: Image.network(
-                                    petPhoto,
-                                    width: 40,
-                                    height: 40,
-                                    fit: BoxFit.cover,
-                                    filterQuality: FilterQuality.low,
-                                    cacheWidth: 120,
-                                  ),
-                                )
-                              : const CircleAvatar(
-                                  backgroundColor: Colors.brown,
-                                  child: Icon(Icons.pets, color: Colors.white),
-                                ),
-                          title: Text(petName),
-                          subtitle: Text(
-                            [
-                              if (ownerName.isNotEmpty && !mine) ownerName,
-                              if (mine) "Your pet",
-                              if (checkIn.isNotEmpty)
-                                "– Checked in for $checkIn",
-                            ].whereType<String>().join(' '),
-                          ),
-                          trailing: _favoritePetIds.contains(petId)
-                              ? IconButton(
-                                  tooltip: "Remove Favorite",
-                                  onPressed: () => _unfriend(ownerId, petId),
-                                  icon: const Icon(Icons.favorite,
-                                      color: Colors.redAccent),
-                                )
-                              : IconButton(
-                                  tooltip: "Add Favorite",
-                                  onPressed: () => _addFriend(ownerId, petId),
-                                  icon: const Icon(Icons.favorite_border),
-                                ),
-                        );
-                      },
-                    ),
-                  ),
-
-                  // Row 1: Check In/Out + Park Chat
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(12, 8, 12, 6),
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: _BigActionButton(
-                            label: isCheckedIn ? "Check Out" : "Check In",
-                            backgroundColor: isCheckedIn
-                                ? Colors.red
-                                : const Color(0xFF567D46),
-                            onPressed: () async {
-                              showDialog(
-                                context: context,
-                                barrierDismissible: false,
-                                builder: (_) => const AlertDialog(
-                                  content: SizedBox(
-                                    height: 120,
-                                    child: Center(
-                                        child: CircularProgressIndicator()),
-                                  ),
-                                ),
-                              );
-
-                              try {
-                                if (isCheckedIn) {
-                                  await activeDocRef.delete();
-                                  if (context.mounted) {
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      const SnackBar(
-                                          content: Text("Checked out of park")),
-                                    );
-                                  }
-                                } else {
-                                  await _locationService
-                                      .uploadUserToActiveUsersTable(
-                                    parkLatitude,
-                                    parkLongitude,
-                                    parkName,
-                                  );
-                                  if (context.mounted) {
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      const SnackBar(
-                                          content: Text("Checked in to park")),
-                                    );
-                                  }
-                                }
-                              } catch (e) {
-                                if (context.mounted) {
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    SnackBar(content: Text("Error: $e")),
-                                  );
-                                }
-                              } finally {
-                                if (context.mounted) {
-                                  Navigator.of(context, rootNavigator: true)
-                                      .pop();
-                                  Navigator.of(context).pop();
-                                }
-                              }
-                            },
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: _BigActionButton(
-                            label: "Park Chat",
-                            onPressed: () {
-                              Navigator.of(context).pop();
-                              Navigator.push(
-                                context,
-                                MaterialPageRoute(
-                                  builder: (_) =>
-                                      ChatRoomScreen(parkId: parkId),
-                                ),
-                              );
-                            },
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-
-                  // Row 2: Show Events + Add Event
-                  Padding(
-                    padding: const EdgeInsets.fromLTRB(12, 0, 12, 16),
-                    child: Row(
-                      children: [
-                        Expanded(
-                          child: _BigActionButton(
-                            label: "Show Events",
-                            onPressed: () {
-                              Navigator.of(context).pop();
-                              widget.onShowEvents(parkId);
-                            },
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: _BigActionButton(
-                            label: "Add Event",
-                            onPressed: () {
-                              Navigator.of(context).pop();
-                              _addEvent(parkId, parkLatitude, parkLongitude);
-                            },
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            );
-          });
-        },
-      );
-    } catch (e) {
-      if (!mounted) return;
-      Navigator.of(context, rootNavigator: true).pop();
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Error loading active users: $e")),
-      );
-    }
-  }
-
-  Future<void> _handleCheckIn(Park park, double parkLatitude,
-      double parkLongitude, BuildContext context) async {
-    final currentUser = FirebaseAuth.instance.currentUser;
-    if (currentUser == null) return;
-
-    try {
-      await _checkOutFromAllParks();
-
-      await _locationService.uploadUserToActiveUsersTable(
-        parkLatitude,
-        parkLongitude,
-        park.name,
+      await _location.changeSettings(
+        accuracy: loc.LocationAccuracy.high,
+        interval: 0,
+        distanceFilter: 0,
       );
 
-      if (_finalPosition != null) {
-        await _loadNearbyParks(_finalPosition!);
-      }
+      final fresh = await _location.onLocationChanged.firstWhere((l) {
+        final acc = l.accuracy ?? double.infinity;
+        return l.latitude != null &&
+            l.longitude != null &&
+            acc <= minAccuracyMeters;
+      }).timeout(freshTimeout);
 
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text("Checked in successfully")));
+      if (fresh.latitude != null && fresh.longitude != null) {
+        return LatLng(fresh.latitude!, fresh.longitude!);
       }
-    } catch (e) {
-      debugPrint("Error checking in: $e");
-      if (context.mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text("Error checking in: $e")));
-      }
-    }
-  }
-
-  Future<void> _handleCheckOut(String parkId, BuildContext context) async {
-    final currentUser = FirebaseAuth.instance.currentUser;
-    if (currentUser == null) return;
-
-    try {
-      await FirebaseFirestore.instance
-          .collection('parks')
-          .doc(parkId)
-          .collection('active_users')
-          .doc(currentUser.uid)
-          .delete();
-    } catch (e) {
-      debugPrint("Error checking out: $e");
-      if (context.mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text("Error checking out: $e")));
-      }
+    } catch (_) {
     } finally {
-      if (_finalPosition != null) {
-        await _loadNearbyParks(_finalPosition!);
-      }
-      if (context.mounted) {
-        Navigator.of(context, rootNavigator: true).pop();
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text("Checked out successfully")),
-        );
-      }
+      try {
+        await _location.changeSettings(accuracy: loc.LocationAccuracy.balanced);
+      } catch (_) {}
     }
-  }
-
-  Future<void> _checkOutFromAllParks() async {
-    final currentUser = FirebaseAuth.instance.currentUser;
-    if (currentUser == null) return;
 
     try {
-      final snaps = await FirebaseFirestore.instance
-          .collectionGroup('active_users')
-          .where('uid', isEqualTo: currentUser.uid)
-          .get();
-
-      final wb = FirebaseFirestore.instance.batch();
-      for (final doc in snaps.docs) {
-        wb.delete(doc.reference);
+      final l = await _location
+          .getLocation()
+          .timeout(const Duration(milliseconds: 800));
+      if (l.latitude != null && l.longitude != null) {
+        return LatLng(l.latitude!, l.longitude!);
       }
-      await wb.commit();
-    } catch (e) {
-      debugPrint('Error checking out from all parks: $e');
-    }
+    } catch (_) {}
+
+    final saved = await _locationService.getUserLocationOrCached();
+    if (saved != null) return saved;
+
+    return _currentMapCenter;
+  }
+
+  // --- Assets -> Bitmap ---
+  Future<BitmapDescriptor> _bitmapFromAsset(
+    String assetPath, {
+    int width = 64,
+  }) async {
+    final data = await rootBundle.load(assetPath);
+    final codec = await ui.instantiateImageCodec(
+      data.buffer.asUint8List(),
+      targetWidth: width,
+      targetHeight: width,
+    );
+    final frame = await codec.getNextFrame();
+    final byteData =
+        await frame.image.toByteData(format: ui.ImageByteFormat.png);
+    return BitmapDescriptor.fromBytes(byteData!.buffer.asUint8List());
+  }
+
+  // --- Custom bitmaps for walk notes (pee/poop/caution) ---
+  BitmapDescriptor? _peeIcon;
+  BitmapDescriptor? _poopIcon;
+  BitmapDescriptor? _cautionIcon;
+
+  Future<void> _ensureNoteIcons() async {
+    _peeIcon ??= await _bitmapFromAsset('assets/icon/pee.png', width: 64);
+    _poopIcon ??= await _bitmapFromAsset('assets/icon/poop.png', width: 64);
+    _cautionIcon ??= await _bitmapFromIcon(
+      Icons.warning_amber_rounded,
+      fg: Colors.black87,
+      bg: Colors.amber.shade600,
+    );
+  }
+
+  // --------------- Users in park ---------------
+  Future<void> _showUsersInPark(
+    String parkId,
+    String parkName,
+    double parkLatitude,
+    double parkLongitude,
+  ) async {
+    await showUsersInParkDialog(
+      context: context,
+      parkId: parkId,
+      parkName: parkName,
+      parkLatitude: parkLatitude,
+      parkLongitude: parkLongitude,
+      firestoreService: FirestoreService(),
+      locationService: _locationService,
+      favoritePetIds: _favoritePetIds,
+      onShowEvents: widget.onShowEvents,
+      onAddEvent: _addEvent,
+      onAddFriend: _addFriend,
+      onUnfriend: _unfriend,
+      checkedInForSince: _checkedInForSince,
+      onLikeChanged: (id, liked) {
+        // Optional hook: if you want to react to likes at map level
+      },
+      onServicesUpdated: (id, newServices) {
+        // Keep your cache + filters up to date
+        _parkServicesById[id] = List<String>.from(newServices);
+        if (_selectedFilters.isNotEmpty) {
+          _applyFilters();
+        }
+      },
+    );
   }
 
   void _addEvent(String parkId, double parkLatitude, double parkLongitude) {
@@ -2699,7 +2226,7 @@ class _MapTabState extends State<MapTab>
                     ),
                     onPressed: (_finishingWalk || _startingWalk)
                         ? null
-                        : _toggleWalk, // <<< disable while starting/finishing
+                        : _toggleWalk, // disable while starting/finishing
                     child: _finishingWalk
                         ? const SizedBox(
                             height: 24,
@@ -2915,13 +2442,14 @@ class _MapTabState extends State<MapTab>
     _rebuildParksListeners();
   }
 
-  // ---------- Celebration ----------
+  // ---------- Celebration + Revive ----------
   Future<void> _showCelebrationDialog({
     required int steps,
     required double meters,
     int? streakCurrent,
     int? streakLongest,
     bool streakIsNewRecord = false,
+    bool showAdAfter = true,
   }) async {
     if (!mounted) return;
     final km = (meters / 1000).toStringAsFixed(meters >= 100 ? 1 : 2);
@@ -2940,7 +2468,8 @@ class _MapTabState extends State<MapTab>
       ),
     );
 
-    if (!mounted) return;
+    if (!mounted || !showAdAfter) return;
+
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       try {
         await _adManager.show(onUnavailable: _adManager.preload);
@@ -2948,6 +2477,333 @@ class _MapTabState extends State<MapTab>
         _adManager.preload();
       }
     });
+  }
+
+  Future<void> _showReviveDialog({
+    required int previousStreak,
+    required int steps,
+    required double meters,
+    int? streakCurrent,
+    int? streakLongest,
+    bool streakIsNewRecord = false,
+  }) async {
+    if (!mounted) return;
+    final km = (meters / 1000).toStringAsFixed(meters >= 100 ? 1 : 2);
+
+    final watchAd = await showDialog<bool>(
+      context: context,
+      barrierDismissible: true,
+      builder: (dialogCtx) {
+        return AlertDialog(
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(18),
+          ),
+          titlePadding: const EdgeInsets.fromLTRB(24, 24, 24, 8),
+          contentPadding: const EdgeInsets.fromLTRB(24, 8, 24, 4),
+          actionsPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+          title: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: const [
+                  Icon(Icons.local_fire_department,
+                      color: Colors.orange, size: 26),
+                  SizedBox(width: 8),
+                  Text(
+                    "Don't lose your streak!",
+                    style: TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 4),
+              Text(
+                "$previousStreak-day streak at risk",
+                style: TextStyle(
+                  fontSize: 14,
+                  color: Colors.grey.shade600,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ],
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF567D46).withOpacity(0.08),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Row(
+                  children: [
+                    const Icon(Icons.pets, size: 18, color: Color(0xFF567D46)),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        "Today's walk: $km km • $steps steps",
+                        style: const TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 14),
+              const Text(
+                "Watch a short ad to:",
+                style: TextStyle(
+                  fontWeight: FontWeight.w700,
+                  fontSize: 14,
+                ),
+              ),
+              const SizedBox(height: 6),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: const [
+                  Text("•  ", style: TextStyle(fontSize: 13)),
+                  Expanded(
+                    child: Text(
+                      "Restore your full streak as if you never missed 💫",
+                      style: TextStyle(fontSize: 13),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 2),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: const [
+                  Text("•  ", style: TextStyle(fontSize: 13)),
+                  Expanded(
+                    child: Text(
+                      "Keep your progress and momentum going",
+                      style: TextStyle(fontSize: 13),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 2),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: const [
+                  Text("•  ", style: TextStyle(fontSize: 13)),
+                  Expanded(
+                    child: Text(
+                      "Only takes a few seconds",
+                      style: TextStyle(fontSize: 13),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Text(
+                "You can still finish your walk normally if you skip.",
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Colors.grey.shade600,
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            SizedBox(
+              width: double.infinity,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFF567D46),
+                        foregroundColor: Colors.white,
+                        elevation: 2,
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 12),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                        textStyle: const TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                      onPressed: () => Navigator.of(dialogCtx).pop(true),
+                      child: const Text("Revive my streak 🔥"),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  TextButton(
+                    onPressed: () => Navigator.of(dialogCtx).pop(false),
+                    child: Text(
+                      "Skip for now",
+                      style: TextStyle(
+                        color: Colors.grey.shade700,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        );
+      },
+    );
+
+    // Helper to pull the latest streak from Firestore
+    Future<(int?, int?)> _loadLatestStreak() async {
+      final uid = FirebaseAuth.instance.currentUser?.uid;
+      if (uid == null) return (streakCurrent, streakLongest);
+
+      try {
+        final doc = await FirebaseFirestore.instance
+            .collection('owners')
+            .doc(uid)
+            .collection('stats')
+            .doc('walkStreak')
+            .get();
+
+        if (!doc.exists) return (streakCurrent, streakLongest);
+        final data = doc.data() as Map<String, dynamic>;
+        final cur = (data['current'] ?? streakCurrent) as int?;
+        final lng = (data['longest'] ?? streakLongest) as int?;
+        return (cur, lng);
+      } catch (e) {
+        debugPrint('loadLatestStreak failed: $e');
+        return (streakCurrent, streakLongest);
+      }
+    }
+
+    // User declined → apply fallback (streak = 1 for today), then show updated numbers
+    if (watchAd != true) {
+      int? latestCur = streakCurrent;
+      int? latestLng = streakLongest;
+      try {
+        await _applyStreakFallbackForToday();
+        final pair = await _loadLatestStreak();
+        latestCur = pair.$1;
+        latestLng = pair.$2;
+      } catch (e) {
+        debugPrint('fallback streak update failed: $e');
+      }
+
+      final isNew =
+          (latestCur != null && latestLng != null && latestCur! >= latestLng!)
+              ? true
+              : streakIsNewRecord;
+
+      await _showCelebrationDialog(
+        steps: steps,
+        meters: meters,
+        streakCurrent: latestCur,
+        streakLongest: latestLng,
+        streakIsNewRecord: isNew,
+        showAdAfter: true,
+      );
+      return;
+    }
+
+    // --- Rewarded ad flow ---
+    bool rewardEarned = false;
+    String? adError;
+    final completer = Completer<void>();
+
+    RewardedStreakAds.show(
+      onRewardEarned: (reward) {
+        rewardEarned = true;
+      },
+      onDismissed: () {
+        if (!completer.isCompleted) {
+          completer.complete();
+        }
+      },
+      onFailedToShow: (msg) {
+        adError = msg;
+        if (!completer.isCompleted) {
+          completer.complete();
+        }
+      },
+    );
+
+    await completer.future;
+    if (!mounted) return;
+
+    if (adError != null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text("Couldn't show revive ad: $adError")),
+      );
+
+      await _showCelebrationDialog(
+        steps: steps,
+        meters: meters,
+        streakCurrent: streakCurrent,
+        streakLongest: streakLongest,
+        streakIsNewRecord: streakIsNewRecord,
+        showAdAfter: true,
+      );
+      return;
+    }
+
+    int? finalCur = streakCurrent;
+    int? finalLng = streakLongest;
+    bool finalIsNewRecord = streakIsNewRecord;
+
+    if (rewardEarned) {
+      try {
+        await applyStreakReviveAfterReward();
+
+        // pull the *updated* streak
+        final pair = await _loadLatestStreak();
+        finalCur = pair.$1;
+        finalLng = pair.$2;
+
+        if (finalCur != null && finalLng != null && finalCur! >= finalLng!) {
+          finalIsNewRecord = true;
+        }
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                "Your $previousStreak-day streak has been restored! 🎉",
+              ),
+            ),
+          );
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text("Couldn't revive streak: $e")),
+          );
+        }
+      }
+    } else {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text("Streak not revived (ad not completed)."),
+          ),
+        );
+      }
+    }
+
+    await _showCelebrationDialog(
+      steps: steps,
+      meters: meters,
+      streakCurrent: finalCur,
+      streakLongest: finalLng,
+      streakIsNewRecord: finalIsNewRecord,
+      showAdAfter: true,
+    );
   }
 }
 
@@ -2999,82 +2855,17 @@ class _StreakResult {
   final int current;
   final int longest;
 
+  // NEW: revive info
+  final bool reviveEligible;
+  final int? prevBeforeLoss;
+
   const _StreakResult({
     required this.alreadyUpdatedToday,
     required this.wasIncremented,
     required this.isNewRecord,
     required this.current,
     required this.longest,
+    this.reviveEligible = false,
+    this.prevBeforeLoss,
   });
-}
-
-class _BigActionButton extends StatelessWidget {
-  final String label;
-  final VoidCallback onPressed;
-  final Color? backgroundColor;
-
-  const _BigActionButton({
-    Key? key,
-    required this.label,
-    required this.onPressed,
-    this.backgroundColor,
-  }) : super(key: key);
-
-  @override
-  Widget build(BuildContext context) {
-    return ElevatedButton(
-      style: ElevatedButton.styleFrom(
-        backgroundColor: backgroundColor ?? const Color(0xFF567D46),
-        foregroundColor: Colors.white,
-        minimumSize: const Size.fromHeight(56),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-        textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
-        padding: const EdgeInsets.symmetric(vertical: 16),
-      ),
-      onPressed: onPressed,
-      child: Text(label),
-    );
-  }
-}
-
-// ---------- MapSurface: isolates the GoogleMap from frequent rebuilds ----------
-class MapSurface extends StatefulWidget {
-  final void Function(GoogleMapController) onMapCreated;
-  final void Function(CameraPosition) onCameraMove;
-  final LatLng initialTarget;
-  final Set<Marker> markers;
-  final Set<Polyline> polylines;
-  final bool myLocationEnabled;
-
-  const MapSurface({
-    Key? key,
-    required this.onMapCreated,
-    required this.onCameraMove,
-    required this.initialTarget,
-    required this.markers,
-    required this.polylines,
-    required this.myLocationEnabled,
-  }) : super(key: key);
-
-  @override
-  State<MapSurface> createState() => _MapSurfaceState();
-}
-
-class _MapSurfaceState extends State<MapSurface> {
-  @override
-  Widget build(BuildContext context) {
-    return GoogleMap(
-      onMapCreated: widget.onMapCreated,
-      onCameraMove: widget.onCameraMove,
-      initialCameraPosition: CameraPosition(
-        target: widget.initialTarget,
-        zoom: 14,
-      ),
-      markers: widget.markers,
-      polylines: widget.polylines,
-      myLocationEnabled: widget.myLocationEnabled,
-      myLocationButtonEnabled: false,
-      compassEnabled: true,
-    );
-  }
 }

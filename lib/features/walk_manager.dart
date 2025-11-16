@@ -19,13 +19,13 @@ class WalkManager extends ChangeNotifier {
 
   WalkManager({
     required this.location,
-    this.minDuration = const Duration(seconds: 30),
-    this.minSteps = 50,
+    this.minDuration = const Duration(seconds: 10),
+    this.minSteps = 10,
   });
 
   static const _persistKey = 'active_walk';
-  static const inactivityLimit = Duration(minutes: 10);
-  static const maxWalkLimit = Duration(hours: 24);
+  static const inactivityLimit = Duration(minutes: 15);
+  static const maxWalkLimit = Duration(hours: 48);
 
   // ---- Public state (read-only via getters)
   bool _active = false;

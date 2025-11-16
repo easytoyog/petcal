@@ -52,7 +52,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _goToMapTab() {
-    setState(() => _selectedIndex = 1); // assuming index 1 is MapTab
+    setState(() => _selectedIndex = 1); // index 1 = MapTab
   }
 
   void _openWalkHistory(BuildContext context) {
@@ -86,6 +86,9 @@ class _HomeScreenState extends State<HomeScreen> {
                   fontSize: 12,
                 ),
                 onTap: () => _openWalkHistory(context),
+                // later you can upgrade this onTap to:
+                // - if reviveEligible → open "watch ad to revive"
+                // - else → open history
               ),
             ),
 
@@ -104,7 +107,7 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ),
 
-            // Right: same width as left padding + icon size to balance visually
+            // Right spacer to balance visually
             const SizedBox(width: 18),
           ],
         ),

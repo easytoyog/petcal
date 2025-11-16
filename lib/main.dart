@@ -481,7 +481,7 @@ class _UpdateGateRootState extends State<UpdateGateRoot> {
 
 class _SoftUpdateBanner extends StatefulWidget {
   final Widget? child;
-  const _SoftUpdateBanner({this.child});
+  const _SoftUpdateBanner(this.child);
 
   @override
   State<_SoftUpdateBanner> createState() => _SoftUpdateBannerState();
@@ -818,12 +818,10 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text("No user found with this email.")),
           );
-          break;
         case "wrong-password":
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text("Incorrect password.")),
           );
-          break;
         default:
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text("Login error: ${e.message}")),

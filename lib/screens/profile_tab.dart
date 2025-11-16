@@ -9,6 +9,7 @@ import 'package:inthepark/models/pet_model.dart';
 import 'package:inthepark/utils/image_upload_util.dart';
 import 'package:inthepark/screens/owner_detail_screen.dart';
 import 'package:inthepark/screens/edit_profile_screen.dart';
+import 'package:inthepark/widgets/rewarded_streak_ads.dart';
 import 'dart:io' show Platform;
 import 'package:share_plus/share_plus.dart';
 import 'package:intl/intl.dart';
@@ -180,6 +181,7 @@ class _ProfileTabState extends State<ProfileTab> {
 
   // For sheet upload spinners (add/edit pet)
   bool _sheetUploading = false;
+  bool _revivingStreak = false;
 
   @override
   void initState() {
@@ -245,6 +247,98 @@ class _ProfileTabState extends State<ProfileTab> {
     );
   }
 
+  String _dayKeyLocal(DateTime dt) {
+    final d = DateTime(dt.year, dt.month, dt.day);
+    final mm = d.month.toString().padLeft(2, '0');
+    final dd = d.day.toString().padLeft(2, '0');
+    return '${d.year}-$mm-$dd';
+  }
+
+  /// TODO: wire to your real rewarded-ad flow; return true only if the user
+  /// fully completes the ad.
+  Future<bool> _watchReviveAd() async {
+    final c = Completer<bool>();
+
+    await RewardedStreakAds.show(
+      onRewardEarned: (r) {
+        if (!c.isCompleted) c.complete(true);
+      },
+      onDismissed: () {
+        if (!c.isCompleted) c.complete(false);
+      },
+      onFailedToShow: (msg) {
+        if (!c.isCompleted) c.complete(false);
+        if (mounted && msg.isNotEmpty) {
+          ScaffoldMessenger.of(context)
+              .showSnackBar(SnackBar(content: Text(msg)));
+        }
+      },
+    );
+
+    return c.future;
+  }
+
+  /// Atomically revive **yesterday** in owners/{uid}/stats/walkStreak
+  /// if the streak broke exactly the day before yesterday and hasn't been revived.
+  Future<void> _applyStreakReviveAfterReward() async {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) throw 'Not signed in';
+
+    String dayKey(DateTime d) {
+      final dd = DateTime(d.year, d.month, d.day);
+      final mm = dd.month.toString().padLeft(2, '0');
+      final dd2 = dd.day.toString().padLeft(2, '0');
+      return '${dd.year}-$mm-$dd2';
+    }
+
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final yKey = dayKey(today.subtract(const Duration(days: 1))); // yesterday
+    final dbyKey =
+        dayKey(today.subtract(const Duration(days: 2))); // day-before-yesterday
+
+    final docRef = FirebaseFirestore.instance
+        .collection('owners')
+        .doc(uid)
+        .collection('stats')
+        .doc('walkStreak');
+
+    await FirebaseFirestore.instance.runTransaction((txn) async {
+      final snap = await txn.get(docRef);
+      if (!snap.exists) {
+        throw 'No streak to revive.';
+      }
+      final data = snap.data() as Map<String, dynamic>;
+      int current = (data['current'] ?? 0) as int;
+      int longest = (data['longest'] ?? 0) as int;
+      final lastDate = (data['lastDate'] as String?)?.trim();
+      final alreadyRevivedFor = (data['revivedForDay'] as String?)?.trim();
+
+      // Eligible only if the break was exactly yesterday (meaning lastDate == DBY)
+      if (lastDate != dbyKey) {
+        throw 'Revive not eligible (break wasn’t yesterday).';
+      }
+      if (alreadyRevivedFor == yKey) {
+        throw 'Yesterday already revived.';
+      }
+
+      current += 1;
+      if (current > longest) longest = current;
+
+      txn.set(
+        docRef,
+        {
+          'current': current,
+          'longest': longest,
+          'lastDate': yKey, // move lastDate forward to yesterday
+          'revivedForDay': yKey, // record the revived day
+          'updatedAt': FieldValue.serverTimestamp(),
+        },
+        SetOptions(merge: true),
+      );
+    });
+  }
+
   @override
   void dispose() {
     firstNameController.dispose();
@@ -276,7 +370,6 @@ class _ProfileTabState extends State<ProfileTab> {
     return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
       stream: doc,
       builder: (context, snap) {
-        // Loading / empty states
         if (snap.connectionState == ConnectionState.waiting) {
           return Container(
             decoration: _glassCardDecoration(),
@@ -284,10 +377,9 @@ class _ProfileTabState extends State<ProfileTab> {
             child: Row(
               children: const [
                 SizedBox(
-                  width: 22,
-                  height: 22,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                ),
+                    width: 22,
+                    height: 22,
+                    child: CircularProgressIndicator(strokeWidth: 2)),
                 SizedBox(width: 12),
                 Text('Loading streak...',
                     style: TextStyle(fontWeight: FontWeight.w600)),
@@ -299,57 +391,129 @@ class _ProfileTabState extends State<ProfileTab> {
         final data = snap.data?.data() ?? const {};
         final current = (data['current'] as num?)?.toInt() ?? 0;
         final longest = (data['longest'] as num?)?.toInt() ?? 0;
+        final lastDate = (data['lastDate'] as String?)?.trim();
+        final revivedForDay = (data['revivedForDay'] as String?)?.trim();
 
-        // Entire card is clickable → goes to My Walks
+        // Revive eligibility: break happened yesterday → lastDate == day-before-yesterday
+        final now = DateTime.now();
+        final today = DateTime(now.year, now.month, now.day);
+        final yesterdayKey =
+            _dayKeyLocal(today.subtract(const Duration(days: 1)));
+        final dbyKey = _dayKeyLocal(today.subtract(const Duration(days: 2)));
+        final eligible = lastDate == dbyKey && revivedForDay != yesterdayKey;
+
         return Material(
           color: Colors.transparent,
           child: Ink(
             decoration: _glassCardDecoration(),
-            child: InkWell(
-              borderRadius: BorderRadius.circular(18),
-              onTap: _openWalksList,
-              child: Padding(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-                child: Row(
-                  children: [
-                    Container(
-                      width: 46,
-                      height: 46,
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFFF7A59),
-                        borderRadius: BorderRadius.circular(12),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // Header row + quick nav to walks
+                  Row(
+                    children: [
+                      Container(
+                        width: 46,
+                        height: 46,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFFF7A59),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: const Icon(Icons.local_fire_department,
+                            color: Colors.white, size: 28),
                       ),
-                      child: const Icon(Icons.local_fire_department,
-                          color: Colors.white, size: 28),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            'Current Streak: ${days(current)}',
-                            style: const TextStyle(
-                                fontSize: 16, fontWeight: FontWeight.w800),
-                          ),
-                          const SizedBox(height: 2),
-                          Text(
-                            'Best: ${days(longest)}',
-                            style: TextStyle(
-                              color: Colors.black.withOpacity(0.7),
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ],
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text('Current Streak: ${days(current)}',
+                                style: const TextStyle(
+                                    fontSize: 16, fontWeight: FontWeight.w800)),
+                            const SizedBox(height: 2),
+                            Text('Best: ${days(longest)}',
+                                style: TextStyle(
+                                    color: Colors.black.withOpacity(0.7),
+                                    fontWeight: FontWeight.w600)),
+                          ],
+                        ),
                       ),
-                    ),
-                    // small affordance so it reads as a link
-                    const SizedBox(width: 8),
-                    _MiniHintPill(text: 'History'),
-                    const Icon(Icons.chevron_right, color: Colors.black54),
-                  ],
-                ),
+                      const SizedBox(width: 8),
+                      _MiniHintPill(text: 'History', onTap: _openWalksList),
+                      const Icon(Icons.chevron_right, color: Colors.black54),
+                    ],
+                  ),
+
+                  const SizedBox(height: 12),
+
+                  // Revive CTA (only when eligible)
+                  if (eligible)
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton.icon(
+                        icon: _revivingStreak
+                            ? const SizedBox(
+                                width: 18,
+                                height: 18,
+                                child:
+                                    CircularProgressIndicator(strokeWidth: 2.2))
+                            : const Icon(Icons.favorite),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF567D46),
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(
+                              vertical: 12, horizontal: 14),
+                          shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12)),
+                        ),
+                        label: Text(
+                          _revivingStreak
+                              ? 'Reviving…'
+                              : 'You’ve come this far — don’t break the streak! Revive it and stay on fire! 🔥',
+                          style: const TextStyle(
+                              fontSize: 15, fontWeight: FontWeight.w800),
+                        ),
+                        onPressed: _revivingStreak
+                            ? null
+                            : () async {
+                                setState(() => _revivingStreak = true);
+                                try {
+                                  final ok = await _watchReviveAd();
+                                  if (!ok) {
+                                    if (!mounted) return;
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      const SnackBar(
+                                          content: Text(
+                                              'Ad not completed. Revive cancelled.')),
+                                    );
+                                  } else {
+                                    await _applyStreakReviveAfterReward();
+                                    if (!mounted) return;
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      const SnackBar(
+                                          content: Text(
+                                              'Streak revived! Keep it going!🔥')),
+                                    );
+                                  }
+                                } catch (e) {
+                                  if (!mounted) return;
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                      SnackBar(
+                                          content: Text('Revive failed: $e')));
+                                } finally {
+                                  if (mounted) {
+                                    setState(() => _revivingStreak = false);
+                                  }
+                                }
+                              },
+                      ),
+                    )
+                  else
+                    const Text('Keep up the daily walks! 🎉',
+                        style: TextStyle(fontWeight: FontWeight.w600)),
+                ],
               ),
             ),
           ),
@@ -1359,10 +1523,28 @@ class _AvatarPicker extends StatelessWidget {
   }
 }
 
+class ReviveStreakBanner extends StatefulWidget {
+  const ReviveStreakBanner({super.key});
+
+  @override
+  State<ReviveStreakBanner> createState() => _ReviveStreakBannerState();
+}
+
 class WalksListScreen extends StatelessWidget {
   final VoidCallback? onGoToMapTab;
 
   const WalksListScreen({super.key, this.onGoToMapTab});
+
+  // --- Small helpers ---
+  String _fmtTotalDuration(int s) {
+    if (s <= 0) return '0m';
+    final h = s ~/ 3600;
+    final m = (s % 3600) ~/ 60;
+    final sec = s % 60;
+    if (h > 0) return '${h}h ${m}m';
+    if (m > 0) return '${m}m ${sec}s';
+    return '${sec}s';
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1397,16 +1579,6 @@ class WalksListScreen extends StatelessWidget {
                     .orderBy('startedAt', descending: true)
                     .snapshots(),
                 builder: (context, snap) {
-                  String _fmtTotalDuration(int s) {
-                    if (s <= 0) return '0m';
-                    final h = s ~/ 3600;
-                    final m = (s % 3600) ~/ 60;
-                    final sec = s % 60;
-                    if (h > 0) return '${h}h ${m}m';
-                    if (m > 0) return '${m}m ${sec}s';
-                    return '${sec}s';
-                  }
-
                   if (snap.connectionState == ConnectionState.waiting) {
                     return const Center(child: CircularProgressIndicator());
                   }
@@ -1419,7 +1591,8 @@ class WalksListScreen extends StatelessWidget {
                     );
                   }
                   final docs = snap.data?.docs ?? [];
-// ---------- EMPTY STATE (only when no walks) ----------
+
+                  // ---------- EMPTY STATE ----------
                   if (docs.isEmpty) {
                     return Center(
                       child: Column(
@@ -1470,16 +1643,12 @@ class WalksListScreen extends StatelessWidget {
                     );
                   }
 
-                  // --- replace the whole `return ListView.separated(` ... `);` block with:
-                  final NumberFormat stepsFmt = NumberFormat.decimalPattern();
-
-                  /// group docs by yyyy-mm-dd
+                  // ---------- GROUP WALKS BY DAY ----------
                   final Map<DateTime, List<QueryDocumentSnapshot>> byDay = {};
                   for (final doc in docs) {
                     final data = doc.data() as Map<String, dynamic>? ?? {};
                     final startedAt =
                         (data['startedAt'] as Timestamp?)?.toDate();
-                    // if there's no startedAt, bucket into "unknown" (skip if you prefer)
                     final dayKey = startedAt != null
                         ? DateTime(
                             startedAt.year, startedAt.month, startedAt.day)
@@ -1487,7 +1656,7 @@ class WalksListScreen extends StatelessWidget {
                     byDay.putIfAbsent(dayKey, () => []).add(doc);
                   }
 
-// sort newest day first; move "unknown" (epoch) to the end
+                  // sort newest day first; move "unknown" to end
                   final days = byDay.keys.toList()
                     ..sort((a, b) {
                       if (a.millisecondsSinceEpoch == 0) return 1;
@@ -1495,145 +1664,390 @@ class WalksListScreen extends StatelessWidget {
                       return b.compareTo(a);
                     });
 
-                  return ListView.builder(
-                    padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
-                    itemCount: days.length,
-                    itemBuilder: (context, dayIndex) {
-                      final day = days[dayIndex];
-                      final dayDocs = byDay[day]!;
-                      final totalSteps = dayDocs.fold<int>(0, (sum, d) {
-                        final m = d.data() as Map<String, dynamic>? ?? {};
-                        return sum + ((m['steps'] as num?)?.toInt() ?? 0);
-                      });
+                  final NumberFormat stepsFmt = NumberFormat.decimalPattern();
 
-// total duration (sec) for the day
-                      final totalDurationSec = dayDocs.fold<int>(0, (sum, d) {
-                        final m = d.data() as Map<String, dynamic>? ?? {};
-                        final startedAt =
-                            (m['startedAt'] as Timestamp?)?.toDate();
-                        final endedAt = (m['endedAt'] as Timestamp?)?.toDate();
-                        final stored = (m['durationSec'] as num?)?.toInt();
-                        final dur = stored ??
-                            ((startedAt != null && endedAt != null)
-                                ? endedAt.difference(startedAt).inSeconds
-                                : 0);
-                        return sum + dur;
-                      });
+                  // ---------- LIST WITH REVIVE BANNER ----------
+                  return Column(
+                    children: [
+                      const ReviveStreakBanner(), // only shows when eligible
+                      Expanded(
+                        child: ListView.builder(
+                          padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
+                          itemCount: days.length,
+                          itemBuilder: (context, dayIndex) {
+                            final day = days[dayIndex];
+                            final dayDocs = byDay[day]!;
 
-                      // nice date label
-                      String dateLabel;
-                      if (day.millisecondsSinceEpoch == 0) {
-                        dateLabel = 'Unknown date';
-                      } else {
-                        final now = DateTime.now();
-                        final today = DateTime(now.year, now.month, now.day);
-                        final yesterday =
-                            today.subtract(const Duration(days: 1));
-                        if (day == today) {
-                          dateLabel = 'Today';
-                        } else if (day == yesterday) {
-                          dateLabel = 'Yesterday';
-                        } else {
-                          dateLabel =
-                              DateFormat('EEE, MMM d, yyyy').format(day);
-                        }
-                      }
+                            final totalSteps = dayDocs.fold<int>(0, (sum, d) {
+                              final m = d.data() as Map<String, dynamic>? ?? {};
+                              return sum + ((m['steps'] as num?)?.toInt() ?? 0);
+                            });
 
-                      return Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          _DayHeader(
-                            label: dateLabel,
-                            stepsText:
-                                '${stepsFmt.format(totalSteps)} steps • ${_fmtTotalDuration(totalDurationSec)}',
-                          ),
-                          const SizedBox(height: 8),
-                          ...dayDocs.map((doc) {
-                            final d = doc.data() as Map<String, dynamic>? ?? {};
-                            final id = doc.id;
+                            final totalDurationSec =
+                                dayDocs.fold<int>(0, (sum, d) {
+                              final m = d.data() as Map<String, dynamic>? ?? {};
+                              final startedAt =
+                                  (m['startedAt'] as Timestamp?)?.toDate();
+                              final endedAt =
+                                  (m['endedAt'] as Timestamp?)?.toDate();
+                              final stored =
+                                  (m['durationSec'] as num?)?.toInt();
+                              final dur = stored ??
+                                  ((startedAt != null && endedAt != null)
+                                      ? endedAt.difference(startedAt).inSeconds
+                                      : 0);
+                              return sum + dur;
+                            });
 
-                            final startedAt =
-                                (d['startedAt'] as Timestamp?)?.toDate();
-                            final endedAt =
-                                (d['endedAt'] as Timestamp?)?.toDate();
+                            String dateLabel;
+                            if (day.millisecondsSinceEpoch == 0) {
+                              dateLabel = 'Unknown date';
+                            } else {
+                              final now = DateTime.now();
+                              final today =
+                                  DateTime(now.year, now.month, now.day);
+                              final yesterday =
+                                  today.subtract(const Duration(days: 1));
+                              final dOnly =
+                                  DateTime(day.year, day.month, day.day);
+                              if (dOnly == today) {
+                                dateLabel = 'Today';
+                              } else if (dOnly == yesterday) {
+                                dateLabel = 'Yesterday';
+                              } else {
+                                dateLabel =
+                                    DateFormat('EEE, MMM d, yyyy').format(day);
+                              }
+                            }
 
-                            final distanceMeters =
-                                (d['distanceMeters'] as num?)?.toDouble() ??
-                                    0.0;
-                            final steps = (d['steps'] as num?)?.toInt() ?? 0;
+                            return Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                _DayHeader(
+                                  label: dateLabel,
+                                  stepsText:
+                                      '${stepsFmt.format(totalSteps)} steps • ${_fmtTotalDuration(totalDurationSec)}',
+                                ),
+                                const SizedBox(height: 8),
+                                ...dayDocs.map((doc) {
+                                  final d =
+                                      doc.data() as Map<String, dynamic>? ?? {};
+                                  final id = doc.id;
 
-                            final storedDur =
-                                (d['durationSec'] as num?)?.toInt();
-                            final durationSec = storedDur ??
-                                ((startedAt != null && endedAt != null)
-                                    ? endedAt.difference(startedAt).inSeconds
-                                    : 0);
+                                  final startedAt =
+                                      (d['startedAt'] as Timestamp?)?.toDate();
+                                  final endedAt =
+                                      (d['endedAt'] as Timestamp?)?.toDate();
 
-                            return Padding(
-                              padding: const EdgeInsets.only(bottom: 10),
-                              child: _WalkCard(
-                                id: id,
-                                startedAt: startedAt,
-                                distanceMeters: distanceMeters,
-                                durationSec: durationSec,
-                                steps: steps,
-                                onDelete: () async {
-                                  final confirm = await showDialog<bool>(
-                                    context: context,
-                                    builder: (ctx) => AlertDialog(
-                                      title: const Text('Delete walk?'),
-                                      content: const Text(
-                                          'This will permanently remove the walk.'),
-                                      actions: [
-                                        TextButton(
-                                          onPressed: () =>
-                                              Navigator.pop(ctx, false),
-                                          child: const Text('Cancel'),
-                                        ),
-                                        ElevatedButton(
-                                          onPressed: () =>
-                                              Navigator.pop(ctx, true),
-                                          child: const Text('Delete'),
-                                        ),
-                                      ],
+                                  final distanceMeters =
+                                      (d['distanceMeters'] as num?)
+                                              ?.toDouble() ??
+                                          0.0;
+                                  final steps =
+                                      (d['steps'] as num?)?.toInt() ?? 0;
+
+                                  final storedDur =
+                                      (d['durationSec'] as num?)?.toInt();
+                                  final durationSec = storedDur ??
+                                      ((startedAt != null && endedAt != null)
+                                          ? endedAt
+                                              .difference(startedAt)
+                                              .inSeconds
+                                          : 0);
+
+                                  return Padding(
+                                    padding: const EdgeInsets.only(bottom: 10),
+                                    child: _WalkCard(
+                                      id: id,
+                                      startedAt: startedAt,
+                                      distanceMeters: distanceMeters,
+                                      durationSec: durationSec,
+                                      steps: steps,
+                                      onDelete: () async {
+                                        final confirm = await showDialog<bool>(
+                                          context: context,
+                                          builder: (ctx) => AlertDialog(
+                                            title: const Text('Delete walk?'),
+                                            content: const Text(
+                                              'This will permanently remove the walk.',
+                                            ),
+                                            actions: [
+                                              TextButton(
+                                                onPressed: () =>
+                                                    Navigator.pop(ctx, false),
+                                                child: const Text('Cancel'),
+                                              ),
+                                              ElevatedButton(
+                                                onPressed: () =>
+                                                    Navigator.pop(ctx, true),
+                                                child: const Text('Delete'),
+                                              ),
+                                            ],
+                                          ),
+                                        );
+                                        if (confirm == true) {
+                                          await FirebaseFirestore.instance
+                                              .collection('owners')
+                                              .doc(user.uid)
+                                              .collection('walks')
+                                              .doc(id)
+                                              .delete();
+                                          if (context.mounted) {
+                                            ScaffoldMessenger.of(context)
+                                                .showSnackBar(
+                                              const SnackBar(
+                                                  content:
+                                                      Text('Walk deleted')),
+                                            );
+                                          }
+                                        }
+                                      },
+                                      onTap: () {
+                                        Navigator.push(
+                                          context,
+                                          MaterialPageRoute(
+                                            builder: (_) =>
+                                                WalkDetailScreen(walkId: id),
+                                          ),
+                                        );
+                                      },
                                     ),
                                   );
-                                  if (confirm == true) {
-                                    await FirebaseFirestore.instance
-                                        .collection('owners')
-                                        .doc(user.uid)
-                                        .collection('walks')
-                                        .doc(id)
-                                        .delete();
-                                    if (context.mounted) {
-                                      ScaffoldMessenger.of(context)
-                                          .showSnackBar(
-                                        const SnackBar(
-                                            content: Text('Walk deleted')),
-                                      );
-                                    }
-                                  }
-                                },
-                                onTap: () {
-                                  Navigator.push(
-                                    context,
-                                    MaterialPageRoute(
-                                      builder: (_) =>
-                                          WalkDetailScreen(walkId: id),
-                                    ),
-                                  );
-                                },
-                              ),
+                                }),
+                                const SizedBox(height: 8),
+                              ],
                             );
-                          }),
-                          const SizedBox(height: 8),
-                        ],
-                      );
-                    },
+                          },
+                        ),
+                      ),
+                    ],
                   );
                 },
               ),
       ),
+    );
+  }
+}
+
+///
+/// ReviveStreakBanner
+/// Shows a single-line card with a CTA to revive *yesterday* if the streak broke
+/// exactly the day before yesterday and hasn't already been revived for yesterday.
+///
+
+class _ReviveStreakBannerState extends State<ReviveStreakBanner> {
+  bool _reviving = false;
+
+  String _dayKey(DateTime d) {
+    final dd = DateTime(d.year, d.month, d.day);
+    final mm = dd.month.toString().padLeft(2, '0');
+    final dd2 = dd.day.toString().padLeft(2, '0');
+    return '${dd.year}-$mm-$dd2';
+  }
+
+  Future<bool> _watchReviveAd() async {
+    final c = Completer<bool>();
+    await RewardedStreakAds.show(
+      onRewardEarned: (_) {
+        if (!c.isCompleted) c.complete(true);
+      },
+      onDismissed: () {
+        if (!c.isCompleted) c.complete(false);
+      },
+      onFailedToShow: (msg) {
+        if (!c.isCompleted) c.complete(false);
+        if (mounted && msg.isNotEmpty) {
+          ScaffoldMessenger.of(context)
+              .showSnackBar(SnackBar(content: Text(msg)));
+        }
+      },
+    );
+    return c.future;
+  }
+
+  Future<void> _applyReviveForYesterday() async {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) throw 'Not signed in';
+
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final yKey = _dayKey(today.subtract(const Duration(days: 1)));
+    final dbyKey = _dayKey(today.subtract(const Duration(days: 2)));
+
+    final docRef = FirebaseFirestore.instance
+        .collection('owners')
+        .doc(uid)
+        .collection('stats')
+        .doc('walkStreak');
+
+    await FirebaseFirestore.instance.runTransaction((txn) async {
+      final snap = await txn.get(docRef);
+      if (!snap.exists) throw 'No streak to revive.';
+
+      final data = snap.data() as Map<String, dynamic>;
+      int current = (data['current'] ?? 0) as int;
+      int longest = (data['longest'] ?? 0) as int;
+      final lastDate = (data['lastDate'] as String?)?.trim();
+      final alreadyRevivedFor = (data['revivedForDay'] as String?)?.trim();
+
+      if (lastDate != dbyKey) {
+        throw 'Revive not eligible (break wasn’t yesterday).';
+      }
+      if (alreadyRevivedFor == yKey) {
+        throw 'Yesterday already revived.';
+      }
+
+      current += 1;
+      if (current > longest) longest = current;
+
+      txn.set(
+        docRef,
+        {
+          'current': current,
+          'longest': longest,
+          'lastDate': yKey,
+          'revivedForDay': yKey,
+          'canRevive': false,
+          'updatedAt': FieldValue.serverTimestamp(),
+        },
+        SetOptions(merge: true),
+      );
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return const SizedBox.shrink();
+
+    final streakDoc = FirebaseFirestore.instance
+        .collection('owners')
+        .doc(user.uid)
+        .collection('stats')
+        .doc('walkStreak')
+        .snapshots();
+
+    return StreamBuilder<DocumentSnapshot<Map<String, dynamic>>>(
+      stream: streakDoc,
+      builder: (context, snap) {
+        if (!snap.hasData) return const SizedBox(height: 8);
+
+        final data = snap.data!.data() ?? {};
+        final lastDate = (data['lastDate'] as String?)?.trim();
+        final revivedForDay = (data['revivedForDay'] as String?)?.trim();
+
+        final now = DateTime.now();
+        final today = DateTime(now.year, now.month, now.day);
+        final yKey = _dayKey(today.subtract(const Duration(days: 1)));
+        final dbyKey = _dayKey(today.subtract(const Duration(days: 2)));
+
+        final eligible = lastDate == dbyKey && revivedForDay != yKey;
+        if (!eligible) return const SizedBox(height: 8);
+
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+          child: Material(
+            color: Colors.transparent,
+            child: Ink(
+              decoration: BoxDecoration(
+                color: Colors.white.withOpacity(0.95),
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(color: Colors.black.withOpacity(0.06)),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.12),
+                    blurRadius: 14,
+                    offset: const Offset(0, 8),
+                  ),
+                ],
+              ),
+              child: Padding(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                child: Row(
+                  children: [
+                    Container(
+                      width: 40,
+                      height: 40,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFFF7A59),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: const Icon(Icons.local_fire_department,
+                          color: Colors.white, size: 24),
+                    ),
+                    const SizedBox(width: 12),
+                    const Expanded(
+                      child: Text(
+                        "Don’t let your streak fade — revive it now and keep the fire going! 🔥",
+                        style: TextStyle(
+                          fontSize: 14.5,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    ElevatedButton(
+                      onPressed: _reviving
+                          ? null
+                          : () async {
+                              setState(() => _reviving = true);
+                              try {
+                                final ok = await _watchReviveAd();
+                                if (!ok) {
+                                  if (!mounted) return;
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(
+                                        content: Text(
+                                            'Ad not completed. Revive cancelled.')),
+                                  );
+                                } else {
+                                  await _applyReviveForYesterday();
+                                  if (!mounted) return;
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(
+                                        content: Text(
+                                            'Streak revived! Keep it going!🔥')),
+                                  );
+                                }
+                              } catch (e) {
+                                if (!mounted) return;
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(content: Text('Revive failed: $e')),
+                                );
+                              } finally {
+                                if (mounted) setState(() => _reviving = false);
+                              }
+                            },
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFF567D46),
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 14, vertical: 10),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                      ),
+                      child: _reviving
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child:
+                                  CircularProgressIndicator(strokeWidth: 2.2),
+                            )
+                          : const Text(
+                              'Revive',
+                              style: TextStyle(
+                                  fontWeight: FontWeight.w800, fontSize: 14),
+                            ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        );
+      },
     );
   }
 }
@@ -2026,15 +2440,12 @@ class _WalkDetailScreenState extends State<WalkDetailScreen> {
             case 'pee':
               icon = _peeIcon!;
               title = 'Pee';
-              break;
             case 'poop':
               icon = _poopIcon!;
               title = 'Poop';
-              break;
             default:
               icon = _cautionIcon!;
               title = 'Caution';
-              break;
           }
 
           final latLng = LatLng(pos.latitude, pos.longitude);

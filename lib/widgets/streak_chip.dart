@@ -2,54 +2,26 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
-/// Lightweight model for the streak doc.
-class WalkStreak {
-  final int current;
-  final int longest;
-  const WalkStreak({required this.current, required this.longest});
-
-  static WalkStreak fromSnap(DocumentSnapshot snap) {
-    if (!snap.exists) return const WalkStreak(current: 0, longest: 0);
-    final data = snap.data() as Map<String, dynamic>? ?? const {};
-    return WalkStreak(
-      current: (data['current'] ?? 0) as int,
-      longest: (data['longest'] ?? 0) as int,
-    );
-  }
-}
-
-/// Reusable chip that listens to owners/{uid}/stats/walkStreak in Firestore
-/// and renders a compact “Streak / Best” pill.
-///
-/// - Provide [userId] or it will use the current Firebase user.
-/// - Customize look with [background], [elevation], [padding], [textStyle].
-/// - Use [onTap] to open a custom dialog or screen (defaults to a simple info dialog).
 class StreakChip extends StatelessWidget {
-  final String? userId;
-  final VoidCallback? onTap;
-  final EdgeInsetsGeometry padding;
-  final Color? background;
   final double elevation;
+  final Color? background;
   final TextStyle? textStyle;
-  final bool showBestBadge;
-  final bool useRootNavigator;
+  final VoidCallback? onTap;
 
   const StreakChip({
-    Key? key,
-    this.userId,
-    this.onTap,
-    this.padding = const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-    this.background,
+    super.key,
     this.elevation = 0,
+    this.background,
     this.textStyle,
-    this.showBestBadge = true,
-    this.useRootNavigator = true,
-  }) : super(key: key);
+    this.onTap,
+  });
 
   @override
   Widget build(BuildContext context) {
-    final uid = userId ?? FirebaseAuth.instance.currentUser?.uid;
-    if (uid == null) return const SizedBox.shrink();
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) {
+      return const SizedBox.shrink();
+    }
 
     final docRef = FirebaseFirestore.instance
         .collection('owners')
@@ -57,106 +29,168 @@ class StreakChip extends StatelessWidget {
         .collection('stats')
         .doc('walkStreak');
 
-    final baseTextStyle =
-        textStyle ?? const TextStyle(fontWeight: FontWeight.w800, fontSize: 13);
+    return StreamBuilder<DocumentSnapshot>(
+      stream: docRef.snapshots(),
+      builder: (context, snapshot) {
+        if (!snapshot.hasData || !snapshot.data!.exists) {
+          return _buildChip(
+            context,
+            current: 0,
+            longest: 0,
+            reviveEligible: false,
+            prevBeforeLoss: null,
+          );
+        }
 
-    final Color shellBg = background ??
-        // Subtle glass on iOS feel; solid on Android-like look
-        Colors.white.withOpacity(0.90);
+        final data = snapshot.data!.data() as Map<String, dynamic>? ?? {};
 
-    final border = RoundedRectangleBorder(
-      borderRadius: BorderRadius.circular(18),
-      side: BorderSide(color: Colors.orange.shade200, width: 1.0),
+        int _readInt(dynamic v) {
+          if (v is int) return v;
+          return int.tryParse('$v') ?? 0;
+        }
+
+        final int current = _readInt(data['current']);
+        final int longest = _readInt(data['longest']);
+        final int? prevBeforeLoss = data['prevBeforeLoss'] != null
+            ? _readInt(data['prevBeforeLoss'])
+            : null;
+
+        final String? lastDateStr = (data['lastDate'] as String?)?.trim();
+
+        // ---- DATE-ONLY REVIVE LOGIC ----
+        DateTime? _parseDayKey(String s) {
+          final parts = s.split('-');
+          if (parts.length != 3) return null;
+          final y = int.tryParse(parts[0]);
+          final m = int.tryParse(parts[1]);
+          final d = int.tryParse(parts[2]);
+          if (y == null || m == null || d == null) return null;
+          return DateTime(y, m, d); // local day
+        }
+
+        bool reviveEligible = false;
+        if (lastDateStr != null && lastDateStr.isNotEmpty) {
+          final lastDay = _parseDayKey(lastDateStr);
+          if (lastDay != null) {
+            final now = DateTime.now();
+            final today = DateTime(now.year, now.month, now.day);
+            final diffDays = today.difference(lastDay).inDays;
+
+            // ✅ PRIORITY: as long as last day is > 2 days before today → blue
+            // e.g. lastDate = 13th, today = 15th → diffDays = 2 → blue
+            reviveEligible = diffDays >= 2 && current > 0;
+          }
+        }
+
+        return _buildChip(
+          context,
+          current: current,
+          longest: longest,
+          reviveEligible: reviveEligible,
+          prevBeforeLoss: prevBeforeLoss,
+        );
+      },
     );
+  }
+
+  Widget _buildChip(
+    BuildContext context, {
+    required int current,
+    required int longest,
+    required bool reviveEligible,
+    required int? prevBeforeLoss,
+  }) {
+    final baseTextStyle = textStyle ??
+        const TextStyle(
+          fontWeight: FontWeight.w800,
+          fontSize: 12,
+          color: Colors.black87,
+        );
+
+    final bool danger = reviveEligible;
+
+    // 🔵 Blue attention state when revive-eligible
+    final Color chipBg = danger
+        ? const Color(0xFF005BFF)
+        : (background ?? Colors.white.withOpacity(0.95));
+
+    final Color chipBorder =
+        danger ? const Color(0xFF9EC9FF) : Colors.black.withOpacity(0.06);
+
+    final Color chipTextColor =
+        danger ? Colors.white : (baseTextStyle.color ?? Colors.black87);
+
+    // Label: normal vs revive mode
+    final String streakLabel;
+    if (!danger && current <= 0) {
+      streakLabel = 'Start a streak';
+    } else if (danger) {
+      final shown = (prevBeforeLoss ?? current);
+      streakLabel = '🔥 $shown!';
+    } else {
+      streakLabel = '🔥 $current';
+    }
+
+    final String tooltip;
+    if (!danger && current <= 0) {
+      tooltip = "Start a walk to begin your streak";
+    } else if (danger) {
+      final lost = prevBeforeLoss ?? current;
+      tooltip = "You missed some days – tap to revive your $lost-day streak.";
+    } else {
+      tooltip =
+          "Current walk streak: $current day${current == 1 ? '' : 's'} (Best: $longest)";
+    }
 
     return Material(
-      color: shellBg,
+      color: Colors.transparent,
       elevation: elevation,
-      shape: border,
-      shadowColor: Colors.black12,
-      child: StreamBuilder<DocumentSnapshot>(
-        stream: docRef.snapshots(),
-        builder: (context, snap) {
-          final streak = (snap.hasData)
-              ? WalkStreak.fromSnap(snap.data!)
-              : const WalkStreak(current: 0, longest: 0);
-
-          return InkWell(
-            borderRadius: BorderRadius.circular(18),
-            onTap: onTap ?? () => _defaultDialog(context),
-            child: Padding(
-              padding: padding,
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(Icons.local_fire_department,
-                      size: 18, color: Colors.orange.shade700),
-                  const SizedBox(width: 6),
-                  Text('${streak.current}', style: baseTextStyle),
-                ],
-              ),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(30),
+        child: Tooltip(
+          message: tooltip,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            decoration: BoxDecoration(
+              color: chipBg,
+              borderRadius: BorderRadius.circular(30),
+              border: Border.all(color: chipBorder, width: danger ? 1.6 : 1),
+              boxShadow: danger
+                  ? [
+                      BoxShadow(
+                        color: const Color(0xFF4FACFE).withOpacity(0.6),
+                        blurRadius: 12,
+                        offset: const Offset(0, 3),
+                      ),
+                    ]
+                  : null,
             ),
-          );
-        },
-      ),
-    );
-  }
-
-  void _defaultDialog(BuildContext context) {
-    showDialog(
-      context: context,
-      useRootNavigator: useRootNavigator,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Daily Walk Streak'),
-        content: const Text(
-          'Complete at least one walk per day to keep the streak alive.\n\n'
-          'Tip: You can add a rewarded-ad “revive” if a day was missed.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () =>
-                Navigator.of(ctx, rootNavigator: useRootNavigator).pop(),
-            child: const Text('Close'),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// Convenience wrapper to place the chip as an overlay at top-left of a page/tab.
-/// Add this inside a Stack() without needing to re-implement SafeArea/padding.
-class StreakChipOverlay extends StatelessWidget {
-  final String? userId;
-  final VoidCallback? onTap;
-  final EdgeInsetsGeometry margin;
-  final bool showBestBadge;
-  final bool useRootNavigator;
-
-  const StreakChipOverlay({
-    Key? key,
-    this.userId,
-    this.onTap,
-    this.margin = const EdgeInsets.fromLTRB(12, 12, 0, 0),
-    this.showBestBadge = true,
-    this.useRootNavigator = true,
-  }) : super(key: key);
-
-  @override
-  Widget build(BuildContext context) {
-    // Try to look nice on both platforms with a subtle shadow
-    return SafeArea(
-      child: Align(
-        alignment: Alignment.topLeft,
-        child: Padding(
-          padding: margin,
-          child: StreakChip(
-            userId: userId,
-            onTap: onTap,
-            elevation: 2,
-            showBestBadge: showBestBadge,
-            useRootNavigator: useRootNavigator,
-            // if you want a glass look on iOS, you can pass a translucent bg here
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  streakLabel,
+                  style: baseTextStyle.copyWith(color: chipTextColor),
+                ),
+                if (longest > 0 && !danger && current > 0) ...[
+                  const SizedBox(width: 6),
+                  Icon(
+                    Icons.auto_awesome,
+                    size: 14,
+                    color: Colors.orange.shade700,
+                  ),
+                ],
+                if (danger) ...[
+                  const SizedBox(width: 4),
+                  const Icon(
+                    Icons.priority_high_rounded, // exclamation-style
+                    size: 16,
+                    color: Colors.white,
+                  ),
+                ],
+              ],
+            ),
           ),
         ),
       ),

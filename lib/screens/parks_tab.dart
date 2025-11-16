@@ -37,6 +37,7 @@ class _ParksTabState extends State<ParksTab>
   bool _isSearching = false;
   bool _hasFetchedNearby = false;
   String? _mutatingParkId; // for check-in/out spinner
+  String? _openingParkId; // NEW: tap-to-open loader
 
   // Data
   List<Park> _favoriteParks = [];
@@ -235,6 +236,19 @@ class _ParksTabState extends State<ParksTab>
       await p.setInt(_kCacheTs, DateTime.now().millisecondsSinceEpoch);
     } catch (_) {
       // ignore
+    }
+  }
+
+  // ---------- Card loader helper ----------
+  Future<void> _runWithCardLoader(
+      String parkId, Future<void> Function() action) async {
+    if (!mounted) return;
+    if (_openingParkId != null) return; // prevent parallel opens
+    setState(() => _openingParkId = parkId);
+    try {
+      await action();
+    } finally {
+      if (mounted) setState(() => _openingParkId = null);
     }
   }
 
@@ -834,118 +848,150 @@ class _ParksTabState extends State<ParksTab>
     final services = _parkServices[parkId] ?? park.services ?? const <String>[];
     final isCheckedIn = _checkedInParkIds.contains(parkId);
     final isBusy = _mutatingParkId == parkId;
+    final isOpening = _openingParkId == parkId; // NEW
 
     return KeyedSubtree(
       key: ValueKey('park:$parkId'),
-      child: Card(
-        color: isFavorite ? Colors.green.shade50 : null,
-        margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-        child: InkWell(
-          onTap: () async {
-            await _ensureParkDoc(parkId, park);
-            _showActiveUsersDialog(parkId);
-          },
-          child: Padding(
-            padding: const EdgeInsets.all(12),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // Title + like toggle
-                Row(
+      child: Stack(
+        children: [
+          Card(
+            color: isFavorite ? Colors.green.shade50 : null,
+            margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            child: InkWell(
+              onTap: () async {
+                await _runWithCardLoader(parkId, () async {
+                  await _ensureParkDoc(parkId, park);
+                  await _showActiveUsersDialog(parkId);
+                });
+              },
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Expanded(
-                      child: Text(
-                        park.name,
-                        style: const TextStyle(
-                            fontSize: 16, fontWeight: FontWeight.bold),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                    IconButton(
-                      icon:
-                          Icon(liked ? Icons.favorite : Icons.favorite_border),
-                      color: liked ? Colors.green : Colors.grey,
-                      onPressed: () => _toggleLike(park),
-                      tooltip: liked ? 'Unlike' : 'Like',
-                    ),
-                  ],
-                ),
-
-                // Services chips
-                if (services.isNotEmpty) ...[
-                  const SizedBox(height: 6),
-                  Wrap(
-                    spacing: 6,
-                    runSpacing: -6,
-                    children: services.map((s) {
-                      return Chip(
-                        avatar: Icon(_serviceIcon(s),
-                            size: 16, color: Colors.green),
-                        label: Text(s, style: const TextStyle(fontSize: 12)),
-                        backgroundColor: Colors.green[50],
-                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                        visualDensity:
-                            const VisualDensity(horizontal: -4, vertical: -4),
-                      );
-                    }).toList(),
-                  ),
-                ],
-
-                const SizedBox(height: 6),
-
-                // Active users count
-                Text("Active Users: $userCount"),
-
-                const SizedBox(height: 8),
-
-                // Actions
-                Row(
-                  children: [
-                    ElevatedButton(
-                      onPressed: () => Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder: (_) => ChatRoomScreen(parkId: parkId),
+                    // Title + like toggle
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            park.name,
+                            style: const TextStyle(
+                                fontSize: 16, fontWeight: FontWeight.bold),
+                            overflow: TextOverflow.ellipsis,
+                          ),
                         ),
-                      ),
-                      child: const Text("Park Chat",
-                          style: TextStyle(fontSize: 12)),
+                        IconButton(
+                          icon: Icon(
+                              liked ? Icons.favorite : Icons.favorite_border),
+                          color: liked ? Colors.green : Colors.grey,
+                          onPressed: isOpening ? null : () => _toggleLike(park),
+                          tooltip: liked ? 'Unlike' : 'Like',
+                        ),
+                      ],
                     ),
-                    const SizedBox(width: 8),
-                    ElevatedButton(
-                      onPressed: () => widget.onShowEvents(parkId),
-                      child: const Text("Park Events",
-                          style: TextStyle(fontSize: 12)),
-                    ),
-                    const SizedBox(width: 8),
-                    ElevatedButton(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor:
-                            isCheckedIn ? Colors.red : Colors.green,
+
+                    // Services chips
+                    if (services.isNotEmpty) ...[
+                      const SizedBox(height: 6),
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: -6,
+                        children: services.map((s) {
+                          return Chip(
+                            avatar: Icon(_serviceIcon(s),
+                                size: 16, color: Colors.green),
+                            label:
+                                Text(s, style: const TextStyle(fontSize: 12)),
+                            backgroundColor: Colors.green[50],
+                            materialTapTargetSize:
+                                MaterialTapTargetSize.shrinkWrap,
+                            visualDensity: const VisualDensity(
+                                horizontal: -4, vertical: -4),
+                          );
+                        }).toList(),
                       ),
-                      onPressed: isBusy ? null : () => _toggleCheckIn(park),
-                      child: isBusy
-                          ? const SizedBox(
-                              width: 18,
-                              height: 18,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                valueColor:
-                                    AlwaysStoppedAnimation<Color>(Colors.white),
-                              ),
-                            )
-                          : Text(
-                              isCheckedIn ? "Check Out" : "Check In",
-                              style: const TextStyle(
-                                  fontSize: 12, color: Colors.white),
-                            ),
+                    ],
+
+                    const SizedBox(height: 6),
+
+                    // Active users count
+                    Text("Active Users: $userCount"),
+
+                    const SizedBox(height: 8),
+
+                    // Actions
+                    Row(
+                      children: [
+                        ElevatedButton(
+                          onPressed: isOpening
+                              ? null
+                              : () => Navigator.push(
+                                    context,
+                                    MaterialPageRoute(
+                                      builder: (_) =>
+                                          ChatRoomScreen(parkId: parkId),
+                                    ),
+                                  ),
+                          child: const Text("Park Chat",
+                              style: TextStyle(fontSize: 12)),
+                        ),
+                        const SizedBox(width: 8),
+                        ElevatedButton(
+                          onPressed: isOpening
+                              ? null
+                              : () => widget.onShowEvents(parkId),
+                          child: const Text("Park Events",
+                              style: TextStyle(fontSize: 12)),
+                        ),
+                        const SizedBox(width: 8),
+                        ElevatedButton(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor:
+                                isCheckedIn ? Colors.red : Colors.green,
+                          ),
+                          onPressed: (isBusy || isOpening)
+                              ? null
+                              : () => _toggleCheckIn(park),
+                          child: isBusy
+                              ? const SizedBox(
+                                  width: 18,
+                                  height: 18,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    valueColor: AlwaysStoppedAnimation<Color>(
+                                        Colors.white),
+                                  ),
+                                )
+                              : Text(
+                                  isCheckedIn ? "Check Out" : "Check In",
+                                  style: const TextStyle(
+                                      fontSize: 12, color: Colors.white),
+                                ),
+                        ),
+                      ],
                     ),
                   ],
                 ),
-              ],
+              ),
             ),
           ),
-        ),
+
+          // --- Opening overlay ---
+          if (isOpening)
+            Positioned.fill(
+              child: AbsorbPointer(
+                child: Container(
+                  color: Colors.black.withOpacity(0.08),
+                  alignment: Alignment.center,
+                  child: const SizedBox(
+                    width: 28,
+                    height: 28,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  ),
+                ),
+              ),
+            ),
+        ],
       ),
     );
   }
