@@ -71,12 +71,16 @@ class _OwnerDetailsScreenState extends State<OwnerDetailsScreen> {
         };
 
         if (!snap.exists) {
+          // NEW USER → initialize level/xp here
           tx.set(ref, {
             ...base,
+            'level': 1,
+            'xp': 0,
             'createdAt': FieldValue.serverTimestamp(),
             'updatedAt': FieldValue.serverTimestamp(),
           });
         } else {
+          // EXISTING USER → don't touch level/xp
           tx.update(ref, {
             ...base,
             'updatedAt': FieldValue.serverTimestamp(),

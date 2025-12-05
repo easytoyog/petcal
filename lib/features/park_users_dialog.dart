@@ -3,7 +3,6 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
-import 'package:inthepark/models/park_model.dart';
 import 'package:inthepark/screens/chatroom_screen.dart';
 import 'package:inthepark/services/firestore_service.dart';
 import 'package:inthepark/services/location_service.dart';
@@ -22,6 +21,7 @@ typedef ServicesUpdatedCallback = void Function(
   String parkId,
   List<String> newServices,
 );
+typedef CheckInXpCallback = Future<void> Function();
 
 Future<void> showUsersInParkDialog({
   required BuildContext context,
@@ -41,6 +41,7 @@ Future<void> showUsersInParkDialog({
   required CheckedInFormatter checkedInForSince,
   LikeChangedCallback? onLikeChanged,
   ServicesUpdatedCallback? onServicesUpdated,
+  CheckInXpCallback? onCheckInXp,
 }) async {
   final currentUser = FirebaseAuth.instance.currentUser;
   if (currentUser == null) return;
@@ -62,9 +63,9 @@ Future<void> showUsersInParkDialog({
   try {
     final parkRef = FirebaseFirestore.instance.collection('parks').doc(parkId);
 
-    // Ensure park doc exists (similar to _ensureParkDocExists)
-    final existing = await parkRef.get();
-    if (!existing.exists) {
+    // Single read + create-if-missing
+    final parkSnap = await parkRef.get();
+    if (!parkSnap.exists) {
       await parkRef.set({
         'id': parkId,
         'name': parkName,
@@ -75,13 +76,13 @@ Future<void> showUsersInParkDialog({
       }, SetOptions(merge: true));
     }
 
-    // Services
-    final parkDoc = await parkRef.get();
+    // Services (no second get needed – new parks just have empty services)
     List<String> services = [];
-    if (parkDoc.exists &&
-        parkDoc.data() != null &&
-        parkDoc.data()!.containsKey('services')) {
-      services = List<String>.from(parkDoc['services'] ?? []);
+    if (parkSnap.exists) {
+      final data = parkSnap.data();
+      if (data != null && data.containsKey('services')) {
+        services = List<String>.from(data['services'] ?? []);
+      }
     }
 
     // Likes
@@ -145,6 +146,7 @@ Future<void> showUsersInParkDialog({
           onServicesUpdated: onServicesUpdated,
           locationService: locationService,
           firestoreService: firestoreService,
+          onCheckInXp: onCheckInXp,
         );
       },
     );
@@ -193,6 +195,12 @@ Future<List<Map<String, dynamic>>> _buildPetUserList({
   final List<Map<String, dynamic>> userList = [];
   if (userIds.isEmpty) return userList;
 
+  // Index active_users docs by uid for O(1) lookup
+  final userDataById = <String, Map<String, dynamic>>{};
+  for (final doc in usersSnapshot.docs) {
+    userDataById[doc.id] = doc.data() as Map<String, dynamic>;
+  }
+
   for (var i = 0; i < userIds.length; i += 10) {
     final batchIds = userIds.sublist(
       i,
@@ -215,8 +223,9 @@ Future<List<Map<String, dynamic>>> _buildPetUserList({
     }
 
     for (final ownerId in batchIds) {
-      final userDoc = usersSnapshot.docs.firstWhere((d) => d.id == ownerId);
-      final data = userDoc.data() as Map<String, dynamic>;
+      final data = userDataById[ownerId];
+      if (data == null) continue;
+
       final Timestamp? checkedInAtTs = data['checkedInAt'] as Timestamp?;
       final String checkInTime = checkedInAtTs != null
           ? checkedInForSince(checkedInAtTs.toDate())
@@ -264,6 +273,7 @@ class _UsersInParkScaffold extends StatefulWidget {
   final ServicesUpdatedCallback? onServicesUpdated;
   final LocationService locationService;
   final FirestoreService firestoreService;
+  final CheckInXpCallback? onCheckInXp;
 
   const _UsersInParkScaffold({
     Key? key,
@@ -286,6 +296,7 @@ class _UsersInParkScaffold extends StatefulWidget {
     required this.firestoreService,
     this.onLikeChanged,
     this.onServicesUpdated,
+    this.onCheckInXp,
   }) : super(key: key);
 
   @override
@@ -671,6 +682,7 @@ class _UsersInParkScaffoldState extends State<_UsersInParkScaffold> {
           .doc(widget.currentUser.uid);
 
       if (_isCheckedIn) {
+        // --- CHECK OUT ---
         await activeDocRef.delete();
         if (context.mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
@@ -678,11 +690,23 @@ class _UsersInParkScaffoldState extends State<_UsersInParkScaffold> {
           );
         }
       } else {
+        // --- CHECK IN ---
         await widget.locationService.uploadUserToActiveUsersTable(
           widget.parkLatitude,
           widget.parkLongitude,
           widget.parkName,
         );
+
+        // ⭐ AWARD XP (if hooked) – only on check-in
+        if (widget.onCheckInXp != null) {
+          try {
+            await widget.onCheckInXp!();
+          } catch (e) {
+            // best-effort: don't block UX if XP fails
+            debugPrint('onCheckInXp failed: $e');
+          }
+        }
+
         if (context.mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text("Checked in to park")),

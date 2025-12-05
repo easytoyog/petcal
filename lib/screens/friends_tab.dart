@@ -18,6 +18,10 @@ class _FriendsTabState extends State<FriendsTab> {
   Map<String, List<Map<String, dynamic>>> _friendPets = {};
   Map<String, String> _activeParkMapping = {};
   Map<String, String> _friendOwnerNames = {};
+
+  // NEW: friend level info: friendId -> { 'level': int, 'description': String }
+  Map<String, Map<String, dynamic>> _friendLevels = {};
+
   List<String> _favoritePetIds = [];
 
   final TextEditingController _searchController = TextEditingController();
@@ -81,9 +85,11 @@ class _FriendsTabState extends State<FriendsTab> {
       if (!mounted) return;
       setState(() => _friendIds = friendIds);
 
+      // Fetch pets, owner names, and levels in parallel
       await Future.wait([
         _fetchFriendPetsBatch(friendIds),
         _fetchFriendOwnerNamesBatch(friendIds),
+        _fetchFriendLevelsBatch(friendIds),
       ]);
     } catch (e) {
       // print("Error fetching friends: $e");
@@ -128,6 +134,12 @@ class _FriendsTabState extends State<FriendsTab> {
       return;
     }
     final idsToQuery = friendIds.where((id) => id != currentUserId).toList();
+    if (idsToQuery.isEmpty) {
+      if (!mounted) return;
+      setState(() => _friendOwnerNames = {});
+      return;
+    }
+
     const chunkSize = 10;
     for (int i = 0; i < idsToQuery.length; i += chunkSize) {
       final chunk =
@@ -145,6 +157,77 @@ class _FriendsTabState extends State<FriendsTab> {
     }
     if (!mounted) return;
     setState(() => _friendOwnerNames = names);
+  }
+
+  /// NEW: Batch fetch friend levels from `owners/{uid}`.
+  /// NEW: Batch fetch friend levels from `owners/{uid}/stats/level`.
+  Future<void> _fetchFriendLevelsBatch(List<String> friendIds) async {
+    final levels = <String, Map<String, dynamic>>{};
+
+    if (friendIds.isEmpty) {
+      if (!mounted) return;
+      setState(() => _friendLevels = {});
+      return;
+    }
+
+    // We don't show current user in the list, so no need to fetch their level
+    final idsToQuery = friendIds.where((id) => id != currentUserId).toList();
+    if (idsToQuery.isEmpty) {
+      if (!mounted) return;
+      setState(() => _friendLevels = {});
+      return;
+    }
+
+    try {
+      // stats/level is per-user, so we fetch one-by-one
+      for (final uid in idsToQuery) {
+        final levelDoc = await FirebaseFirestore.instance
+            .collection('owners')
+            .doc(uid)
+            .collection('stats')
+            .doc('level')
+            .get();
+
+        if (!levelDoc.exists) {
+          // no level yet for this friend, skip or default
+          continue;
+        }
+
+        final data = levelDoc.data() as Map<String, dynamic>? ?? {};
+        final rawLevel = data['level'];
+        int level;
+
+        if (rawLevel is int) {
+          level = rawLevel;
+        } else if (rawLevel is num) {
+          level = rawLevel.toInt();
+        } else {
+          level = 1;
+        }
+
+        final desc = _levelDescription(level);
+        levels[uid] = {
+          'level': level,
+          'description': desc,
+        };
+      }
+    } catch (e) {
+      // optionally log
+      // print("Error fetching friend levels: $e");
+    }
+
+    if (!mounted) return;
+    setState(() => _friendLevels = levels);
+  }
+
+  /// Simple local mapping from level -> description.
+  String _levelDescription(int level) {
+    if (level <= 1) return "New Pup";
+    if (level <= 3) return "Neighborhood Explorer";
+    if (level <= 5) return "Trail Trooper";
+    if (level <= 8) return "Park Pro";
+    if (level <= 12) return "Pack Leader";
+    return "Legendary Walker";
   }
 
   // No major optimization here, but you could cache park names if needed
@@ -427,12 +510,31 @@ class _FriendsTabState extends State<FriendsTab> {
                       TextField(
                         controller: _searchController,
                         focusNode: _searchFocusNode,
-                        decoration: const InputDecoration(
+                        decoration: InputDecoration(
                           hintText: "Search pet to add as friend",
-                          border: OutlineInputBorder(),
-                          prefixIcon: Icon(Icons.search),
-                          contentPadding:
-                              EdgeInsets.symmetric(vertical: 6, horizontal: 6),
+                          prefixIcon: const Icon(Icons.search),
+                          filled: true,
+                          fillColor: Colors.white,
+                          isDense: true,
+                          contentPadding: const EdgeInsets.symmetric(
+                              vertical: 10, horizontal: 12),
+                          border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                          enabledBorder: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(14),
+                            borderSide: BorderSide(
+                              color: Colors.black.withOpacity(0.15),
+                              width: 1.2,
+                            ),
+                          ),
+                          focusedBorder: const OutlineInputBorder(
+                            borderRadius: BorderRadius.all(Radius.circular(14)),
+                            borderSide: BorderSide(
+                              color: Colors.tealAccent,
+                              width: 2,
+                            ),
+                          ),
                         ),
                         onChanged: (value) {
                           if (value.length >= 2) {
@@ -495,88 +597,161 @@ class _FriendsTabState extends State<FriendsTab> {
                 Expanded(
                   child: _isLoading
                       ? const Center(child: CircularProgressIndicator())
-                      : ListView.builder(
-                          padding: const EdgeInsets.only(bottom: 70),
-                          itemCount: filteredFriendIds.length,
-                          itemBuilder: (context, index) {
-                            final friendId = filteredFriendIds[index];
-                            final ownerName =
-                                _friendOwnerNames[friendId] ?? "Unknown";
-                            final activePark = _activeParkMapping[friendId];
-                            final pets = _friendPets[friendId] ?? [];
-                            String petId = "";
-                            String petName = "";
-                            if (pets.isNotEmpty) {
-                              petId = pets[0]['petId'] ?? "";
-                              petName = pets[0]['name'] ?? "Unknown Pet";
-                            }
-                            return Card(
-                              margin: const EdgeInsets.symmetric(
-                                  vertical: 2, horizontal: 4),
+                      : filteredFriendIds.isEmpty
+                          ? Center(
                               child: Padding(
-                                padding: const EdgeInsets.all(6),
-                                child: Row(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 24.0),
+                                child: Column(
+                                  mainAxisSize: MainAxisSize.min,
                                   children: [
-                                    CircleAvatar(
-                                      backgroundImage: NetworkImage(
-                                        pets.isNotEmpty
-                                            ? (pets[0]['photoUrl'] ??
-                                                    'https://via.placeholder.com/100')
-                                                .toString()
-                                            : 'https://via.placeholder.com/100',
-                                      ),
-                                      radius: 30,
+                                    const Icon(
+                                      Icons.pets,
+                                      size: 52,
+                                      color: Colors.grey,
                                     ),
-                                    const SizedBox(width: 8),
-                                    Expanded(
-                                      child: Column(
-                                        crossAxisAlignment:
-                                            CrossAxisAlignment.start,
-                                        children: [
-                                          Text(petName,
-                                              style: const TextStyle(
-                                                  fontSize: 14,
-                                                  fontWeight: FontWeight.bold)),
-                                          Text("Owner: $ownerName",
-                                              style: const TextStyle(
-                                                  fontSize: 12)),
-                                          if (activePark != null)
-                                            Text("Active at: $activePark",
-                                                style: const TextStyle(
-                                                    fontSize: 10,
-                                                    color: Colors.green)),
-                                        ],
+                                    const SizedBox(height: 12),
+                                    const Text(
+                                      "No paw friends yet 🐾",
+                                      style: TextStyle(
+                                        fontSize: 18,
+                                        fontWeight: FontWeight.bold,
                                       ),
                                     ),
-                                    _favoritePetIds.contains(petId)
-                                        ? IconButton(
-                                            icon: const Icon(Icons.favorite,
-                                                color: Colors.red, size: 18),
-                                            onPressed: () => _confirmUnfriend(
-                                                friendId, petId),
-                                          )
-                                        : ElevatedButton(
-                                            onPressed: () async {
-                                              await _addFriend(friendId, petId);
-                                              if (!mounted) return;
-                                              ScaffoldMessenger.of(context)
-                                                  .showSnackBar(const SnackBar(
-                                                      content: Text(
-                                                          "Friend added.")));
-                                              await Future.wait([
-                                                _fetchFavorites(),
-                                                _fetchFriends()
-                                              ]);
-                                            },
-                                            child: const Text("Add Friend",
-                                                style: TextStyle(fontSize: 10)),
-                                          ),
+                                    const SizedBox(height: 8),
+                                    Text(
+                                      "Search for a pet above and add them as a friend.\n"
+                                      "Build your park pack and see where your friends are hanging out!",
+                                      textAlign: TextAlign.center,
+                                      style: TextStyle(
+                                        fontSize: 14,
+                                        color: Colors.black.withOpacity(0.7),
+                                      ),
+                                    ),
                                   ],
                                 ),
                               ),
-                            );
-                          },
-                        ),
+                            )
+                          : ListView.builder(
+                              padding: const EdgeInsets.only(bottom: 70),
+                              itemCount: filteredFriendIds.length,
+                              itemBuilder: (context, index) {
+                                final friendId = filteredFriendIds[index];
+                                final ownerName =
+                                    _friendOwnerNames[friendId] ?? "Unknown";
+                                final activePark = _activeParkMapping[friendId];
+                                final pets = _friendPets[friendId] ?? [];
+
+                                String petId = "";
+                                String petName = "";
+                                if (pets.isNotEmpty) {
+                                  petId = pets[0]['petId'] ?? "";
+                                  petName = pets[0]['name'] ?? "Unknown Pet";
+                                }
+
+                                // NEW: level info
+                                final levelInfo = _friendLevels[friendId];
+                                final int? friendLevel =
+                                    levelInfo?['level'] as int?;
+                                final String? friendLevelDesc =
+                                    levelInfo?['description'] as String?;
+
+                                return Card(
+                                  margin: const EdgeInsets.symmetric(
+                                      vertical: 2, horizontal: 4),
+                                  child: Padding(
+                                    padding: const EdgeInsets.all(6),
+                                    child: Row(
+                                      children: [
+                                        CircleAvatar(
+                                          backgroundImage: NetworkImage(
+                                            pets.isNotEmpty
+                                                ? (pets[0]['photoUrl'] ??
+                                                        'https://via.placeholder.com/100')
+                                                    .toString()
+                                                : 'https://via.placeholder.com/100',
+                                          ),
+                                          radius: 30,
+                                        ),
+                                        const SizedBox(width: 8),
+                                        Expanded(
+                                          child: Column(
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
+                                            children: [
+                                              Text(
+                                                petName,
+                                                style: const TextStyle(
+                                                  fontSize: 14,
+                                                  fontWeight: FontWeight.bold,
+                                                ),
+                                              ),
+                                              Text(
+                                                "Owner: $ownerName",
+                                                style: const TextStyle(
+                                                    fontSize: 12),
+                                              ),
+                                              if (friendLevel != null &&
+                                                  friendLevelDesc != null)
+                                                Text(
+                                                  "Level $friendLevel – $friendLevelDesc",
+                                                  style: const TextStyle(
+                                                    fontSize: 11,
+                                                    color: Colors.deepPurple,
+                                                    fontWeight: FontWeight.w600,
+                                                  ),
+                                                ),
+                                              if (activePark != null)
+                                                Text(
+                                                  "Active at: $activePark",
+                                                  style: const TextStyle(
+                                                    fontSize: 10,
+                                                    color: Colors.green,
+                                                  ),
+                                                ),
+                                            ],
+                                          ),
+                                        ),
+                                        _favoritePetIds.contains(petId)
+                                            ? IconButton(
+                                                icon: const Icon(
+                                                  Icons.favorite,
+                                                  color: Colors.red,
+                                                  size: 18,
+                                                ),
+                                                onPressed: () =>
+                                                    _confirmUnfriend(
+                                                        friendId, petId),
+                                              )
+                                            : ElevatedButton(
+                                                onPressed: () async {
+                                                  await _addFriend(
+                                                      friendId, petId);
+                                                  if (!mounted) return;
+                                                  ScaffoldMessenger.of(context)
+                                                      .showSnackBar(
+                                                    const SnackBar(
+                                                      content:
+                                                          Text("Friend added."),
+                                                    ),
+                                                  );
+                                                  await Future.wait([
+                                                    _fetchFavorites(),
+                                                    _fetchFriends()
+                                                  ]);
+                                                },
+                                                child: const Text(
+                                                  "Add Friend",
+                                                  style:
+                                                      TextStyle(fontSize: 10),
+                                                ),
+                                              ),
+                                      ],
+                                    ),
+                                  ),
+                                );
+                              },
+                            ),
                 ),
               ],
             ),

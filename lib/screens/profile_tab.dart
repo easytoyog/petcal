@@ -194,7 +194,9 @@ class _ProfileTabState extends State<ProfileTab> {
   void _openWalksList() {
     Navigator.push(
       context,
-      MaterialPageRoute(builder: (_) => const WalksListScreen()),
+      MaterialPageRoute(
+        builder: (_) => WalksListScreen(onGoToMapTab: widget.onGoToMapTab),
+      ),
     );
   }
 
@@ -2637,7 +2639,7 @@ class VisitHistoryScreen extends StatelessWidget {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Visit History'),
+        title: const Text('Park Visit History'),
         backgroundColor: const Color(0xFF567D46),
         elevation: 2,
       ),

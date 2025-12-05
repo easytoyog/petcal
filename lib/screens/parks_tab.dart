@@ -8,6 +8,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart' show LatLng;
 import 'package:inthepark/utils/utils.dart';
+import 'package:inthepark/widgets/level_system.dart';
 import 'package:location/location.dart' as loc;
 import 'package:inthepark/models/park_model.dart';
 import 'package:inthepark/screens/chatroom_screen.dart';
@@ -20,7 +21,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 class ParksTab extends StatefulWidget {
   final void Function(String parkId) onShowEvents;
-  const ParksTab({Key? key, required this.onShowEvents}) : super(key: key);
+  final VoidCallback? onXpGained;
+  const ParksTab({Key? key, required this.onShowEvents, this.onXpGained})
+      : super(key: key);
 
   @override
   State<ParksTab> createState() => _ParksTabState();
@@ -492,15 +495,7 @@ class _ParksTabState extends State<ParksTab>
     }
   }
 
-  // ---------- Checked-in set ----------
-  void _debouncedRefreshCheckedIn() {
-    _checkinDebounce?.cancel();
-    _checkinDebounce =
-        Timer(const Duration(milliseconds: 220), _refreshCheckedInSet);
-  }
-
   Future<void> _refreshCheckedInSet() async {
-    _checkedInParkIds.clear();
     final uid = _currentUserId;
     if (uid == null) return;
 
@@ -511,13 +506,21 @@ class _ParksTabState extends State<ParksTab>
           .get()
           .timeout(const Duration(seconds: 8));
 
+      final newSet = <String>{};
       for (final doc in snaps.docs) {
         final parkRef = doc.reference.parent.parent; // parks/{parkId}
-        if (parkRef != null) _checkedInParkIds.add(parkRef.id);
+        if (parkRef != null) newSet.add(parkRef.id);
       }
-      if (mounted) setState(() {});
-    } catch (_) {
-      // ignore
+
+      if (!mounted) return;
+      setState(() {
+        _checkedInParkIds
+          ..clear()
+          ..addAll(newSet);
+      });
+    } catch (e) {
+      // Leave _checkedInParkIds as-is on error
+      // debugPrint('refreshCheckedInSet error: $e');
     }
   }
 
@@ -590,7 +593,6 @@ class _ParksTabState extends State<ParksTab>
         }
       }
       await wb.commit().timeout(const Duration(seconds: 8));
-      _debouncedRefreshCheckedIn();
     } catch (_) {
       // ignore
     }
@@ -801,6 +803,7 @@ class _ParksTabState extends State<ParksTab>
           (v) => (v - 1).clamp(0, 1 << 30),
           ifAbsent: () => 0,
         );
+
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text("Checked out of park")),
@@ -818,13 +821,29 @@ class _ParksTabState extends State<ParksTab>
           (v) => v + 1,
           ifAbsent: () => 1,
         );
+
+        // ✅ Add XP here
+        try {
+          if (uid != null) {
+            await LevelSystem.addXp(
+              uid,
+              20,
+              reason: 'Daily park check-in',
+            );
+          }
+        } catch (e) {
+          // debugPrint('Failed to add XP: $e');
+        }
+
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text("Checked in to park")),
           );
         }
+        if (mounted && widget.onXpGained != null) {
+          widget.onXpGained!();
+        }
       }
-      _debouncedRefreshCheckedIn();
       _cacheStateDebounced();
     } catch (_) {
       // ignore

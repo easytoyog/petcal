@@ -19,8 +19,8 @@ class WalkManager extends ChangeNotifier {
 
   WalkManager({
     required this.location,
-    this.minDuration = const Duration(seconds: 10),
-    this.minSteps = 10,
+    this.minDuration = const Duration(seconds: 1),
+    this.minSteps = 1,
   });
 
   static const _persistKey = 'active_walk';

@@ -12,6 +12,8 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:inthepark/widgets/level_system.dart';
+import 'package:inthepark/widgets/xp_flyup_overlay.dart';
 import 'package:location/location.dart' as loc;
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -37,7 +39,10 @@ class _FilterOption {
 
 class MapTab extends StatefulWidget {
   final void Function(String parkId) onShowEvents;
-  const MapTab({Key? key, required this.onShowEvents}) : super(key: key);
+  // 👇 new optional callback
+  final VoidCallback? onXpGained;
+  const MapTab({Key? key, required this.onShowEvents, this.onXpGained})
+      : super(key: key);
 
   @override
   State<MapTab> createState() => _MapTabState();
@@ -445,47 +450,41 @@ class _MapTabState extends State<MapTab>
       int? revivePrevBeforeLoss;
 
       if (!alreadyToday) {
-        if (lastDate == yesterdayKey) {
-          // ✅ Chain continues
-          current += 0;
+        if (lastDate == null) {
+          // First time we ever record a streak
+          current = 1;
+          incremented = true;
+          lastDate = todayKey;
+        } else if (lastDate == yesterdayKey) {
+          // Chain continues
+          current += 1;
           incremented = true;
           lastDate = todayKey;
 
-          // Clear any stale revive flags because chain is intact.
           txn.set(
             docRef,
             {
               'prevBeforeLoss': FieldValue.delete(),
               'lostAt': FieldValue.delete(),
               'canRevive': false,
-              // don't touch revivedForDay here
             },
             SetOptions(merge: true),
           );
         } else {
-          // ❌ Gap detected → streak broke (we'll treat it as "yesterday" for revive UX)
-          // Publish revive eligibility metadata so UI can offer a rewarded revive.
+          // Gap detected → publish revive metadata
           txn.set(
             docRef,
             {
-              'prevBeforeLoss':
-                  previousStreak, // 0 if there wasn't a prior streak
+              'prevBeforeLoss': previousStreak,
               'lostAt': FieldValue.serverTimestamp(),
-              'revivedForDay': FieldValue.delete(), // clear per-miss tag
-              'canRevive':
-                  previousStreak > 0, // allow revive if there was a streak
+              'revivedForDay': FieldValue.delete(),
+              'canRevive': previousStreak > 0,
             },
             SetOptions(merge: true),
           );
 
           reviveEligible = previousStreak > 0;
           revivePrevBeforeLoss = previousStreak;
-
-          // ❗ IMPORTANT:
-          // Do NOT reset `current` or `lastDate` here.
-          // We only update streak numbers when:
-          //   - user revives (applyStreakReviveAfterReward), OR
-          //   - user skips revive (_applyStreakFallbackForToday).
         }
       }
 
@@ -1053,7 +1052,7 @@ class _MapTabState extends State<MapTab>
     }
 
     // Foreground → show now
-    WidgetsBinding.instance.addPostFrameCallback((_) {
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
       if (reviveEligible_ && (prevBeforeLoss_ ?? 0) > 0) {
         _showReviveDialog(
           previousStreak: prevBeforeLoss_!,
@@ -1064,6 +1063,35 @@ class _MapTabState extends State<MapTab>
           streakIsNewRecord: streakIsNewRecord_,
         );
       } else {
+        // --- XP AWARDING LOGIC ---
+        final uid = FirebaseAuth.instance.currentUser?.uid;
+        if (uid != null) {
+          int xp = 0;
+
+          // 1) Daily check-in bonus (if streak incremented today)
+          if (streak?.wasIncremented == true) {
+            xp += 20;
+          }
+
+          // 2) Distance XP (1 xp per 100m)
+          xp += (meters_ / 100).floor();
+
+          // 3) Steps XP (1 xp per 500 steps)
+          xp += (steps_ / 500).floor();
+
+          // 4) Streak multiplier bonus
+          if (streakCurrent_ != null) {
+            xp += streakCurrent_ * 5;
+          }
+
+          // Apply XP to Level System
+          await LevelSystem.addXp(uid, xp, reason: 'Walk completed');
+          debugPrint("Awarded $xp XP");
+          // Show XP fly-up animation
+          if (widget.onXpGained != null && xp > 0) {
+            widget.onXpGained!();
+          }
+        }
         _showCelebrationDialog(
           steps: steps_,
           meters: meters_,
@@ -1871,6 +1899,30 @@ class _MapTabState extends State<MapTab>
     );
   }
 
+  Future<void> _awardDailyCheckInXp() async {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) return;
+
+    try {
+      final result = await LevelSystem.awardDailyParkCheckInXp(uid);
+
+      // If skipped == true, user already got today's daily check-in XP.
+      if (result['skipped'] == true) {
+        debugPrint('Daily park check-in XP already awarded today.');
+        return;
+      }
+
+      debugPrint('Awarded daily park check-in XP from MapTab.');
+
+      // Let the parent show XP UI (fly-up / level badge refresh)
+      if (widget.onXpGained != null) {
+        widget.onXpGained!();
+      }
+    } catch (e, st) {
+      debugPrint('Failed to award daily park check-in XP: $e\n$st');
+    }
+  }
+
   // --------------- Users in park ---------------
   Future<void> _showUsersInPark(
     String parkId,
@@ -1902,6 +1954,7 @@ class _MapTabState extends State<MapTab>
           _applyFilters();
         }
       },
+      onCheckInXp: _awardDailyCheckInXp,
     );
   }
 
@@ -2644,7 +2697,7 @@ class _MapTabState extends State<MapTab>
                   TextButton(
                     onPressed: () => Navigator.of(dialogCtx).pop(false),
                     child: Text(
-                      "Skip for now",
+                      "It's ok, I'll lose my streak",
                       style: TextStyle(
                         color: Colors.grey.shade700,
                         fontWeight: FontWeight.w600,

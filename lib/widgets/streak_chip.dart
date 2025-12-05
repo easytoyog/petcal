@@ -1,6 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
+import 'package:inthepark/screens/profile_tab.dart'; // for WalksListScreen
 
 class StreakChip extends StatelessWidget {
   final double elevation;
@@ -142,11 +143,29 @@ class StreakChip extends StatelessWidget {
           "Current walk streak: $current day${current == 1 ? '' : 's'} (Best: $longest)";
     }
 
+    // 👇 Only allow taps in the "Start a streak" state
+    final bool hasStreak = current > 0;
+
+    VoidCallback? effectiveOnTap;
+    if (hasStreak) {
+      effectiveOnTap = () {
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => const WalksListScreen(),
+          ),
+        );
+      };
+    } else {
+      // "Start a streak" state, delegate to parent (e.g. _goToMapTab)
+      effectiveOnTap = onTap;
+    }
+
     return Material(
       color: Colors.transparent,
       elevation: elevation,
       child: InkWell(
-        onTap: onTap,
+        onTap: effectiveOnTap,
         borderRadius: BorderRadius.circular(30),
         child: Tooltip(
           message: tooltip,
@@ -184,7 +203,7 @@ class StreakChip extends StatelessWidget {
                 if (danger) ...[
                   const SizedBox(width: 4),
                   const Icon(
-                    Icons.priority_high_rounded, // exclamation-style
+                    Icons.priority_high_rounded,
                     size: 16,
                     color: Colors.white,
                   ),
