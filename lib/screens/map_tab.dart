@@ -13,7 +13,6 @@ import 'package:flutter/material.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:inthepark/widgets/level_system.dart';
-import 'package:inthepark/widgets/xp_flyup_overlay.dart';
 import 'package:location/location.dart' as loc;
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -56,6 +55,8 @@ class _MapTabState extends State<MapTab>
   bool _manualFinishing = false;
   final loc.Location _location = loc.Location();
   late final LocationService _locationService;
+
+  bool _adLoaderShowing = false;
 
   // Walk manager
   late final WalkManager _walk;
@@ -311,6 +312,85 @@ class _MapTabState extends State<MapTab>
     _lastPolylineUpdate = now;
     _recomputeVisiblePolylines();
     return true;
+  }
+
+  Future<void> _showAdLoaderOverlay({
+    String title = "Getting it ready…",
+    String message = "One sec! A quick ad is loading 🐾",
+  }) async {
+    if (!mounted || _adLoaderShowing) return;
+    _adLoaderShowing = true;
+
+    // Use root navigator but don’t await it (so caller can continue)
+    showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      useRootNavigator: true,
+      builder: (_) {
+        const themeGreen = Color(0xFF567D46);
+        return WillPopScope(
+          onWillPop: () async => false,
+          child: Dialog(
+            shape:
+                RoundedRectangleBorder(borderRadius: BorderRadius.circular(18)),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(18, 16, 18, 16),
+              child: Row(
+                children: [
+                  SizedBox(
+                    width: 46,
+                    height: 46,
+                    child: Stack(
+                      alignment: Alignment.center,
+                      children: const [
+                        CircularProgressIndicator(
+                          strokeWidth: 3,
+                          valueColor: AlwaysStoppedAnimation<Color>(themeGreen),
+                        ),
+                        Icon(Icons.pets, size: 18, color: themeGreen),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(title,
+                            style: const TextStyle(
+                                fontSize: 15, fontWeight: FontWeight.w800)),
+                        const SizedBox(height: 4),
+                        Text(
+                          message,
+                          style: TextStyle(
+                            fontSize: 12.5,
+                            height: 1.25,
+                            color: Colors.grey.shade700,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  void _hideAdLoaderOverlay() {
+    if (!mounted || !_adLoaderShowing) return;
+
+    // Only pop if the top route is a dialog (best effort)
+    final nav = Navigator.of(context, rootNavigator: true);
+    if (nav.canPop()) {
+      nav.pop();
+    }
+    _adLoaderShowing = false;
   }
 
   /// Call this only AFTER a rewarded ad completes successfully.
@@ -2524,9 +2604,16 @@ class _MapTabState extends State<MapTab>
     if (!mounted || !showAdAfter) return;
 
     WidgetsBinding.instance.addPostFrameCallback((_) async {
+      // show loader immediately
+      unawaited(_showAdLoaderOverlay(
+        title: "Quick pause…",
+        message: "Loading a short ad so we can keep the app running 🐶",
+      ));
+
       try {
         await _adManager.show(onUnavailable: _adManager.preload);
       } finally {
+        _hideAdLoaderOverlay();
         _adManager.preload();
       }
     });
@@ -2765,34 +2852,52 @@ class _MapTabState extends State<MapTab>
       return;
     }
 
-    // --- Rewarded ad flow ---
     bool rewardEarned = false;
     String? adError;
+
     final completer = Completer<void>();
 
+    _showAdLoaderOverlay(
+      title: "Saving your streak…",
+      message: "Loading a quick revive ad 🦴",
+    );
+
     RewardedStreakAds.show(
-      onRewardEarned: (reward) {
+      onRewardEarned: (_) {
         rewardEarned = true;
       },
+      onAdShown: () {
+        _hideAdLoaderOverlay();
+      },
       onDismissed: () {
-        if (!completer.isCompleted) {
-          completer.complete();
-        }
+        _hideAdLoaderOverlay();
+        if (!completer.isCompleted) completer.complete();
       },
       onFailedToShow: (msg) {
+        _hideAdLoaderOverlay();
         adError = msg;
-        if (!completer.isCompleted) {
-          completer.complete();
-        }
+        if (!completer.isCompleted) completer.complete();
       },
     );
 
+// ✅ wait exactly once
     await completer.future;
     if (!mounted) return;
 
+// if failed, show blocking dialog (readable)
     if (adError != null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text("Couldn't show revive ad: $adError")),
+      await showDialog<void>(
+        context: context,
+        builder: (_) => AlertDialog(
+          title: const Text("Ad failed to load"),
+          content: Text(adError!),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text("OK"),
+            ),
+          ],
+        ),
       );
 
       await _showCelebrationDialog(

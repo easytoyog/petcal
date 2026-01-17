@@ -356,6 +356,16 @@ class _ProfileTabState extends State<ProfileTab> {
     super.dispose();
   }
 
+  DateTime? _parseDayKey(String s) {
+    final p = s.split('-');
+    if (p.length != 3) return null;
+    final y = int.tryParse(p[0]);
+    final m = int.tryParse(p[1]);
+    final d = int.tryParse(p[2]);
+    if (y == null || m == null || d == null) return null;
+    return DateTime(y, m, d);
+  }
+
   Widget _buildStreakCard() {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return const SizedBox.shrink();
@@ -402,7 +412,13 @@ class _ProfileTabState extends State<ProfileTab> {
         final yesterdayKey =
             _dayKeyLocal(today.subtract(const Duration(days: 1)));
         final dbyKey = _dayKeyLocal(today.subtract(const Duration(days: 2)));
-        final eligible = lastDate == dbyKey && revivedForDay != yesterdayKey;
+        final lastDay = (lastDate != null && lastDate.isNotEmpty)
+            ? _parseDayKey(lastDate)
+            : null;
+        final diffDays =
+            (lastDay == null) ? 0 : today.difference(lastDay).inDays;
+        final eligible =
+            current > 0 && diffDays >= 2 && revivedForDay != yesterdayKey;
 
         return Material(
           color: Colors.transparent,

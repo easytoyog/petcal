@@ -14,6 +14,19 @@ import 'package:location/location.dart' as loc;
 import 'package:profanity_filter/profanity_filter.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+/// NOTE:
+/// This file expects your ServiceAd model to include these optional fields:
+/// - contactPhone
+/// - contactEmail
+/// - contactAddress
+///
+/// And to map them from Firestore (services collection).
+///
+/// Example fields stored in Firestore:
+/// contactPhone: string
+/// contactEmail: string
+/// contactAddress: string (optional; can be "")
+
 class ServiceTab extends StatefulWidget {
   const ServiceTab({super.key});
 
@@ -968,6 +981,24 @@ class _ServiceDetailsScreenState extends State<ServiceDetailsScreen> {
     final currentUser = FirebaseAuth.instance.currentUser;
     final isOwner = currentUser != null && widget.ad.ownerId == currentUser.uid;
 
+    // Prefer service-level contact info; fallback to owner doc
+    final contactName = _owner != null
+        ? '${_owner!.firstName} ${_owner!.lastName}'
+        : 'Service Owner';
+
+    final contactPhone = (widget.ad.contactPhone?.trim().isNotEmpty ?? false)
+        ? widget.ad.contactPhone!.trim()
+        : (_owner?.phone ?? '');
+
+    final contactEmail = (widget.ad.contactEmail?.trim().isNotEmpty ?? false)
+        ? widget.ad.contactEmail!.trim()
+        : (_owner?.email ?? '');
+
+    final contactAddress =
+        (widget.ad.contactAddress?.trim().isNotEmpty ?? false)
+            ? widget.ad.contactAddress!.trim()
+            : null;
+
     return Scaffold(
       appBar: AppBar(
         title: Text(widget.ad.title),
@@ -1073,82 +1104,101 @@ class _ServiceDetailsScreenState extends State<ServiceDetailsScreen> {
                     child: CircularProgressIndicator(),
                   ),
                 )
-              : _owner != null
-                  ? Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
+              : Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
                       children: [
-                        Row(
+                        const Icon(Icons.person, size: 20, color: Colors.green),
+                        const SizedBox(width: 8),
+                        Text(
+                          contactName,
+                          style: const TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    if (contactPhone.isNotEmpty)
+                      InkWell(
+                        onTap: () async {
+                          final uri = Uri(scheme: 'tel', path: contactPhone);
+                          if (await canLaunchUrl(uri)) {
+                            await launchUrl(uri);
+                          }
+                        },
+                        child: Row(
                           children: [
-                            const Icon(Icons.person,
+                            const Icon(Icons.phone,
                                 size: 20, color: Colors.green),
                             const SizedBox(width: 8),
                             Text(
-                              '${_owner!.firstName} ${_owner!.lastName}',
+                              contactPhone,
                               style: const TextStyle(
                                 fontSize: 16,
-                                fontWeight: FontWeight.w500,
+                                color: Colors.blue,
+                                decoration: TextDecoration.underline,
                               ),
                             ),
                           ],
                         ),
-                        const SizedBox(height: 8),
-                        InkWell(
-                          onTap: () async {
-                            final uri = Uri(scheme: 'tel', path: _owner!.phone);
-                            if (await canLaunchUrl(uri)) {
-                              await launchUrl(uri);
-                            }
-                          },
-                          child: Row(
-                            children: [
-                              const Icon(Icons.phone,
-                                  size: 20, color: Colors.green),
-                              const SizedBox(width: 8),
-                              Text(
-                                _owner!.phone,
-                                style: const TextStyle(
-                                  fontSize: 16,
-                                  color: Colors.blue,
-                                  decoration: TextDecoration.underline,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                        const SizedBox(height: 8),
-                        InkWell(
-                          onTap: () async {
-                            final uri =
-                                Uri(scheme: 'mailto', path: _owner!.email);
-                            if (await canLaunchUrl(uri)) {
-                              await launchUrl(uri);
-                            }
-                          },
-                          child: Row(
-                            children: [
-                              const Icon(Icons.email,
-                                  size: 20, color: Colors.green),
-                              const SizedBox(width: 8),
-                              Text(
-                                _owner!.email,
-                                style: const TextStyle(
-                                  fontSize: 16,
-                                  color: Colors.blue,
-                                  decoration: TextDecoration.underline,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
-                    )
-                  : const Text(
-                      'Contact information not available',
-                      style: TextStyle(
-                        fontStyle: FontStyle.italic,
-                        color: Colors.grey,
                       ),
-                    ),
+                    if (contactPhone.isNotEmpty) const SizedBox(height: 8),
+                    if (contactEmail.isNotEmpty)
+                      InkWell(
+                        onTap: () async {
+                          final uri = Uri(scheme: 'mailto', path: contactEmail);
+                          if (await canLaunchUrl(uri)) {
+                            await launchUrl(uri);
+                          }
+                        },
+                        child: Row(
+                          children: [
+                            const Icon(Icons.email,
+                                size: 20, color: Colors.green),
+                            const SizedBox(width: 8),
+                            Text(
+                              contactEmail,
+                              style: const TextStyle(
+                                fontSize: 16,
+                                color: Colors.blue,
+                                decoration: TextDecoration.underline,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    if (contactAddress != null) const SizedBox(height: 8),
+                    if (contactAddress != null)
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const Icon(Icons.location_on,
+                              size: 20, color: Colors.green),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              contactAddress,
+                              style: const TextStyle(fontSize: 16),
+                            ),
+                          ),
+                        ],
+                      ),
+                    if (contactPhone.isEmpty && contactEmail.isEmpty)
+                      const Padding(
+                        padding: EdgeInsets.only(top: 4),
+                        child: Text(
+                          'Contact information not available',
+                          style: TextStyle(
+                            fontStyle: FontStyle.italic,
+                            color: Colors.grey,
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
         ],
       ),
     );
@@ -1183,6 +1233,12 @@ class _PostServiceScreenState extends State<_PostServiceScreen> {
   late final TextEditingController titleCtl;
   late final TextEditingController descCtl;
   late final TextEditingController postalCtl;
+
+  // NEW: contact info
+  late final TextEditingController phoneCtl;
+  late final TextEditingController emailCtl;
+  late final TextEditingController addressCtl;
+
   final FocusNode titleFocusNode = FocusNode();
 
   late String dialogType;
@@ -1196,12 +1252,28 @@ class _PostServiceScreenState extends State<_PostServiceScreen> {
   @override
   void initState() {
     super.initState();
+
+    final current = FirebaseAuth.instance.currentUser;
+
     titleCtl = TextEditingController(text: widget.existingAd?.title);
     descCtl = TextEditingController(text: widget.existingAd?.description);
     postalCtl = TextEditingController(
       text: widget.existingAd?.postalCode ?? widget.prefillPostalCode ?? '',
     );
     dialogType = widget.existingAd?.type ?? widget.types[1];
+
+    // NEW: contact info controllers
+    phoneCtl =
+        TextEditingController(text: widget.existingAd?.contactPhone ?? '');
+
+    // default email to user's email if creating, but keep existing if editing
+    final existingEmail = widget.existingAd?.contactEmail?.trim() ?? '';
+    emailCtl = TextEditingController(
+      text: existingEmail.isNotEmpty ? existingEmail : (current?.email ?? ''),
+    );
+
+    addressCtl =
+        TextEditingController(text: widget.existingAd?.contactAddress ?? '');
 
     if (widget.existingAd != null && widget.existingAd!.images.isNotEmpty) {
       _existingImageUrls.addAll(widget.existingAd!.images);
@@ -1217,6 +1289,11 @@ class _PostServiceScreenState extends State<_PostServiceScreen> {
     titleCtl.dispose();
     descCtl.dispose();
     postalCtl.dispose();
+
+    phoneCtl.dispose();
+    emailCtl.dispose();
+    addressCtl.dispose();
+
     titleFocusNode.dispose();
     super.dispose();
   }
@@ -1234,6 +1311,11 @@ class _PostServiceScreenState extends State<_PostServiceScreen> {
       ),
       contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
     );
+  }
+
+  bool _isValidEmail(String v) {
+    final r = RegExp(r'^[^@\s]+@[^@\s]+\.[^@\s]+$');
+    return r.hasMatch(v);
   }
 
   Future<void> _pickImages() async {
@@ -1279,6 +1361,25 @@ class _PostServiceScreenState extends State<_PostServiceScreen> {
       return;
     }
 
+    // NEW: contact validations
+    final phone = phoneCtl.text.trim();
+    final email = emailCtl.text.trim();
+    final address = addressCtl.text.trim();
+
+    if (phone.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Phone number cannot be empty.')),
+      );
+      return;
+    }
+
+    if (email.isEmpty || !_isValidEmail(email)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please enter a valid email address.')),
+      );
+      return;
+    }
+
     setState(() => _saving = true);
 
     try {
@@ -1315,6 +1416,12 @@ class _PostServiceScreenState extends State<_PostServiceScreen> {
         'longitude': geoLng ?? 0.0,
         'images': allImages,
         'postalCode': postal,
+
+        // NEW: service-level contact info
+        'contactPhone': phone,
+        'contactEmail': email,
+        'contactAddress': address, // optional; can be ""
+
         'price': null,
         'approved': false,
         'updatedAt': FieldValue.serverTimestamp(),
@@ -1412,6 +1519,37 @@ class _PostServiceScreenState extends State<_PostServiceScreen> {
                   controller: postalCtl,
                   decoration: _bordered('Postal Code'),
                 ),
+
+                // NEW: Contact info inputs
+                const SizedBox(height: 12),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    'Contact Info',
+                    style: TextStyle(
+                      fontWeight: FontWeight.w700,
+                      color: Colors.grey[800],
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: phoneCtl,
+                  keyboardType: TextInputType.phone,
+                  decoration: _bordered('Phone Number'),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: emailCtl,
+                  keyboardType: TextInputType.emailAddress,
+                  decoration: _bordered('Email'),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: addressCtl,
+                  decoration: _bordered('Address (optional)'),
+                ),
+
                 const SizedBox(height: 16),
                 Row(
                   children: [

@@ -87,7 +87,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final titles = ["Parks", "Explore", "Events", "Friends", "Services"];
+    final titles = ["Parks", "Explore", "Events", "Friends", "Promotions"];
 
     return Scaffold(
       appBar: AppBar(
@@ -235,7 +235,7 @@ class _HomeScreenState extends State<HomeScreen> {
           BottomNavigationBarItem(icon: Icon(Icons.event), label: 'Events'),
           BottomNavigationBarItem(icon: Icon(Icons.pets), label: 'Friends'),
           BottomNavigationBarItem(
-              icon: Icon(Icons.storefront), label: 'Services'),
+              icon: Icon(Icons.storefront), label: 'Promotions'),
         ],
       ),
     );

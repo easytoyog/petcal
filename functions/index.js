@@ -790,3 +790,65 @@ exports.onActiveUserCreated = onDocumentCreated(
     await ref.set(updates, { merge: true });
   }
 );
+
+exports.onDmMessageCreated = onDocumentCreated(
+  "dm_threads/{threadId}/messages/{messageId}",
+  async (event) => {
+    const snap = event.data;
+    if (!snap) return;
+
+    const { threadId } = event.params;
+    const msg = snap.data() || {};
+
+    const senderId = String(msg.senderId || "");
+    const text = String(msg.text || "").trim();
+    if (!senderId || !text) return;
+
+    // Load thread to find recipient
+    const threadSnap = await db.collection("dm_threads").doc(threadId).get();
+    if (!threadSnap.exists) return;
+
+    const thread = threadSnap.data() || {};
+    const participants = Array.isArray(thread.participants) ? thread.participants : [];
+    if (participants.length !== 2) return;
+
+    const recipientId = participants.find((u) => u !== senderId);
+    if (!recipientId) return;
+
+    // Fetch recipient token
+    const recipientOwnerSnap = await db.collection("owners").doc(recipientId).get();
+    const token = recipientOwnerSnap.exists ? recipientOwnerSnap.get("fcmToken") : null;
+    if (!token || !String(token).trim()) return;
+
+    // Sender display name (safe)
+    const senderName = await getOwnerDisplayName(senderId); // you already have this helper
+
+    // Send push (with click_action so Flutter can route)
+    try {
+      await getMessaging().send({
+        token: String(token).trim(),
+        notification: {
+          title: senderName,
+          body: text.length > 120 ? text.slice(0, 117) + "..." : text,
+        },
+        data: {
+          type: "dm",
+          threadId,
+          senderId,
+          senderName,
+          click_action: "FLUTTER_NOTIFICATION_CLICK",
+        },
+        android: { priority: "high" },
+        apns: { payload: { aps: { sound: "default" } } },
+      });
+    } catch (e) {
+      const code = (e && e.code) ? String(e.code) : "";
+      if (code.includes("registration-token-not-registered")) {
+        await db.collection("owners").doc(recipientId)
+          .set({ fcmToken: admin.firestore.FieldValue.delete() }, { merge: true });
+      } else {
+        console.error("dm push failed:", threadId, recipientId, e);
+      }
+    }
+  }
+);
