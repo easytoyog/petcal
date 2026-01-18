@@ -30,7 +30,7 @@ android {
 
     defaultConfig {
         applicationId "ca.inthepark"
-        minSdkVersion 23
+        minSdkVersion flutter.minSdkVersion
         targetSdkVersion 36
         versionCode flutterVersionCode.toInteger()
         versionName flutterVersionName
@@ -39,6 +39,7 @@ android {
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
+        coreLibraryDesugaringEnabled true
     }
     kotlinOptions {
         jvmTarget = "17"
@@ -85,6 +86,8 @@ dependencies {
     // App Check (debug/prod)
     debugImplementation   'com.google.firebase:firebase-appcheck-debug'
     releaseImplementation 'com.google.firebase:firebase-appcheck-playintegrity'
+
+    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.4'
 }
 
 flutter {
