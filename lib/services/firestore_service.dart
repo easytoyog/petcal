@@ -137,41 +137,78 @@ class FirestoreService {
     return doc.exists;
   }
 
-  /// Like a park (add to likedParks collection)
   Future<void> likePark(String parkId) async {
-    final uid = getCurrentUserId();
-    if (uid == null) throw Exception("User not authenticated.");
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) return;
 
-    // 1) Fetch the park document to read its name
-    final parkSnap = await _firestore.collection('parks').doc(parkId).get();
-    if (!parkSnap.exists) {
-      throw Exception("Park not found: $parkId");
-    }
-    final parkName = parkSnap.data()!['name'] as String? ?? '';
-
-    // 2) Store both likedAt and parkName
-    await _firestore
+    final likeRef = FirebaseFirestore.instance
         .collection('owners')
         .doc(uid)
         .collection('likedParks')
-        .doc(parkId)
-        .set({
-      'likedAt': FieldValue.serverTimestamp(),
-      'parkName': parkName,
-    });
+        .doc(parkId);
+
+    final subRef = FirebaseFirestore.instance
+        .collection('owners')
+        .doc(uid)
+        .collection('chat_subscriptions')
+        .doc(parkId);
+
+    final batch = FirebaseFirestore.instance.batch();
+
+    batch.set(
+      likeRef,
+      {
+        'uid': uid,
+        'parkId': parkId,
+        'createdAt': FieldValue.serverTimestamp(),
+      },
+      SetOptions(merge: true),
+    );
+
+    batch.set(
+      subRef,
+      {
+        'enabled': true,
+        'parkId': parkId,
+        'updatedAt': FieldValue.serverTimestamp(),
+      },
+      SetOptions(merge: true),
+    );
+
+    await batch.commit();
   }
 
-  /// Unlike a park (remove from likedParks collection)
   Future<void> unlikePark(String parkId) async {
-    final uid = getCurrentUserId();
-    if (uid == null) throw Exception("User not authenticated.");
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) return;
 
-    await _firestore
+    final likeRef = FirebaseFirestore.instance
         .collection('owners')
         .doc(uid)
         .collection('likedParks')
-        .doc(parkId)
-        .delete();
+        .doc(parkId);
+
+    final subRef = FirebaseFirestore.instance
+        .collection('owners')
+        .doc(uid)
+        .collection('chat_subscriptions')
+        .doc(parkId);
+
+    final batch = FirebaseFirestore.instance.batch();
+
+    batch.delete(likeRef);
+
+    batch.set(
+      subRef,
+      {
+        'enabled': false,
+        'parkId': parkId,
+        'updatedAt': FieldValue.serverTimestamp(),
+      },
+      SetOptions(merge: true),
+    );
+
+    await batch.commit();
   }
 
   Future<List<String>> getLikedParkIds() async {

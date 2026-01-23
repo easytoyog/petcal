@@ -3,25 +3,20 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:app_badge_plus/app_badge_plus.dart';
+import 'package:app_tracking_transparency/app_tracking_transparency.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_app_check/firebase_app_check.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:firebase_remote_config/firebase_remote_config.dart';
-
 import 'package:flutter/foundation.dart' show kReleaseMode;
 import 'package:flutter/material.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
-
-// Badge
-import 'package:app_badge_plus/app_badge_plus.dart';
-
-// ATT
-import 'package:app_tracking_transparency/app_tracking_transparency.dart';
 
 // Google Mobile Ads (alias to avoid UMP symbol clashes)
 import 'package:google_mobile_ads/google_mobile_ads.dart' as gma
@@ -53,12 +48,18 @@ import 'package:inthepark/screens/dm_chat_screen.dart';
 // Saves tz + dailyStepsOptIn + updatedAt
 import 'package:inthepark/services/notification_prefs.dart';
 
-// ✅ NEW: push/local notifications helper you created
+// ✅ push/local notifications helper you created
 import 'package:inthepark/services/push_notifications.dart';
 
-bool _appCheckActivated = false;
-final RouteObserver<PageRoute> routeObserver = RouteObserver<PageRoute>();
+/// ───────────────────────────────────────────────────────────────────────────
+/// ENV flags
+/// ───────────────────────────────────────────────────────────────────────────
+const bool isRelease = kReleaseMode;
+const bool isDebug = !kReleaseMode;
 
+bool _appCheckActivated = false;
+
+final RouteObserver<PageRoute> routeObserver = RouteObserver<PageRoute>();
 final ValueNotifier<String?> currentRouteName = ValueNotifier<String?>('/');
 
 class RouteNameObserver extends RouteObserver<PageRoute<dynamic>> {
@@ -94,9 +95,14 @@ final GlobalKey<NavigatorState> navKey = GlobalKey<NavigatorState>();
 
 /// Configure Mobile Ads (test devices in debug, content rating, etc.)
 Future<void> _configureMobileAds() async {
+  // If you have test device IDs, put them here for debug.
+  // Example:
+  // const debugTestDeviceIds = <String>['ABCDEF0123456789ABCDEF0123456789'];
+  const debugTestDeviceIds = <String>[];
+
   await gma.MobileAds.instance.updateRequestConfiguration(
     gma.RequestConfiguration(
-      testDeviceIds: kReleaseMode ? const <String>[] : const <String>[],
+      testDeviceIds: isRelease ? const <String>[] : debugTestDeviceIds,
       maxAdContentRating: gma.MaxAdContentRating.pg,
     ),
   );
@@ -126,10 +132,7 @@ Future<void> _gatherConsentIfNeeded() async {
         ),
     () async {
       ConsentForm.loadAndShowConsentFormIfRequired((formError) async {
-        if (formError != null) {
-          // ignore; canRequestAds might still be true
-          // print('🟠 UMP form error: ${formError.errorCode}: ${formError.message}');
-        }
+        // ignore formError; canRequestAds might still be true
         final canRequest = await consentInfo.canRequestAds();
         if (canRequest) {
           await _configureMobileAds();
@@ -139,7 +142,7 @@ Future<void> _gatherConsentIfNeeded() async {
       });
     },
     (err) async {
-      // print('🟠 Consent update error: ${err.errorCode}: ${err.message}');
+      // ignore err; canRequestAds might still be true
       final canRequest = await consentInfo.canRequestAds();
       if (canRequest) {
         await _configureMobileAds();
@@ -183,22 +186,29 @@ Future<void> main() async {
     await dotenv.load(fileName: '.env').catchError((_) {});
     await Firebase.initializeApp();
 
-    await _requestATTIfNeeded();
+    if (isDebug) {
+      // ignore: avoid_print
+      print('🧪 Running in DEBUG mode');
+    }
 
-    // ✅ App Check
+    // ✅ ATT (prod only; skip in debug to reduce noise)
+    if (isRelease) {
+      await _requestATTIfNeeded();
+    }
+
+    // ✅ App Check (STRICT separation: debug vs release)
     if (!_appCheckActivated) {
       await FirebaseAppCheck.instance.activate(
-        androidProvider: kReleaseMode
-            ? AndroidProvider.playIntegrity
-            : AndroidProvider.debug,
-        appleProvider: kReleaseMode
+        androidProvider:
+            isRelease ? AndroidProvider.playIntegrity : AndroidProvider.debug,
+        appleProvider: isRelease
             ? AppleProvider.appAttestWithDeviceCheckFallback
             : AppleProvider.debug,
       );
       _appCheckActivated = true;
     }
 
-    // ✅ Notifications permission
+    // ✅ Notifications permission (safe in both)
     final messaging = FirebaseMessaging.instance;
     await messaging.requestPermission();
     await messaging.setForegroundNotificationPresentationOptions(
@@ -210,11 +220,17 @@ Future<void> main() async {
     // Persist FCM token if signed in
     await _ensureFcmTokenPersistenceForSignedInUser();
 
-    // ✅ NEW: init push + local notifications (foreground + tap-to-open)
+    // ✅ init push + local notifications (foreground + tap-to-open)
     await initPushNotifications(navigatorKey: navKey);
 
-    // ✅ Ads consent
-    await _gatherConsentIfNeeded();
+    // ✅ Ads consent (prod only; skip in debug)
+    if (isRelease) {
+      await _gatherConsentIfNeeded();
+    } else {
+      // In debug you can still initialize ads if you want:
+      // await _configureMobileAds();
+      // await gma.MobileAds.instance.initialize();
+    }
 
     // If already signed-in at launch, save tz + opt-in
     final existing = FirebaseAuth.instance.currentUser;
@@ -223,8 +239,13 @@ Future<void> main() async {
     }
   } catch (e, stack) {
     // fail-open; don't block app boot
-    // print("🔥 Startup error: $e");
-    // print("$stack");
+    // ignore: avoid_print
+    if (isDebug) {
+      // ignore: avoid_print
+      print("🔥 Startup error: $e");
+      // ignore: avoid_print
+      print(stack);
+    }
   }
 
   runApp(UpdateGateRoot(
@@ -275,6 +296,10 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
           primary: const Color(0xFF567D46),
           secondary: const Color(0xFF365A38),
         ),
+
+        // If google_fonts ever causes issues during startup in debug,
+        // you can temporarily switch to:
+        // textTheme: isRelease ? GoogleFonts.nunitoTextTheme() : ThemeData.light().textTheme,
         textTheme: GoogleFonts.nunitoTextTheme(),
       ),
       navigatorObservers: [routeNameObserver],
@@ -347,7 +372,7 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
           return ForgotPasswordScreen(initialEmail: email);
         },
 
-        // ✅ NEW: DM route used by push_notifications.dart
+        // ✅ DM route used by push_notifications.dart
         '/dm': (context) {
           final args = ModalRoute.of(context)?.settings.arguments
               as Map<String, dynamic>?;
@@ -411,7 +436,7 @@ class _UpdateGateRootState extends State<UpdateGateRoot> {
       await rc.setConfigSettings(RemoteConfigSettings(
         fetchTimeout: const Duration(seconds: 10),
         minimumFetchInterval:
-            kReleaseMode ? const Duration(minutes: 30) : Duration.zero,
+            isRelease ? const Duration(minutes: 30) : Duration.zero,
       ));
       await rc.setDefaults(const {
         'min_supported_build': 0,
