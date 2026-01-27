@@ -776,7 +776,10 @@ class _MapTabState extends State<MapTab>
       _elapsedText.value = _formatElapsed();
 
       // Only auto-finish if we didn't just manually stop
-      if (_wasActive && !_walk.isActive && !_manualFinishing) {
+      if (_wasActive &&
+          !_walk.isActive &&
+          !_manualFinishing &&
+          !_finishingWalk) {
         await _handleWalkFinished(auto: true);
       }
       _wasActive = _walk.isActive;
@@ -2863,18 +2866,14 @@ class _MapTabState extends State<MapTab>
     );
 
     RewardedStreakAds.show(
-      onRewardEarned: (_) {
+      onRewardEarned: (_) async {
         rewardEarned = true;
-      },
-      onAdShown: () {
-        _hideAdLoaderOverlay();
+        if (!completer.isCompleted) completer.complete();
       },
       onDismissed: () {
-        _hideAdLoaderOverlay();
         if (!completer.isCompleted) completer.complete();
       },
       onFailedToShow: (msg) {
-        _hideAdLoaderOverlay();
         adError = msg;
         if (!completer.isCompleted) completer.complete();
       },
