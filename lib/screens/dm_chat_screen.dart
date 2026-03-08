@@ -137,7 +137,6 @@ class _DmChatScreenState extends State<DmChatScreen> {
           'senderId': me,
           'text': text,
           'createdAt': now,
-          'isRead': true,
         });
 
         tx.set(

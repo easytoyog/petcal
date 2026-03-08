@@ -36,6 +36,8 @@ class _FriendsTabState extends State<FriendsTab> {
 
   // Track unread message counts per friend
   Map<String, int> _unreadCounts = {};
+  // Track friends we're currently marking as read to prevent listener race conditions
+  Set<String> _markingAsReadFriendIds = {};
 
   final String? currentUserId = FirebaseAuth.instance.currentUser?.uid;
   StreamSubscription? _unreadSubscription;
@@ -102,16 +104,26 @@ class _FriendsTabState extends State<FriendsTab> {
         // Capture friendId in a local final variable to avoid closure issues
         final fid = friendId;
 
+        // Skip if we're currently marking this friend's messages as read
+        if (_markingAsReadFriendIds.contains(fid)) continue;
+
         // Queue up the count query
         futures.add(
           threadDoc.reference
               .collection('messages')
               .where('senderId', isNotEqualTo: currentUserId)
-              .where('isRead', isEqualTo: false)
-              .count()
               .get()
               .then((snapshot) {
-            counts[fid] = snapshot.count!;
+            // Count messages that are NOT marked as read (missing isRead or isRead == false)
+            int unreadCount = 0;
+            for (final doc in snapshot.docs) {
+              final isRead = doc.data()['isRead'];
+              // Treat missing field or false as unread
+              if (isRead != true) {
+                unreadCount++;
+              }
+            }
+            counts[fid] = unreadCount;
           }),
         );
       }
@@ -575,13 +587,15 @@ class _FriendsTabState extends State<FriendsTab> {
     final other = friendId;
     final threadId = me.compareTo(other) < 0 ? '${me}_$other' : '${other}_$me';
 
+    // Mark that we're updating this friend to prevent listener race condition
+    _markingAsReadFriendIds.add(friendId);
+
     try {
       final messagesSnapshot = await FirebaseFirestore.instance
           .collection('dm_threads')
           .doc(threadId)
           .collection('messages')
           .where('senderId', isNotEqualTo: currentUserId)
-          .where('isRead', isEqualTo: false)
           .get();
 
       // Batch update messages to mark as read
@@ -591,8 +605,19 @@ class _FriendsTabState extends State<FriendsTab> {
       }
 
       await batch.commit();
+
+      // Clear the unread count and remove from marking set
+      if (mounted) {
+        setState(() {
+          _unreadCounts[friendId] = 0;
+          _markingAsReadFriendIds.remove(friendId);
+        });
+      } else {
+        _markingAsReadFriendIds.remove(friendId);
+      }
     } catch (_) {
-      // Silent fail
+      // Silent fail but still clean up the marking set
+      _markingAsReadFriendIds.remove(friendId);
     }
   }
 
@@ -830,14 +855,52 @@ class _FriendsTabState extends State<FriendsTab> {
                                                 ),
                                               ),
 
-                                              // ✅ NEW: explicit message icon (WhatsApp style)
-                                              IconButton(
-                                                tooltip: "Message",
-                                                icon: const Icon(
-                                                    Icons.chat_bubble,
-                                                    color: Colors.green),
-                                                onPressed: () => _openDm(
-                                                    friendId, ownerName),
+                                              // ✅ NEW: explicit message icon with unread badge
+                                              Stack(
+                                                children: [
+                                                  IconButton(
+                                                    tooltip: "Message",
+                                                    icon: const Icon(
+                                                        Icons.chat_bubble,
+                                                        color: Colors.green),
+                                                    onPressed: () => _openDm(
+                                                        friendId, ownerName),
+                                                  ),
+                                                  // Unread badge next to message icon
+                                                  if ((_unreadCounts[
+                                                              friendId] ??
+                                                          0) >
+                                                      0)
+                                                    Positioned(
+                                                      top: 0,
+                                                      right: 0,
+                                                      child: Container(
+                                                        padding:
+                                                            const EdgeInsets
+                                                                .symmetric(
+                                                          horizontal: 5,
+                                                          vertical: 1,
+                                                        ),
+                                                        decoration:
+                                                            BoxDecoration(
+                                                          color: Colors.red,
+                                                          borderRadius:
+                                                              BorderRadius
+                                                                  .circular(8),
+                                                        ),
+                                                        child: Text(
+                                                          '${_unreadCounts[friendId]}',
+                                                          style:
+                                                              const TextStyle(
+                                                            color: Colors.white,
+                                                            fontSize: 9,
+                                                            fontWeight:
+                                                                FontWeight.bold,
+                                                          ),
+                                                        ),
+                                                      ),
+                                                    ),
+                                                ],
                                               ),
 
                                               // existing favorite/unfriend logic
@@ -855,33 +918,6 @@ class _FriendsTabState extends State<FriendsTab> {
                                                   : const SizedBox.shrink(),
                                             ],
                                           ),
-                                          // Unread badge
-                                          if ((_unreadCounts[friendId] ?? 0) >
-                                              0)
-                                            Positioned(
-                                              top: 0,
-                                              right: 0,
-                                              child: Container(
-                                                padding:
-                                                    const EdgeInsets.symmetric(
-                                                  horizontal: 6,
-                                                  vertical: 2,
-                                                ),
-                                                decoration: BoxDecoration(
-                                                  color: Colors.red,
-                                                  borderRadius:
-                                                      BorderRadius.circular(10),
-                                                ),
-                                                child: Text(
-                                                  '${_unreadCounts[friendId]}',
-                                                  style: const TextStyle(
-                                                    color: Colors.white,
-                                                    fontSize: 11,
-                                                    fontWeight: FontWeight.bold,
-                                                  ),
-                                                ),
-                                              ),
-                                            ),
                                         ],
                                       ),
                                     ),
