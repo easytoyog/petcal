@@ -7,7 +7,6 @@ import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart' show LatLng;
-import 'package:inthepark/utils/utils.dart';
 import 'package:inthepark/widgets/level_system.dart';
 import 'package:location/location.dart' as loc;
 import 'package:inthepark/models/park_model.dart';
@@ -78,18 +77,34 @@ class _ParksTabState extends State<ParksTab>
   Timer? _checkinDebounce;
   Timer? _cacheDebounce;
 
+  // Memoization for nearbyParksVisible to avoid expensive filtering
+  List<Park>? _cachedNearbyParksVisible;
+  Set<String>? _cachedFavIdSet;
+  List<Park>? _cachedNearbyList;
+
   // SharedPreferences reuse
   SharedPreferences? _prefs;
   Future<SharedPreferences> _sp() async =>
       _prefs ??= await SharedPreferences.getInstance();
 
   // ---------- Helpers ----------
-  String _parkIdOf(Park p) => generateParkID(p.latitude, p.longitude, p.name);
+  // String _parkIdOf(Park p) => generateParkID(p.latitude, p.longitude, p.name);
 
-  // Filtered nearby list (favorites excluded)
-  List<Park> get _nearbyParksVisible => _nearbyParks
-      .where((p) => !_favoriteParkIds.contains(_parkIdOf(p)))
-      .toList();
+  // Filtered nearby list (favorites excluded) - with memoization
+  List<Park> get _nearbyParksVisible {
+    // Return cached result if neither favorites nor nearby lists changed
+    if (_cachedNearbyParksVisible != null &&
+        _cachedFavIdSet == _favoriteParkIds &&
+        _cachedNearbyList == _nearbyParks) {
+      return _cachedNearbyParksVisible!;
+    }
+    // Recalculate and cache
+    _cachedNearbyParksVisible =
+        _nearbyParks.where((p) => !_favoriteParkIds.contains(p.id)).toList();
+    _cachedFavIdSet = _favoriteParkIds;
+    _cachedNearbyList = _nearbyParks;
+    return _cachedNearbyParksVisible!;
+  }
 
   @override
   bool get wantKeepAlive => true;
@@ -146,7 +161,7 @@ class _ParksTabState extends State<ParksTab>
         _lastNearbyRefresh = DateTime.now();
         _lastRefreshLoc = saved ?? _lastRefreshLoc;
 
-        final ids = _nearbyParks.map(_parkIdOf).toList();
+        final ids = _nearbyParks.map((p) => p.id).toList();
         final toHydrate =
             ids.where((id) => !_hydratedMeta.contains(id)).toList();
         if (toHydrate.isNotEmpty) {
@@ -194,7 +209,7 @@ class _ParksTabState extends State<ParksTab>
       }
       if (favsRaw != null) {
         _favoriteParks = await compute(_parseParksFromJson, favsRaw);
-        _favoriteParkIds = _favoriteParks.map(_parkIdOf).toSet();
+        _favoriteParkIds = _favoriteParks.map((p) => p.id).toSet();
       }
       if (metaRaw != null) {
         final meta = jsonDecode(metaRaw) as Map<String, dynamic>;
@@ -312,6 +327,7 @@ class _ParksTabState extends State<ParksTab>
       setState(() {
         _favoriteParkIds = parkIds.toSet();
         _favoriteParks = parks;
+        _cachedNearbyParksVisible = null; // invalidate cache
       });
       _cacheStateDebounced();
     } catch (_) {
@@ -346,7 +362,7 @@ class _ParksTabState extends State<ParksTab>
       bool changed = parks.length != _nearbyParks.length;
       if (!changed) {
         for (int i = 0; i < parks.length; i++) {
-          if (_parkIdOf(parks[i]) != _parkIdOf(_nearbyParks[i])) {
+          if (parks[i].id != _nearbyParks[i].id) {
             changed = true;
             break;
           }
@@ -354,7 +370,7 @@ class _ParksTabState extends State<ParksTab>
       }
       if (!changed) return;
 
-      final ids = parks.map(_parkIdOf).toList();
+      final ids = parks.map((p) => p.id).toList();
       final toHydrate = ids.where((id) => !_hydratedMeta.contains(id)).toList();
       if (toHydrate.isNotEmpty) {
         // ignore: discarded_futures
@@ -364,6 +380,7 @@ class _ParksTabState extends State<ParksTab>
       _nearbyParks = parks;
       _hasFetchedNearby = true;
       _lastRefreshLoc = cached;
+      _cachedNearbyParksVisible = null; // invalidate cache
       if (mounted) setState(() {});
       _cacheStateDebounced();
     } catch (_) {
@@ -405,7 +422,7 @@ class _ParksTabState extends State<ParksTab>
       final parks = await _locationService.findNearbyParks(lat, lng);
 
       // Hydrate meta for any parks we haven't hydrated yet (batched by 10)
-      final ids = parks.map(_parkIdOf).toList();
+      final ids = parks.map((p) => p.id).toList();
       final toHydrate = ids.where((id) => !_hydratedMeta.contains(id)).toList();
       if (toHydrate.isNotEmpty) {
         await _hydrateMetaForIds(toHydrate);
@@ -416,7 +433,7 @@ class _ParksTabState extends State<ParksTab>
       bool changed = parks.length != _nearbyParks.length;
       if (!changed) {
         for (int i = 0; i < parks.length; i++) {
-          if (_parkIdOf(parks[i]) != _parkIdOf(_nearbyParks[i])) {
+          if (parks[i].id != _nearbyParks[i].id) {
             changed = true;
             break;
           }
@@ -760,21 +777,22 @@ class _ParksTabState extends State<ParksTab>
 
   // ---------- Like / unlike ----------
   Future<void> _toggleLike(Park park) async {
-    final parkId = _parkIdOf(park);
+    final parkId = park.id;
     await _ensureParkDoc(parkId, park); // ensure doc only on mutation
 
     try {
       if (_favoriteParkIds.contains(parkId)) {
         await _fs.unlikePark(parkId);
         _favoriteParkIds.remove(parkId);
-        _favoriteParks.removeWhere((p) => _parkIdOf(p) == parkId);
+        _favoriteParks.removeWhere((p) => p.id == parkId);
       } else {
         await _fs.likePark(parkId);
         _favoriteParkIds.add(parkId);
-        if (!_favoriteParks.any((p) => _parkIdOf(p) == parkId)) {
+        if (!_favoriteParks.any((p) => p.id == parkId)) {
           _favoriteParks.add(park);
         }
       }
+      _cachedNearbyParksVisible = null; // invalidate cache
       if (mounted) setState(() {});
       _cacheStateDebounced();
     } catch (_) {
@@ -787,7 +805,7 @@ class _ParksTabState extends State<ParksTab>
     final uid = _currentUserId;
     if (uid == null) return;
 
-    final parkId = _parkIdOf(park);
+    final parkId = park.id;
     if (mounted) setState(() => _mutatingParkId = parkId);
 
     try {
@@ -824,13 +842,11 @@ class _ParksTabState extends State<ParksTab>
 
         // ✅ Add XP here
         try {
-          if (uid != null) {
-            await LevelSystem.addXp(
-              uid,
-              20,
-              reason: 'Daily park check-in',
-            );
-          }
+          await LevelSystem.addXp(
+            uid,
+            20,
+            reason: 'Daily park check-in',
+          );
         } catch (e) {
           // debugPrint('Failed to add XP: $e');
         }
@@ -861,10 +877,10 @@ class _ParksTabState extends State<ParksTab>
   IconData _serviceIcon(String s) => _svcIcons[s] ?? Icons.park;
 
   Widget _buildParkCard(Park park, {required bool isFavorite}) {
-    final parkId = _parkIdOf(park);
+    final parkId = park.id;
     final liked = _favoriteParkIds.contains(parkId);
     final userCount = _activeUserCounts[parkId] ?? 0;
-    final services = _parkServices[parkId] ?? park.services ?? const <String>[];
+    final services = _parkServices[parkId] ?? park.services;
     final isCheckedIn = _checkedInParkIds.contains(parkId);
     final isBusy = _mutatingParkId == parkId;
     final isOpening = _openingParkId == parkId; // NEW
@@ -1026,7 +1042,7 @@ class _ParksTabState extends State<ParksTab>
         children: [
           RepaintBoundary(
             child: ListView(
-              cacheExtent: 800, // prefetch a bit to reduce scroll jank
+              cacheExtent: 1200, // Increased from 800 to reduce scroll jank
               padding: const EdgeInsets.only(bottom: 70),
               children: [
                 // Favorites
@@ -1038,7 +1054,8 @@ class _ParksTabState extends State<ParksTab>
                             fontSize: 16, fontWeight: FontWeight.bold)),
                   ),
                   ..._favoriteParks
-                      .map((p) => _buildParkCard(p, isFavorite: true)),
+                      .map((p) => _buildParkCard(p, isFavorite: true))
+                      .toList(),
                 ],
 
                 // Nearby header
@@ -1085,7 +1102,8 @@ class _ParksTabState extends State<ParksTab>
 
                 // Nearby list (favorites excluded)
                 ...nearbyVisible
-                    .map((p) => _buildParkCard(p, isFavorite: false)),
+                    .map((p) => _buildParkCard(p, isFavorite: false))
+                    .toList(),
               ],
             ),
           ),

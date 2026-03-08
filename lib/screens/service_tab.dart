@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 
@@ -103,6 +104,9 @@ class _ServiceTabState extends State<ServiceTab>
   List<ServiceAd> _filtered = []; // derived from _ads + filters
   Set<String> _myReportedServiceIds = <String>{};
 
+  // Debounce filter changes for smoother UX
+  Timer? _filterDebounce;
+
   // ---------- location ----------
   double? userLat;
   double? userLng;
@@ -142,6 +146,7 @@ class _ServiceTabState extends State<ServiceTab>
   @override
   void dispose() {
     _scrollController.dispose();
+    _filterDebounce?.cancel();
     super.dispose();
   }
 
@@ -263,6 +268,14 @@ class _ServiceTabState extends State<ServiceTab>
 
   // ---------- filtering ----------
   void _applyFilters() {
+    // Debounce filter changes to reduce unnecessary setState calls
+    _filterDebounce?.cancel();
+    _filterDebounce = Timer(const Duration(milliseconds: 100), () {
+      _recomputeFilters();
+    });
+  }
+
+  void _recomputeFilters() {
     final current = FirebaseAuth.instance.currentUser;
     var list = _selectedType == 'All'
         ? _ads
@@ -272,7 +285,9 @@ class _ServiceTabState extends State<ServiceTab>
       list = list.where((a) => a.ownerId == current.uid).toList();
     }
 
-    setState(() => _filtered = list);
+    if (mounted) {
+      setState(() => _filtered = list);
+    }
   }
 
   void _onTapMyPostsQuickFilter() {
@@ -401,7 +416,8 @@ class _ServiceTabState extends State<ServiceTab>
                         child: ListView.builder(
                           key: const PageStorageKey('services_list'),
                           controller: _scrollController,
-                          cacheExtent: 1200,
+                          cacheExtent:
+                              1600, // Increased from 1200 for smoother scrolling
                           padding: const EdgeInsets.only(top: 8, bottom: 120),
                           itemCount: _filtered.length + 1,
                           itemBuilder: (context, index) {
@@ -417,7 +433,10 @@ class _ServiceTabState extends State<ServiceTab>
                                 return const SizedBox(height: 48);
                               }
                             }
-                            return _buildAdCard(_filtered[index]);
+                            return KeyedSubtree(
+                              key: ValueKey('service:${_filtered[index].id}'),
+                              child: _buildAdCard(_filtered[index]),
+                            );
                           },
                         ),
                       ),
@@ -455,181 +474,186 @@ class _ServiceTabState extends State<ServiceTab>
     final isOwner = user != null && ad.ownerId == user.uid;
     final isReported = _myReportedServiceIds.contains(ad.id);
 
-    return Card(
-      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      elevation: 2,
-      child: InkWell(
-        onTap: () => _openServiceDetailsFullScreen(ad),
-        borderRadius: BorderRadius.circular(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            if (ad.images.isNotEmpty)
-              ClipRRect(
-                borderRadius: const BorderRadius.only(
-                  topLeft: Radius.circular(12),
-                  topRight: Radius.circular(12),
-                ),
-                child: AspectRatio(
-                  aspectRatio: 16 / 9,
-                  child: CachedNetworkImage(
-                    imageUrl: ad.images.first,
-                    fit: BoxFit.cover,
-                    memCacheWidth: 800,
-                    placeholder: (_, __) =>
-                        const Center(child: CircularProgressIndicator()),
-                    errorWidget: (_, __, ___) =>
-                        const Center(child: Icon(Icons.broken_image)),
+    return RepaintBoundary(
+      child: Card(
+        margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        elevation: 2,
+        child: InkWell(
+          onTap: () => _openServiceDetailsFullScreen(ad),
+          borderRadius: BorderRadius.circular(12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (ad.images.isNotEmpty)
+                ClipRRect(
+                  borderRadius: const BorderRadius.only(
+                    topLeft: Radius.circular(12),
+                    topRight: Radius.circular(12),
                   ),
-                ),
-              ),
-            Padding(
-              padding: const EdgeInsets.all(12),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          ad.title,
-                          style: const TextStyle(
-                              fontSize: 18, fontWeight: FontWeight.bold),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ),
-
-                      // flag only for non-owners
-                      if (!isOwner)
-                        IconButton(
-                          tooltip: isReported
-                              ? 'You flagged this'
-                              : 'Report this service',
-                          icon: Icon(
-                            isReported ? Icons.flag : Icons.flag_outlined,
-                            color: isReported ? Colors.red : Colors.grey[700],
-                          ),
-                          onPressed: isReported
-                              ? null
-                              : () => _reportServiceDialog(ad),
-                          padding: EdgeInsets.zero,
-                          constraints: const BoxConstraints(),
-                        ),
-
-                      const SizedBox(width: 4),
-
-                      if (isOwner)
-                        IconButton(
-                          icon: const Icon(Icons.edit, size: 20),
-                          onPressed: () => _openPostScreen(existingAd: ad),
-                          padding: EdgeInsets.zero,
-                          constraints: const BoxConstraints(),
-                        ),
-                      if (isOwner) const SizedBox(width: 8),
-                      if (isOwner)
-                        IconButton(
-                          icon: const Icon(Icons.delete, size: 20),
-                          onPressed: () async {
-                            final confirm = await showDialog<bool>(
-                              context: context,
-                              builder: (c) => AlertDialog(
-                                title: const Text('Delete Service'),
-                                content: const Text(
-                                  'Are you sure you want to delete this service?',
-                                ),
-                                actions: [
-                                  TextButton(
-                                    onPressed: () => Navigator.of(c).pop(false),
-                                    child: const Text('Cancel'),
-                                  ),
-                                  TextButton(
-                                    onPressed: () => Navigator.of(c).pop(true),
-                                    child: const Text('Delete',
-                                        style: TextStyle(color: Colors.red)),
-                                  ),
-                                ],
-                              ),
-                            );
-
-                            if (confirm == true) {
-                              try {
-                                await FirebaseFirestore.instance
-                                    .collection('services')
-                                    .doc(ad.id)
-                                    .delete();
-                                await _hardRefresh();
-                                if (!mounted) return;
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(
-                                    content:
-                                        Text('Service deleted successfully!'),
-                                    backgroundColor: Colors.red,
-                                  ),
-                                );
-                              } catch (e) {
-                                if (!mounted) return;
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  SnackBar(
-                                    content: Text('Couldn\'t delete: $e'),
-                                    backgroundColor: Colors.red,
-                                  ),
-                                );
-                              }
-                            }
-                          },
-                          padding: EdgeInsets.zero,
-                          constraints: const BoxConstraints(),
-                        ),
-                    ],
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    ad.type,
-                    style: TextStyle(
-                      color: Colors.grey[700],
-                      fontWeight: FontWeight.w500,
+                  child: AspectRatio(
+                    aspectRatio: 16 / 9,
+                    child: CachedNetworkImage(
+                      imageUrl: ad.images.first,
+                      fit: BoxFit.cover,
+                      memCacheWidth: 600, // Optimize memory usage
+                      memCacheHeight: 337, // 600 * 9/16
+                      placeholder: (_, __) =>
+                          const Center(child: CircularProgressIndicator()),
+                      errorWidget: (_, __, ___) =>
+                          const Center(child: Icon(Icons.broken_image)),
                     ),
                   ),
-                  const SizedBox(height: 4),
-                  Text(
-                    ad.description,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  const SizedBox(height: 8),
-                  if (ad.distanceFromUser != null)
+                ),
+              Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
                     Row(
                       children: [
-                        const Icon(Icons.location_on,
-                            size: 16, color: Colors.grey),
-                        const SizedBox(width: 4),
-                        Text(
-                          '${ad.distanceFromUser!.toStringAsFixed(1)} km away',
-                          style:
-                              TextStyle(fontSize: 12, color: Colors.grey[600]),
+                        Expanded(
+                          child: Text(
+                            ad.title,
+                            style: const TextStyle(
+                                fontSize: 18, fontWeight: FontWeight.bold),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
                         ),
-                        const Spacer(),
-                        if (ad.images.length > 1)
-                          Row(
-                            children: [
-                              const Icon(Icons.photo_library,
-                                  size: 16, color: Colors.grey),
-                              const SizedBox(width: 4),
-                              Text(
-                                '${ad.images.length} photos',
-                                style: TextStyle(
-                                    fontSize: 12, color: Colors.grey[600]),
-                              ),
-                            ],
+
+                        // flag only for non-owners
+                        if (!isOwner)
+                          IconButton(
+                            tooltip: isReported
+                                ? 'You flagged this'
+                                : 'Report this service',
+                            icon: Icon(
+                              isReported ? Icons.flag : Icons.flag_outlined,
+                              color: isReported ? Colors.red : Colors.grey[700],
+                            ),
+                            onPressed: isReported
+                                ? null
+                                : () => _reportServiceDialog(ad),
+                            padding: EdgeInsets.zero,
+                            constraints: const BoxConstraints(),
+                          ),
+
+                        const SizedBox(width: 4),
+
+                        if (isOwner)
+                          IconButton(
+                            icon: const Icon(Icons.edit, size: 20),
+                            onPressed: () => _openPostScreen(existingAd: ad),
+                            padding: EdgeInsets.zero,
+                            constraints: const BoxConstraints(),
+                          ),
+                        if (isOwner) const SizedBox(width: 8),
+                        if (isOwner)
+                          IconButton(
+                            icon: const Icon(Icons.delete, size: 20),
+                            onPressed: () async {
+                              final confirm = await showDialog<bool>(
+                                context: context,
+                                builder: (c) => AlertDialog(
+                                  title: const Text('Delete Service'),
+                                  content: const Text(
+                                    'Are you sure you want to delete this service?',
+                                  ),
+                                  actions: [
+                                    TextButton(
+                                      onPressed: () =>
+                                          Navigator.of(c).pop(false),
+                                      child: const Text('Cancel'),
+                                    ),
+                                    TextButton(
+                                      onPressed: () =>
+                                          Navigator.of(c).pop(true),
+                                      child: const Text('Delete',
+                                          style: TextStyle(color: Colors.red)),
+                                    ),
+                                  ],
+                                ),
+                              );
+
+                              if (confirm == true) {
+                                try {
+                                  await FirebaseFirestore.instance
+                                      .collection('services')
+                                      .doc(ad.id)
+                                      .delete();
+                                  await _hardRefresh();
+                                  if (!mounted) return;
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(
+                                      content:
+                                          Text('Service deleted successfully!'),
+                                      backgroundColor: Colors.red,
+                                    ),
+                                  );
+                                } catch (e) {
+                                  if (!mounted) return;
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(
+                                      content: Text('Couldn\'t delete: $e'),
+                                      backgroundColor: Colors.red,
+                                    ),
+                                  );
+                                }
+                              }
+                            },
+                            padding: EdgeInsets.zero,
+                            constraints: const BoxConstraints(),
                           ),
                       ],
                     ),
-                ],
+                    const SizedBox(height: 4),
+                    Text(
+                      ad.type,
+                      style: TextStyle(
+                        color: Colors.grey[700],
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      ad.description,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(height: 8),
+                    if (ad.distanceFromUser != null)
+                      Row(
+                        children: [
+                          const Icon(Icons.location_on,
+                              size: 16, color: Colors.grey),
+                          const SizedBox(width: 4),
+                          Text(
+                            '${ad.distanceFromUser!.toStringAsFixed(1)} km away',
+                            style: TextStyle(
+                                fontSize: 12, color: Colors.grey[600]),
+                          ),
+                          const Spacer(),
+                          if (ad.images.length > 1)
+                            Row(
+                              children: [
+                                const Icon(Icons.photo_library,
+                                    size: 16, color: Colors.grey),
+                                const SizedBox(width: 4),
+                                Text(
+                                  '${ad.images.length} photos',
+                                  style: TextStyle(
+                                      fontSize: 12, color: Colors.grey[600]),
+                                ),
+                              ],
+                            ),
+                        ],
+                      ),
+                  ],
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );

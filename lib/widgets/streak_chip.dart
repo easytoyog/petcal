@@ -140,7 +140,7 @@ class StreakChip extends StatelessWidget {
       tooltip = "You missed some days – tap to revive your $lost-day streak.";
     } else {
       tooltip =
-          "Current walk streak: $current day${current == 1 ? '' : 's'} (Best: $longest)";
+          "Current walk streak: $current day${current == 1 ? '' : 's'}\n(Best: $longest)";
     }
 
     // 👇 Only allow taps in the "Start a streak" state

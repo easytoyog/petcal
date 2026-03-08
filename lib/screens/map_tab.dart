@@ -121,6 +121,8 @@ class _MapTabState extends State<MapTab>
   // Debounces & listeners
   Timer? _locationSaveDebounce;
   Timer? _filterDebounce;
+  Timer?
+      _filterApplyDebounce; // debounce filter application to reduce setState calls
   Timer? _parksUiDebounce; // debounce UI after Firestore snapshot bursts
   final List<StreamSubscription<QuerySnapshot>> _parksSubs = [];
   String _parksListenerKey = '';
@@ -143,6 +145,10 @@ class _MapTabState extends State<MapTab>
     _uiTicker?.cancel();
     _uiTicker = null;
   }
+
+  // Memoization for filter chips to reduce rebuilds
+  final Map<String, Widget> _filterChipCache = {};
+  final Map<String, bool> _filterChipCacheSelection = {};
 
   double _metersBetween(LatLng a, LatLng b) {
     const earth = 6371000.0;
@@ -965,6 +971,7 @@ class _MapTabState extends State<MapTab>
 
     _locationSaveDebounce?.cancel();
     _filterDebounce?.cancel();
+    _filterApplyDebounce?.cancel();
     _parksUiDebounce?.cancel();
     _uiTicker?.cancel();
     _adManager.dispose();
@@ -1709,21 +1716,26 @@ class _MapTabState extends State<MapTab>
     final nextIds = parks.map((p) => p.id).toSet();
     final prevIds = _markersMap.keys.toSet();
 
+    // Remove markers not in new list
     for (final removed in prevIds.difference(nextIds)) {
       _markersMap.remove(removed);
       changed = true;
     }
 
+    // Add new markers in parallel for better performance
     final toAdd = parks.where((p) => !_markersMap.containsKey(p.id)).toList();
     if (toAdd.isNotEmpty) {
+      // Create all markers concurrently
       final futures =
-          toAdd.map((p) async => MapEntry(p.id, await _createParkMarker(p)));
-      for (final e in await Future.wait(futures)) {
+          toAdd.map((p) => _createParkMarker(p).then((m) => MapEntry(p.id, m)));
+      final entries = await Future.wait(futures);
+      for (final e in entries) {
         _markersMap[e.key] = e.value;
       }
       changed = true;
     }
 
+    // Update info windows for existing markers
     for (final p in parks) {
       final old = _markersMap[p.id];
       if (old == null) continue;
@@ -1798,7 +1810,7 @@ class _MapTabState extends State<MapTab>
 
         if ((changedInfo || servicesChanged)) {
           _parksUiDebounce?.cancel();
-          _parksUiDebounce = Timer(const Duration(milliseconds: 220), () {
+          _parksUiDebounce = Timer(const Duration(milliseconds: 250), () {
             if (!mounted) return;
             setState(() {
               _recomputeVisibleMarkers();
@@ -2524,7 +2536,18 @@ class _MapTabState extends State<MapTab>
 
   Widget _modernFilterChip(_FilterOption opt) {
     final selected = _selectedFilters.contains(opt.value);
-    return Padding(
+    // Invalidate cache when selection changes
+    if (_filterChipCacheSelection[opt.value] != selected) {
+      _filterChipCacheSelection[opt.value] = selected;
+      _filterChipCache.remove(opt.value);
+    }
+
+    // Return cached widget if it exists
+    if (_filterChipCache.containsKey(opt.value)) {
+      return _filterChipCache[opt.value]!;
+    }
+
+    final widget = Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4),
       child: FilterChip(
         label: Text(opt.label),
@@ -2541,6 +2564,8 @@ class _MapTabState extends State<MapTab>
             } else {
               _selectedFilters.remove(opt.value);
             }
+            // Invalidate cache for all chips
+            _filterChipCache.clear();
           });
           _applyFilters();
         },
@@ -2564,9 +2589,19 @@ class _MapTabState extends State<MapTab>
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
       ),
     );
+    _filterChipCache[opt.value] = widget;
+    return widget;
   }
 
-  void _applyFilters() async {
+  void _applyFilters() {
+    // Debounce filter application to reduce rapid setState calls
+    _filterApplyDebounce?.cancel();
+    _filterApplyDebounce = Timer(const Duration(milliseconds: 150), () {
+      _performFilterApplication();
+    });
+  }
+
+  Future<void> _performFilterApplication() async {
     final filtered = _selectedFilters.isEmpty
         ? _allParks
         : _allParks.where((p) {
