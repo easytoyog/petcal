@@ -36,8 +36,6 @@ class _FriendsTabState extends State<FriendsTab> {
 
   // Track unread message counts per friend
   Map<String, int> _unreadCounts = {};
-  // Track friends we're currently marking as read to prevent listener race conditions
-  Set<String> _markingAsReadFriendIds = {};
 
   final String? currentUserId = FirebaseAuth.instance.currentUser?.uid;
   StreamSubscription? _unreadSubscription;
@@ -104,21 +102,17 @@ class _FriendsTabState extends State<FriendsTab> {
         // Capture friendId in a local final variable to avoid closure issues
         final fid = friendId;
 
-        // Skip if we're currently marking this friend's messages as read
-        if (_markingAsReadFriendIds.contains(fid)) continue;
-
         // Queue up the count query
         futures.add(
           threadDoc.reference
               .collection('messages')
-              .where('senderId', isNotEqualTo: currentUserId)
+              .where('senderId', isEqualTo: friendId)
               .get()
               .then((snapshot) {
             // Count messages that are NOT marked as read (missing isRead or isRead == false)
             int unreadCount = 0;
             for (final doc in snapshot.docs) {
               final isRead = doc.data()['isRead'];
-              // Treat missing field or false as unread
               if (isRead != true) {
                 unreadCount++;
               }
@@ -568,6 +562,10 @@ class _FriendsTabState extends State<FriendsTab> {
   // ✅ NEW: open DM chat
   void _openDm(String friendId, String ownerName) {
     // Mark messages as read
+    setState(() {
+      _unreadCounts[friendId] = 0;
+    });
+
     _markMessagesAsRead(friendId);
 
     Navigator.of(context).push(
@@ -587,37 +585,49 @@ class _FriendsTabState extends State<FriendsTab> {
     final other = friendId;
     final threadId = me.compareTo(other) < 0 ? '${me}_$other' : '${other}_$me';
 
-    // Mark that we're updating this friend to prevent listener race condition
-    _markingAsReadFriendIds.add(friendId);
-
     try {
+      // Get ALL messages from the other user (not just isRead==false)
       final messagesSnapshot = await FirebaseFirestore.instance
           .collection('dm_threads')
           .doc(threadId)
           .collection('messages')
-          .where('senderId', isNotEqualTo: currentUserId)
+          .where('senderId', isEqualTo: other)
           .get();
 
-      // Batch update messages to mark as read
+      // Get current thread data to preserve required fields in update
+      final threadDoc = await FirebaseFirestore.instance
+          .collection('dm_threads')
+          .doc(threadId)
+          .get();
+
+      final threadData = threadDoc.data() ?? {};
+
+      // Batch update all to isRead: true
       final batch = FirebaseFirestore.instance.batch();
       for (final messageDoc in messagesSnapshot.docs) {
         batch.update(messageDoc.reference, {'isRead': true});
       }
 
+      // Update thread with required fields to trigger listener
+      batch.update(
+        FirebaseFirestore.instance.collection('dm_threads').doc(threadId),
+        {
+          'updatedAt': FieldValue.serverTimestamp(),
+          'lastMessage': threadData['lastMessage'] ?? '',
+          'lastSenderId': threadData['lastSenderId'] ?? '',
+        },
+      );
+
       await batch.commit();
 
-      // Clear the unread count and remove from marking set
+      // Immediately update local state to clear badge
       if (mounted) {
         setState(() {
           _unreadCounts[friendId] = 0;
-          _markingAsReadFriendIds.remove(friendId);
         });
-      } else {
-        _markingAsReadFriendIds.remove(friendId);
       }
-    } catch (_) {
-      // Silent fail but still clean up the marking set
-      _markingAsReadFriendIds.remove(friendId);
+    } catch (e) {
+      // Silent fail
     }
   }
 
