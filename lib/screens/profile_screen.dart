@@ -3,7 +3,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:inthepark/screens/map_tab.dart';
 import 'package:inthepark/screens/parks_tab.dart';
-import 'package:inthepark/screens/events_tab.dart';
+import 'package:inthepark/screens/groups_tab.dart';
 import 'package:inthepark/screens/friends_tab.dart';
 import 'package:inthepark/screens/profile_tab.dart';
 import 'package:inthepark/screens/service_tab.dart';
@@ -21,18 +21,12 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   int _selectedIndex = 0;
-  String? _selectedParkIdForEvents;
 
   final GlobalKey _xpBarKey = GlobalKey();
+  final GlobalKey<State<MapTab>> _mapTabKey = GlobalKey();
 
   List<Widget> get _pages => [
         ParksTab(
-          onShowEvents: (parkId) {
-            setState(() {
-              _selectedParkIdForEvents = parkId;
-              _selectedIndex = 2;
-            });
-          },
           onXpGained: () {
             XpFlyUpOverlay.show(
               context,
@@ -40,14 +34,19 @@ class _HomeScreenState extends State<HomeScreen> {
               count: 8, // maybe a bit fewer than a walk
             );
           },
-        ),
-        MapTab(
-          onShowEvents: (parkId) {
-            setState(() {
-              _selectedParkIdForEvents = parkId;
-              _selectedIndex = 2;
+          isWalkActive:
+              (_mapTabKey.currentState as dynamic)?.getIsWalkActive() ?? false,
+          onStartWalk: () {
+            // Switch to map tab and start walk
+            setState(() => _selectedIndex = 1);
+            // Wait for the tab to fully render before starting walk
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              (_mapTabKey.currentState as dynamic)?.startWalk();
             });
           },
+        ),
+        MapTab(
+          key: _mapTabKey,
           onXpGained: () {
             XpFlyUpOverlay.show(
               context,
@@ -56,39 +55,21 @@ class _HomeScreenState extends State<HomeScreen> {
             );
           },
         ),
-        EventsTab(
-          parkIdFilter: _selectedParkIdForEvents,
-        ),
+        const GroupsTab(),
         const FriendsTab(),
         const ServiceTab(),
       ];
 
   void _onItemTapped(int index) {
-    setState(() {
-      _selectedIndex = index;
-      if (index != 2) {
-        _selectedParkIdForEvents = null;
-      }
-    });
+    setState(() => _selectedIndex = index);
   }
 
   void _goToMapTab() {
     setState(() => _selectedIndex = 1); // index 1 = MapTab
   }
 
-  void _openWalkHistory(BuildContext context) {
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => WalksListScreen(onGoToMapTab: _goToMapTab),
-      ),
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
-    final titles = ["Parks", "Explore", "Events", "Friends", "Promotions"];
-
     return Scaffold(
       appBar: AppBar(
         backgroundColor: const Color(0xFF567D46),
@@ -167,7 +148,8 @@ class _HomeScreenState extends State<HomeScreen> {
                                   Container(
                                     width: maxWidth,
                                     decoration: BoxDecoration(
-                                      color: Colors.white.withOpacity(0.20),
+                                      color:
+                                          Colors.white.withValues(alpha: 0.20),
                                       borderRadius: BorderRadius.circular(999),
                                     ),
                                   ),
@@ -232,7 +214,7 @@ class _HomeScreenState extends State<HomeScreen> {
         items: const [
           BottomNavigationBarItem(icon: Icon(Icons.park), label: 'Parks'),
           BottomNavigationBarItem(icon: Icon(Icons.map), label: 'Explore'),
-          BottomNavigationBarItem(icon: Icon(Icons.event), label: 'Events'),
+          BottomNavigationBarItem(icon: Icon(Icons.groups), label: 'Groups'),
           BottomNavigationBarItem(icon: Icon(Icons.pets), label: 'Friends'),
           BottomNavigationBarItem(
               icon: Icon(Icons.storefront), label: 'Promotions'),

@@ -458,7 +458,7 @@ class _ChatRoomScreenState extends State<ChatRoomScreen> {
           mainAxisSize: MainAxisSize.min,
           children: [
             DropdownButtonFormField<String>(
-              value: selected,
+              initialValue: selected,
               items: reasons
                   .map((r) => DropdownMenuItem(value: r, child: Text(r)))
                   .toList(),

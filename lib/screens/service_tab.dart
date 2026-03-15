@@ -693,7 +693,7 @@ class _ServiceTabState extends State<ServiceTab>
           mainAxisSize: MainAxisSize.min,
           children: [
             DropdownButtonFormField<String>(
-              value: selected,
+              initialValue: selected,
               items: reasons
                   .map((r) => DropdownMenuItem(value: r, child: Text(r)))
                   .toList(),
@@ -943,7 +943,7 @@ class _ServiceDetailsScreenState extends State<ServiceDetailsScreen> {
           mainAxisSize: MainAxisSize.min,
           children: [
             DropdownButtonFormField<String>(
-              value: selected,
+              initialValue: selected,
               items: reasons
                   .map((r) => DropdownMenuItem(value: r, child: Text(r)))
                   .toList(),
@@ -1528,7 +1528,7 @@ class _PostServiceScreenState extends State<_PostServiceScreen> {
                 ),
                 const SizedBox(height: 12),
                 DropdownButtonFormField<String>(
-                  value: dialogType,
+                  initialValue: dialogType,
                   items: widget.types
                       .skip(1)
                       .map((e) => DropdownMenuItem(value: e, child: Text(e)))

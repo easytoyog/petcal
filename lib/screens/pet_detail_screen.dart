@@ -132,6 +132,7 @@ class _AddPetScreenState extends State<AddPetScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      resizeToAvoidBottomInset: false,
       appBar: AppBar(
         title: const Text("Add Pets"),
         backgroundColor: const Color(0xFF567D46),
@@ -203,6 +204,9 @@ class _AddPetScreenState extends State<AddPetScreen> {
                                                 setState(() {}); // refresh UI
                                               }
                                             },
+                                            onTapOutside: (_) =>
+                                                FocusScope.of(context)
+                                                    .unfocus(),
                                             style: const TextStyle(
                                                 color: Colors.white),
                                             decoration: InputDecoration(

@@ -13,6 +13,13 @@ const AndroidNotificationChannel _dmChannel = AndroidNotificationChannel(
   importance: Importance.high,
 );
 
+const AndroidNotificationChannel _groupChannel = AndroidNotificationChannel(
+  'group_messages',
+  'Group Messages',
+  description: 'Notifications for group chat messages',
+  importance: Importance.high,
+);
+
 Future<void> initPushNotifications({
   required GlobalKey<NavigatorState> navigatorKey,
 }) async {
@@ -37,6 +44,10 @@ Future<void> initPushNotifications({
       .resolvePlatformSpecificImplementation<
           AndroidFlutterLocalNotificationsPlugin>()
       ?.createNotificationChannel(_dmChannel);
+  await _local
+      .resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin>()
+      ?.createNotificationChannel(_groupChannel);
 
   // Foreground messages -> show LOCAL notification
   FirebaseMessaging.onMessage.listen((RemoteMessage message) async {
@@ -82,6 +93,41 @@ Future<void> initPushNotifications({
         ),
         payload: payload,
       );
+    } else if (type == 'group_chat') {
+      final groupId = (data['groupId'] ?? '').toString();
+      final groupName = (data['groupName'] ?? '').toString();
+
+      final title = message.notification?.title ??
+          (groupName.isNotEmpty ? groupName : 'Group message');
+      final body = message.notification?.body ??
+          (data['body'] ?? 'Tap to open').toString();
+
+      final payload = _encodePayload({
+        'type': 'group_chat',
+        'groupId': groupId,
+        'groupName': groupName,
+      });
+
+      await _local.show(
+        DateTime.now().millisecondsSinceEpoch ~/ 1000,
+        title,
+        body,
+        NotificationDetails(
+          android: AndroidNotificationDetails(
+            _groupChannel.id,
+            _groupChannel.name,
+            channelDescription: _groupChannel.description,
+            importance: Importance.high,
+            priority: Priority.high,
+          ),
+          iOS: const DarwinNotificationDetails(
+            presentAlert: true,
+            presentBadge: true,
+            presentSound: true,
+          ),
+        ),
+        payload: payload,
+      );
     }
   });
 
@@ -115,6 +161,12 @@ void _handleRemoteMessageTap(
       otherUserId: senderId,
       otherDisplayName: senderName.isNotEmpty ? senderName : 'Message',
     );
+  } else if (type == 'group_chat') {
+    _openGroupChat(
+      navKey,
+      groupId: (data['groupId'] ?? '').toString(),
+      groupName: (data['groupName'] ?? 'Group').toString(),
+    );
   }
 }
 
@@ -129,6 +181,13 @@ void _handlePayloadTap(String payload, GlobalKey<NavigatorState> navKey) {
       otherDisplayName: (parts['senderName'] ?? '').isNotEmpty
           ? parts['senderName']!
           : 'Message',
+    );
+  } else if (parts['type'] == 'group_chat') {
+    _openGroupChat(
+      navKey,
+      groupId: parts['groupId'] ?? '',
+      groupName:
+          (parts['groupName'] ?? '').isNotEmpty ? parts['groupName']! : 'Group',
     );
   }
 }
@@ -149,6 +208,23 @@ void _openDm(
       'otherUserId': otherUserId,
       'otherDisplayName': otherDisplayName,
       'threadId': threadId, // optional if your screen doesn’t need it
+    },
+  );
+}
+
+void _openGroupChat(
+  GlobalKey<NavigatorState> navKey, {
+  required String groupId,
+  required String groupName,
+}) {
+  final ctx = navKey.currentContext;
+  if (ctx == null || groupId.isEmpty) return;
+
+  navKey.currentState?.pushNamed(
+    '/group-chat',
+    arguments: {
+      'groupId': groupId,
+      'groupName': groupName,
     },
   );
 }

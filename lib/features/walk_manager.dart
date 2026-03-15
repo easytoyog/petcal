@@ -10,10 +10,8 @@ import 'package:pedometer/pedometer.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class WalkManager extends ChangeNotifier {
-  // Inject for testability
   final loc.Location location;
 
-  // Minimums (single source of truth)
   final Duration minDuration;
   final int minSteps;
 
@@ -27,7 +25,7 @@ class WalkManager extends ChangeNotifier {
   static const inactivityLimit = Duration(minutes: 15);
   static const maxWalkLimit = Duration(hours: 48);
 
-  // ---- Public state (read-only via getters)
+  // ---- Public state ----
   bool _active = false;
   bool get isActive => _active;
 
@@ -43,14 +41,12 @@ class WalkManager extends ChangeNotifier {
   DateTime? _startedAt;
   DateTime? get startedAt => _startedAt;
 
-  // ✨ NEW: track when a walk actually ended
   DateTime? _endedAt;
   DateTime? get endedAt => _endedAt;
 
   Duration _elapsed = Duration.zero;
   Duration get elapsed => _elapsed;
 
-  // Convenience: UI asks the manager about minimum rule + reason
   bool get meetsMinimum => _elapsed >= minDuration && _steps >= minSteps;
 
   String get tooShortReason {
@@ -65,7 +61,7 @@ class WalkManager extends ChangeNotifier {
     }
   }
 
-  // ---- internals
+  // ---- internals ----
   StreamSubscription<loc.LocationData>? _locSub;
   StreamSubscription<StepCount>? _stepSub;
   Timer? _uiTicker;
@@ -74,20 +70,32 @@ class WalkManager extends ChangeNotifier {
   int? _stepBaseline;
   DateTime? _lastMoveAt;
 
+  bool _stopping = false;
+
+  // Prevent stale async persist calls from resurrecting an old walk.
+  int _persistGeneration = 0;
+
   Future<bool> _ensureLocationReady() async {
     final svc =
         await location.serviceEnabled() || await location.requestService();
     if (!svc) return false;
+
     var perm = await location.hasPermission();
     if (perm == loc.PermissionStatus.denied) {
       perm = await location.requestPermission();
     }
+
     return perm == loc.PermissionStatus.granted;
   }
 
   // ————— API —————
+
   Future<void> start({LatLng? seed}) async {
     if (!await _ensureLocationReady()) return;
+
+    final generation = ++_persistGeneration;
+    _stopping = false;
+
     await _enableNavMode();
 
     _active = true;
@@ -101,21 +109,19 @@ class WalkManager extends ChangeNotifier {
     _elapsed = Duration.zero;
     notifyListeners();
 
-    // ✅ Instant seed if provided (no I/O)
     if (seed != null) {
       _points.add(seed);
-      // Don't await here—no need to block UI
-      // ignore: discarded_futures
-      _persist();
+      unawaited(_persist(generation));
     }
 
-    // Attach streams first so we don't wait on getLocation()
-    _locSub?.cancel();
+    await _locSub?.cancel();
     _locSub = location.onLocationChanged.listen(_onLocTick);
 
-    _stepSub?.cancel();
+    await _stepSub?.cancel();
     try {
       _stepSub = Pedometer.stepCountStream.listen((sc) {
+        if (!_active || _stopping) return;
+
         _stepBaseline ??= sc.steps;
         final raw = sc.steps - (_stepBaseline ?? sc.steps);
         if (raw >= 0) {
@@ -127,28 +133,29 @@ class WalkManager extends ChangeNotifier {
       });
     } catch (_) {}
 
-    // 🔄 Best-effort initial fix without blocking UI
     unawaited(() async {
       try {
         final l = await location
             .getLocation()
             .timeout(const Duration(milliseconds: 800));
+
+        if (!_active || _stopping || generation != _persistGeneration) return;
+
         if (l.latitude != null && l.longitude != null) {
           final p = LatLng(l.latitude!, l.longitude!);
           if (_points.isEmpty || _haversine(_points.last, p) >= 1.0) {
             _points.add(p);
             _lastMoveAt = DateTime.now();
             notifyListeners();
-            await _persist();
+            await _persist(generation);
           }
         }
       } catch (_) {}
     }());
 
-    // UI and guards
     _uiTicker?.cancel();
     _uiTicker = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (_startedAt != null) {
+      if (_startedAt != null && _active) {
         _elapsed = DateTime.now().difference(_startedAt!);
         notifyListeners();
       }
@@ -160,35 +167,52 @@ class WalkManager extends ChangeNotifier {
     });
 
     _persistTimer?.cancel();
-    _persistTimer =
-        Timer.periodic(const Duration(seconds: 10), (_) => _persist());
-    // First persist can be fire-and-forget
-    // ignore: discarded_futures
-    _persist();
-  }
+    _persistTimer = Timer.periodic(
+      const Duration(seconds: 10),
+      (_) => unawaited(_persist(generation)),
+    );
 
-  bool _stopping = false;
+    unawaited(_persist(generation));
+  }
 
   /// Stops tracking. Does NOT save to Firestore.
   /// After calling this, read `meetsMinimum` and `tooShortReason`.
   Future<void> stop() async {
     if (_stopping) return;
     _stopping = true;
-    try {
-      await _locSub?.cancel();
-      await _stepSub?.cancel();
-      _uiTicker?.cancel();
-      _autoStopTimer?.cancel();
-      _persistTimer?.cancel();
 
-      await _disableNavMode();
+    // Invalidate any in-flight persist calls from the active walk.
+    _persistGeneration++;
+
+    try {
+      try {
+        await _locSub?.cancel();
+      } catch (_) {}
+      _locSub = null;
+
+      try {
+        await _stepSub?.cancel();
+      } catch (_) {}
+      _stepSub = null;
+
+      _uiTicker?.cancel();
+      _uiTicker = null;
+
+      _autoStopTimer?.cancel();
+      _autoStopTimer = null;
+
+      _persistTimer?.cancel();
+      _persistTimer = null;
+
+      try {
+        await _disableNavMode();
+      } catch (_) {}
 
       final ended = DateTime.now();
-      _endedAt = ended; // ✨ set end time
+      _endedAt = ended;
       final started = _startedAt ?? ended;
       _elapsed = ended.difference(started);
 
-      // If pedometer produced 0, backfill from distance with ~0.78m stride.
       if (_steps == 0) {
         _steps = (_meters / 0.78).round();
       }
@@ -202,48 +226,102 @@ class WalkManager extends ChangeNotifier {
     }
   }
 
+  Future<void> forceEndAndReset() async {
+    await stop();
+    await reset();
+  }
+
+  /// Completely resets the walk to a clean slate (for rejected walks)
+  Future<void> reset() async {
+    // Invalidate any stale persist calls.
+    _persistGeneration++;
+    _stopping = false;
+
+    try {
+      await _locSub?.cancel();
+    } catch (_) {}
+    _locSub = null;
+
+    try {
+      await _stepSub?.cancel();
+    } catch (_) {}
+    _stepSub = null;
+
+    _uiTicker?.cancel();
+    _uiTicker = null;
+
+    _autoStopTimer?.cancel();
+    _autoStopTimer = null;
+
+    _persistTimer?.cancel();
+    _persistTimer = null;
+
+    try {
+      await _disableNavMode();
+    } catch (_) {}
+
+    _active = false;
+    _points.clear();
+    _meters = 0;
+    _steps = 0;
+    _stepBaseline = null;
+    _startedAt = null;
+    _endedAt = null;
+    _elapsed = Duration.zero;
+    _lastMoveAt = null;
+
+    await _clearPersisted();
+    notifyListeners();
+  }
+
   Future<void> resume() async {
-    if (_active != true) return; // only if persisted said we're active
+    if (_active != true) return;
+
+    final generation = ++_persistGeneration;
+    _stopping = false;
+
     await _enableNavMode();
 
-    // reattach streams
-    _locSub?.cancel();
+    await _locSub?.cancel();
     _locSub = location.onLocationChanged.listen(_onLocTick);
 
-    _stepSub?.cancel();
+    await _stepSub?.cancel();
     try {
       _stepSub = Pedometer.stepCountStream.listen((sc) {
+        if (!_active || _stopping) return;
+
         _stepBaseline ??=
-            sc.steps - _steps; // baseline so (current-baseline) == _steps
+            sc.steps - _steps; // baseline so current - baseline == saved _steps
         final raw = sc.steps - (_stepBaseline ?? sc.steps);
         if (raw >= 0) {
           final prev = _steps;
           _steps = raw;
-          if (_steps > prev) _lastMoveAt = DateTime.now(); // <<< add this
+          if (_steps > prev) _lastMoveAt = DateTime.now();
           notifyListeners();
         }
       });
     } catch (_) {}
 
-    // UI timer
     _uiTicker?.cancel();
     _uiTicker = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (_startedAt != null) {
+      if (_startedAt != null && _active) {
         _elapsed = DateTime.now().difference(_startedAt!);
         notifyListeners();
       }
     });
 
-    // auto-stop guard
     _autoStopTimer?.cancel();
     _autoStopTimer = Timer.periodic(const Duration(seconds: 30), (_) {
       _checkAutoStop();
     });
 
-    // re-enable periodic persist
     _persistTimer?.cancel();
-    _persistTimer =
-        Timer.periodic(const Duration(seconds: 10), (_) => _persist());
+    _persistTimer = Timer.periodic(
+      const Duration(seconds: 10),
+      (_) => unawaited(_persist(generation)),
+    );
+
+    unawaited(_persist(generation));
   }
 
   Future<void> restoreIfAny() async {
@@ -253,6 +331,13 @@ class WalkManager extends ChangeNotifier {
       if (raw == null) return;
 
       final m = jsonDecode(raw) as Map<String, dynamic>;
+
+      // Clean up any non-active leftovers.
+      if (m['isWalking'] != true) {
+        await _clearPersisted();
+        return;
+      }
+
       final pts = (m['points'] as List?)
               ?.map((e) => LatLng(
                     (e['lat'] as num).toDouble(),
@@ -264,6 +349,7 @@ class WalkManager extends ChangeNotifier {
       _points
         ..clear()
         ..addAll(pts);
+
       _meters = (m['meters'] as num?)?.toDouble() ?? 0.0;
       _steps = (m['steps'] as num?)?.toInt() ?? 0;
       _startedAt = (m['startedAt'] != null)
@@ -275,7 +361,7 @@ class WalkManager extends ChangeNotifier {
       _active = (m['isWalking'] == true);
       _lastMoveAt = (m['lastMoveAt'] != null)
           ? DateTime.tryParse(m['lastMoveAt'] as String)
-          : _startedAt; // fallback so idle guard works
+          : _startedAt;
 
       if (_active && _startedAt != null) {
         _elapsed = DateTime.now().difference(_startedAt!);
@@ -284,57 +370,69 @@ class WalkManager extends ChangeNotifier {
         final now = DateTime.now();
         if (_lastMoveAt != null &&
             now.difference(_lastMoveAt!) >= inactivityLimit) {
-          await stop(); // await (see #2)
+          await stop();
         } else {
           await resume();
         }
       } else {
-        notifyListeners(); // <-- add this
+        await _clearPersisted();
+        notifyListeners();
       }
     } catch (_) {}
   }
 
   // ——— internals ———
+
   void _onLocTick(loc.LocationData d) {
-    if (!_active || d.latitude == null || d.longitude == null) return;
+    if (!_active || _stopping || d.latitude == null || d.longitude == null) {
+      return;
+    }
 
     final acc = d.accuracy ?? double.infinity;
-    if (acc > 50) return; // skip very inaccurate points
+    if (acc > 50) return;
 
     final next = LatLng(d.latitude!, d.longitude!);
+
     if (_points.isNotEmpty) {
       final inc = _haversine(_points.last, next);
-      if (inc > 250) return; // teleport jump
-      if (inc < 1.0) return; // jitter
+      if (inc > 250) return;
+      if (inc < 1.0) return;
       _meters += inc;
       _lastMoveAt = DateTime.now();
     } else {
       _lastMoveAt = DateTime.now();
     }
+
     _points.add(next);
-    _persist();
+    unawaited(_persist(_persistGeneration));
     notifyListeners();
   }
 
   void _checkAutoStop() async {
-    if (!_active) return;
+    if (!_active || _stopping) return;
+
     final now = DateTime.now();
+
     if (_startedAt != null && now.difference(_startedAt!) >= maxWalkLimit) {
       await stop();
       return;
     }
+
     if (_lastMoveAt != null &&
         now.difference(_lastMoveAt!) >= inactivityLimit) {
       await stop();
     }
   }
 
-  Future<void> _persist() async {
+  Future<void> _persist([int? generation]) async {
+    final g = generation ?? _persistGeneration;
+
+    if (_stopping || !_active) return;
+
     try {
-      final prefs = await SharedPreferences.getInstance();
       final payload = {
         'startedAt': _startedAt?.toIso8601String(),
-        'endedAt': _endedAt?.toIso8601String(), // ✨ save end time if any
+        'endedAt': _endedAt?.toIso8601String(),
         'lastMoveAt': _lastMoveAt?.toIso8601String(),
         'meters': _meters,
         'steps': _steps,
@@ -343,6 +441,12 @@ class WalkManager extends ChangeNotifier {
             .map((p) => {'lat': p.latitude, 'lng': p.longitude})
             .toList(),
       };
+
+      final prefs = await SharedPreferences.getInstance();
+
+      // Abort stale writes that started before stop/reset/new walk.
+      if (g != _persistGeneration || _stopping || !_active) return;
+
       await prefs.setString(_persistKey, jsonEncode(payload));
     } catch (_) {}
   }
@@ -377,15 +481,18 @@ class WalkManager extends ChangeNotifier {
   }
 
   // ——— helpers ———
+
   double _haversine(LatLng a, LatLng b) {
-    const R = 6371000.0;
+    const r = 6371000.0;
     final dLat = (b.latitude - a.latitude) * pi / 180;
     final dLon = (b.longitude - a.longitude) * pi / 180;
     final la1 = a.latitude * pi / 180;
     final la2 = b.latitude * pi / 180;
+
     final h = sin(dLat / 2) * sin(dLat / 2) +
         cos(la1) * cos(la2) * sin(dLon / 2) * sin(dLon / 2);
-    return 2 * R * atan2(sqrt(h), sqrt(1 - h));
+
+    return 2 * r * atan2(sqrt(h), sqrt(1 - h));
   }
 
   String _prettyDuration(Duration d) {

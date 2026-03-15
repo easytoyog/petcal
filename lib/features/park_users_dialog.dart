@@ -7,12 +7,6 @@ import 'package:inthepark/screens/chatroom_screen.dart';
 import 'package:inthepark/services/firestore_service.dart';
 import 'package:inthepark/services/location_service.dart';
 
-typedef ShowEventsCallback = void Function(String parkId);
-typedef AddEventCallback = void Function(
-  String parkId,
-  double parkLat,
-  double parkLng,
-);
 typedef AddFriendCallback = Future<void> Function(String ownerId, String petId);
 typedef UnfriendCallback = Future<void> Function(String ownerId, String petId);
 typedef CheckedInFormatter = String Function(DateTime since);
@@ -34,8 +28,6 @@ Future<void> showUsersInParkDialog({
   required FirestoreService firestoreService,
   required LocationService locationService,
   required List<String> favoritePetIds,
-  required ShowEventsCallback onShowEvents,
-  required AddEventCallback onAddEvent,
   required AddFriendCallback onAddFriend,
   required UnfriendCallback onUnfriend,
   required CheckedInFormatter checkedInForSince,
@@ -138,8 +130,6 @@ Future<void> showUsersInParkDialog({
           currentUser: currentUser,
           favoritePetIds: favoritePetIds,
           userList: userList,
-          onShowEvents: onShowEvents,
-          onAddEvent: onAddEvent,
           onAddFriend: onAddFriend,
           onUnfriend: onUnfriend,
           onLikeChanged: onLikeChanged,
@@ -265,8 +255,6 @@ class _UsersInParkScaffold extends StatefulWidget {
   final User currentUser;
   final List<String> favoritePetIds;
   final List<Map<String, dynamic>> userList;
-  final ShowEventsCallback onShowEvents;
-  final AddEventCallback onAddEvent;
   final AddFriendCallback onAddFriend;
   final UnfriendCallback onUnfriend;
   final LikeChangedCallback? onLikeChanged;
@@ -288,8 +276,6 @@ class _UsersInParkScaffold extends StatefulWidget {
     required this.currentUser,
     required this.favoritePetIds,
     required this.userList,
-    required this.onShowEvents,
-    required this.onAddEvent,
     required this.onAddFriend,
     required this.onUnfriend,
     required this.locationService,
@@ -503,38 +489,6 @@ class _UsersInParkScaffoldState extends State<_UsersInParkScaffold> {
               ],
             ),
           ),
-
-          // Row 2: Show Events + Add Event
-          Padding(
-            padding: const EdgeInsets.fromLTRB(12, 0, 12, 16),
-            child: Row(
-              children: [
-                Expanded(
-                  child: _DialogBigActionButton(
-                    label: "Show Events",
-                    onPressed: () {
-                      Navigator.of(context).pop();
-                      widget.onShowEvents(widget.parkId);
-                    },
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: _DialogBigActionButton(
-                    label: "Add Event",
-                    onPressed: () {
-                      Navigator.of(context).pop();
-                      widget.onAddEvent(
-                        widget.parkId,
-                        widget.parkLatitude,
-                        widget.parkLongitude,
-                      );
-                    },
-                  ),
-                ),
-              ],
-            ),
-          ),
         ],
       ),
     );
@@ -603,7 +557,7 @@ class _UsersInParkScaffoldState extends State<_UsersInParkScaffold> {
             return AlertDialog(
               title: const Text("Add activity"),
               content: DropdownButtonFormField<String>(
-                value: selected,
+                initialValue: selected,
                 items: options
                     .map(
                       (s) => DropdownMenuItem(

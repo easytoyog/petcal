@@ -236,7 +236,7 @@ class _AddEventPageState extends State<AddEventPage> {
                 },
               ),
               DropdownButtonFormField<String>(
-                value: recurrence,
+                initialValue: recurrence,
                 decoration: const InputDecoration(labelText: "Recurrence"),
                 items: ["None", "Daily", "Weekly", "Monthly"].map((value) {
                   return DropdownMenuItem(

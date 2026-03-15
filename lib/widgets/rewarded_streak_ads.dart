@@ -117,7 +117,7 @@ class RewardedStreakAds {
       await loadCompleter.future;
     } catch (e) {
       // Covers any synchronous exceptions around load()
-      watchdog?.cancel();
+      watchdog.cancel();
       try {
         ad?.dispose();
       } catch (_) {}
@@ -125,7 +125,7 @@ class RewardedStreakAds {
     } finally {
       // If we already ended, cancel watchdog.
       if (terminalFired) {
-        watchdog?.cancel();
+        watchdog.cancel();
       }
     }
   }

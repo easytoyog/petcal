@@ -398,8 +398,9 @@ class _FriendsTabState extends State<FriendsTab> {
       final ownerNameCache = <String, String>{};
 
       Future<String> ownerName(String ownerId) async {
-        if (ownerNameCache.containsKey(ownerId))
+        if (ownerNameCache.containsKey(ownerId)) {
           return ownerNameCache[ownerId]!;
+        }
         final doc = await FirebaseFirestore.instance
             .collection('public_profiles')
             .doc(ownerId)

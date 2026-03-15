@@ -7,22 +7,31 @@ import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart' show LatLng;
+import 'package:inthepark/models/feed_article.dart';
 import 'package:inthepark/widgets/level_system.dart';
 import 'package:location/location.dart' as loc;
 import 'package:inthepark/models/park_model.dart';
 import 'package:inthepark/screens/chatroom_screen.dart';
 import 'package:inthepark/services/location_service.dart';
+import 'package:inthepark/services/news_feed_service.dart';
 import 'package:inthepark/services/firestore_service.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:inthepark/widgets/ad_banner.dart';
 import 'package:inthepark/widgets/active_pets_dialog.dart';
+import 'package:intl/intl.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 class ParksTab extends StatefulWidget {
-  final void Function(String parkId) onShowEvents;
   final VoidCallback? onXpGained;
-  const ParksTab({Key? key, required this.onShowEvents, this.onXpGained})
-      : super(key: key);
+  final bool isWalkActive;
+  final VoidCallback? onStartWalk;
+  const ParksTab({
+    Key? key,
+    this.onXpGained,
+    this.isWalkActive = false,
+    this.onStartWalk,
+  }) : super(key: key);
 
   @override
   State<ParksTab> createState() => _ParksTabState();
@@ -32,19 +41,29 @@ class _ParksTabState extends State<ParksTab>
     with AutomaticKeepAliveClientMixin<ParksTab>, WidgetsBindingObserver {
   final _locationService =
       LocationService(dotenv.env['GOOGLE_MAPS_API_KEY'] ?? '');
+  final ScrollController _scrollController = ScrollController();
+  final TextEditingController _parkSearchController = TextEditingController();
+  final FocusNode _parkSearchFocusNode = FocusNode();
   final String? _currentUserId = FirebaseAuth.instance.currentUser?.uid;
   final FirestoreService _fs = FirestoreService();
+  final NewsFeedService _newsFeedService = NewsFeedService();
 
   // UI/state
   bool _isSearching = false;
-  bool _hasFetchedNearby = false;
   String? _mutatingParkId; // for check-in/out spinner
   String? _openingParkId; // NEW: tap-to-open loader
 
   // Data
   List<Park> _favoriteParks = [];
   Set<String> _favoriteParkIds = {};
-  List<Park> _nearbyParks = [];
+  List<Park> _searchedParks = [];
+  List<FeedArticle> _newsArticles = [];
+  String _parkSearchQuery = '';
+  String? _newsError;
+  bool _isLoadingNews = false;
+  bool _isRefreshingNews = false;
+  bool _isAutoExpandingNews = false;
+  int _visibleNewsCount = 10;
 
   // Cached park meta
   final Map<String, int> _activeUserCounts = {}; // parkId -> count
@@ -60,51 +79,21 @@ class _ParksTabState extends State<ParksTab>
 
   // Resume throttle
   bool _resumeRefreshing = false;
-  DateTime _lastNearbyRefresh = DateTime.fromMillisecondsSinceEpoch(0);
-  LatLng? _lastRefreshLoc;
 
   // Cache keys & TTL
-  static const _kCacheNearby = 'parksTab.nearby.v1';
   static const _kCacheFavs = 'parksTab.favs.v1';
   static const _kCacheMeta = 'parksTab.meta.v1';
   static const _kCacheTs = 'parksTab.ts.v1';
   static const Duration _cacheTtl = Duration(hours: 2);
 
-  bool get _shouldAutoFetchNearby =>
-      _favoriteParks.isEmpty && _favoriteParkIds.isEmpty;
-
   // Debounces
   Timer? _checkinDebounce;
   Timer? _cacheDebounce;
-
-  // Memoization for nearbyParksVisible to avoid expensive filtering
-  List<Park>? _cachedNearbyParksVisible;
-  Set<String>? _cachedFavIdSet;
-  List<Park>? _cachedNearbyList;
 
   // SharedPreferences reuse
   SharedPreferences? _prefs;
   Future<SharedPreferences> _sp() async =>
       _prefs ??= await SharedPreferences.getInstance();
-
-  // ---------- Helpers ----------
-  // String _parkIdOf(Park p) => generateParkID(p.latitude, p.longitude, p.name);
-
-  // Filtered nearby list (favorites excluded) - with memoization
-  List<Park> get _nearbyParksVisible {
-    // Return cached result if neither favorites nor nearby lists changed
-    if (_cachedNearbyParksVisible != null &&
-        _cachedFavIdSet == _favoriteParkIds &&
-        _cachedNearbyList == _nearbyParks) {
-      return _cachedNearbyParksVisible!;
-    }
-    // Recalculate and cache
-    _cachedNearbyParksVisible =
-        _nearbyParks.where((p) => !_favoriteParkIds.contains(p.id)).toList();
-    _cachedFavIdSet = _favoriteParkIds;
-    _cachedNearbyList = _nearbyParks;
-    return _cachedNearbyParksVisible!;
-  }
 
   @override
   bool get wantKeepAlive => true;
@@ -113,6 +102,8 @@ class _ParksTabState extends State<ParksTab>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _scrollController.addListener(_handleScroll);
+    _parkSearchFocusNode.addListener(_handleParkSearchFocusChanged);
     _restoreCache(); // paint instantly if we have cache
     _bootstrap(); // then fetch fresh data
   }
@@ -122,8 +113,44 @@ class _ParksTabState extends State<ParksTab>
     WidgetsBinding.instance.removeObserver(this);
     _checkinDebounce?.cancel();
     _cacheDebounce?.cancel();
+    _scrollController
+      ..removeListener(_handleScroll)
+      ..dispose();
+    _parkSearchController.dispose();
+    _parkSearchFocusNode
+      ..removeListener(_handleParkSearchFocusChanged)
+      ..dispose();
     _metaInFlight.clear();
     super.dispose();
+  }
+
+  void _handleParkSearchFocusChanged() {
+    if (mounted) setState(() {});
+  }
+
+  void _handleScroll() {
+    if (!_scrollController.hasClients ||
+        _isAutoExpandingNews ||
+        _isLoadingNews ||
+        _isRefreshingNews ||
+        _visibleNewsCount >= _newsArticles.length) {
+      return;
+    }
+
+    final position = _scrollController.position;
+    final threshold = math.max(240.0, position.viewportDimension * 0.35);
+    if (position.extentAfter > threshold) return;
+
+    _isAutoExpandingNews = true;
+    if (mounted) {
+      setState(() {
+        _visibleNewsCount =
+            math.min(_visibleNewsCount + 10, _newsArticles.length);
+      });
+    }
+    Future<void>.delayed(const Duration(milliseconds: 150), () {
+      _isAutoExpandingNews = false;
+    });
   }
 
   @override
@@ -132,13 +159,11 @@ class _ParksTabState extends State<ParksTab>
   }
 
   Future<void> _bootstrap() async {
-    // Fetch favourites first so we can decide about auto nearby
-    await _fetchFavoriteParks();
-    await _refreshCheckedInSet();
-
-    if (_shouldAutoFetchNearby) {
-      await _fetchNearbyParksFast(); // spinner-less fast pass
-    }
+    await Future.wait([
+      _fetchFavoriteParks(),
+      _refreshCheckedInSet(),
+      _loadNewsArticles(),
+    ]);
   }
 
   // ---------- Resume: fast, spinner-less refresh ----------
@@ -146,41 +171,13 @@ class _ParksTabState extends State<ParksTab>
     if (!mounted || _resumeRefreshing) return;
     _resumeRefreshing = true;
     try {
-      // 🚫 Do not auto-refresh nearby if the user has favourites
-      if (!_shouldAutoFetchNearby) return;
-
-      final saved = await _locationService.getSavedUserLocation();
-      final movedFar = (saved != null && _lastRefreshLoc != null)
-          ? _approxMeters(saved, _lastRefreshLoc!) > 150
-          : (_lastRefreshLoc == null);
-      final stale = DateTime.now().difference(_lastNearbyRefresh) >
-          const Duration(minutes: 5);
-
-      if (movedFar || stale || !_hasFetchedNearby) {
-        await _fetchNearbyParksFast(); // no spinner
-        _lastNearbyRefresh = DateTime.now();
-        _lastRefreshLoc = saved ?? _lastRefreshLoc;
-
-        final ids = _nearbyParks.map((p) => p.id).toList();
-        final toHydrate =
-            ids.where((id) => !_hydratedMeta.contains(id)).toList();
-        if (toHydrate.isNotEmpty) {
-          // ignore: discarded_futures
-          _hydrateMetaForIds(toHydrate);
-        }
-      }
+      await Future.wait([
+        _refreshCheckedInSet(),
+        _loadNewsArticles(),
+      ]);
     } finally {
       _resumeRefreshing = false;
     }
-  }
-
-  double _approxMeters(LatLng a, LatLng b) {
-    const k = 111000.0; // ~ meters / degree latitude
-    final dx = (a.latitude - b.latitude) * k;
-    final dy = (a.longitude - b.longitude) *
-        k *
-        math.cos(a.latitude * math.pi / 180.0);
-    return math.sqrt(dx * dx + dy * dy);
   }
 
   // ---------- Cache (restore + save, debounced) ----------
@@ -198,15 +195,9 @@ class _ParksTabState extends State<ParksTab>
           DateTime.now().difference(DateTime.fromMillisecondsSinceEpoch(ts));
       if (age > _cacheTtl) return;
 
-      final nearbyRaw = p.getString(_kCacheNearby);
       final favsRaw = p.getString(_kCacheFavs);
       final metaRaw = p.getString(_kCacheMeta);
 
-      if (nearbyRaw != null) {
-        // parse off-thread
-        _nearbyParks = await compute(_parseParksFromJson, nearbyRaw);
-        _hasFetchedNearby = _nearbyParks.isNotEmpty;
-      }
       if (favsRaw != null) {
         _favoriteParks = await compute(_parseParksFromJson, favsRaw);
         _favoriteParkIds = _favoriteParks.map((p) => p.id).toSet();
@@ -240,8 +231,6 @@ class _ParksTabState extends State<ParksTab>
   Future<void> _cacheState() async {
     try {
       final p = await _sp();
-      await p.setString(_kCacheNearby,
-          jsonEncode(_nearbyParks.map((x) => x.toJson()).toList()));
       await p.setString(_kCacheFavs,
           jsonEncode(_favoriteParks.map((x) => x.toJson()).toList()));
       await p.setString(
@@ -327,7 +316,6 @@ class _ParksTabState extends State<ParksTab>
       setState(() {
         _favoriteParkIds = parkIds.toSet();
         _favoriteParks = parks;
-        _cachedNearbyParksVisible = null; // invalidate cache
       });
       _cacheStateDebounced();
     } catch (_) {
@@ -345,83 +333,71 @@ class _ParksTabState extends State<ParksTab>
     return rem == 0 ? "$hrs hr" : "$hrs hr $rem min";
   }
 
-  // ---------- Nearby (FAST first, then precise) ----------
-  Future<void> _fetchNearbyParksFast() async {
-    // 🚫 Skip auto nearby fetch if favourites are present
-    if (!_shouldAutoFetchNearby) return;
+  Future<LatLng?> _searchOrigin() async {
+    final cached = await _locationService.getSavedUserLocation(
+      maxAgeSeconds: 3600,
+    );
+    if (cached != null) return cached;
 
-    try {
-      final cached = await _locationService.getUserLocationOrCached();
-      if (cached == null) return;
-
-      final parks = await _locationService.findNearbyParks(
-        cached.latitude,
-        cached.longitude,
-      );
-
-      bool changed = parks.length != _nearbyParks.length;
-      if (!changed) {
-        for (int i = 0; i < parks.length; i++) {
-          if (parks[i].id != _nearbyParks[i].id) {
-            changed = true;
-            break;
-          }
-        }
-      }
-      if (!changed) return;
-
-      final ids = parks.map((p) => p.id).toList();
-      final toHydrate = ids.where((id) => !_hydratedMeta.contains(id)).toList();
-      if (toHydrate.isNotEmpty) {
-        // ignore: discarded_futures
-        _hydrateMetaForIds(toHydrate);
-      }
-
-      _nearbyParks = parks;
-      _hasFetchedNearby = true;
-      _lastRefreshLoc = cached;
-      _cachedNearbyParksVisible = null; // invalidate cache
-      if (mounted) setState(() {});
-      _cacheStateDebounced();
-    } catch (_) {
-      // ignore
-    }
-  }
-
-  Future<void> _fetchNearbyParks() async {
-    if (mounted) setState(() => _isSearching = true);
     try {
       final permission = loc.Location();
       final hasService = await permission.serviceEnabled() ||
           await permission.requestService();
-      if (!hasService) return;
+      if (!hasService) return null;
 
       var status = await permission.hasPermission();
       if (status == loc.PermissionStatus.denied) {
         status = await permission.requestPermission();
       }
-      if (status != loc.PermissionStatus.granted) {
-        return;
+      if (status != loc.PermissionStatus.granted &&
+          status != loc.PermissionStatus.grantedLimited) {
+        return null;
       }
 
       final l = await permission.getLocation().timeout(
-          const Duration(seconds: 2),
-          onTimeout: () => loc.LocationData.fromMap({}));
-      if (l.latitude == null || l.longitude == null) return;
-      await _fetchNearbyParksAt(l.latitude!, l.longitude!);
+            const Duration(seconds: 2),
+            onTimeout: () => loc.LocationData.fromMap({}),
+          );
+      if (l.latitude == null || l.longitude == null) return null;
+
+      await _locationService.saveUserLocation(l.latitude!, l.longitude!);
+      return LatLng(l.latitude!, l.longitude!);
     } catch (_) {
-      // ignore
-    } finally {
-      if (mounted) setState(() => _isSearching = false);
+      return null;
     }
   }
 
-  Future<void> _fetchNearbyParksAt(double lat, double lng) async {
+  Future<void> _searchParksByName() async {
+    final query = _parkSearchController.text.trim();
+    if (query.isEmpty) {
+      if (!mounted) return;
+      setState(() {
+        _parkSearchQuery = '';
+        _searchedParks = [];
+      });
+      return;
+    }
+
     if (mounted) setState(() => _isSearching = true);
     try {
-      final parks = await _locationService.findNearbyParks(lat, lng);
+      final origin = await _searchOrigin();
+      if (origin == null) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content:
+                Text('Location is needed to sort park results by distance.'),
+          ),
+        );
+        return;
+      }
 
-      // Hydrate meta for any parks we haven't hydrated yet (batched by 10)
+      final parks = await _locationService.searchParksByName(
+        query,
+        origin.latitude,
+        origin.longitude,
+      );
+
       final ids = parks.map((p) => p.id).toList();
       final toHydrate = ids.where((id) => !_hydratedMeta.contains(id)).toList();
       if (toHydrate.isNotEmpty) {
@@ -429,29 +405,97 @@ class _ParksTabState extends State<ParksTab>
         _hydratedMeta.addAll(toHydrate);
       }
 
-      // Only update UI if changed
-      bool changed = parks.length != _nearbyParks.length;
-      if (!changed) {
-        for (int i = 0; i < parks.length; i++) {
-          if (parks[i].id != _nearbyParks[i].id) {
-            changed = true;
-            break;
-          }
-        }
-      }
-      if (!changed) return;
-
       if (!mounted) return;
       setState(() {
-        _nearbyParks = parks; // keep raw list; UI filters out favorites
-        _hasFetchedNearby = true;
+        _parkSearchQuery = query;
+        _searchedParks = parks;
       });
-      _cacheStateDebounced();
     } catch (_) {
-      // ignore
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Could not search parks right now.')),
+      );
     } finally {
       if (mounted) setState(() => _isSearching = false);
     }
+  }
+
+  void _clearParkSearch() {
+    _parkSearchController.clear();
+    if (!mounted) return;
+    setState(() {
+      _parkSearchQuery = '';
+      _searchedParks = [];
+    });
+  }
+
+  Future<void> _loadNewsArticles({bool forceRefresh = false}) async {
+    if (!mounted) return;
+
+    setState(() {
+      if (_newsArticles.isEmpty) {
+        _isLoadingNews = true;
+      } else {
+        _isRefreshingNews = true;
+      }
+      _newsError = null;
+    });
+
+    try {
+      final articles = await _newsFeedService.getArticles(
+        forceRefresh: forceRefresh,
+        limit: 30,
+      );
+
+      if (!mounted) return;
+      setState(() {
+        _newsArticles = articles;
+        _visibleNewsCount =
+            articles.isEmpty ? 10 : math.min(10, articles.length);
+        _isAutoExpandingNews = false;
+        if (articles.isEmpty) {
+          _newsError = 'No dog news is available right now.';
+        }
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        if (_newsArticles.isEmpty) {
+          _newsError = 'Could not load dog news right now.';
+        }
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isLoadingNews = false;
+          _isRefreshingNews = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _openNewsArticle(FeedArticle article) async {
+    final uri = Uri.tryParse(article.url);
+    if (uri == null) return;
+
+    final opened = await launchUrl(
+      uri,
+      mode: LaunchMode.inAppBrowserView,
+    );
+    if (!opened && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Could not open article right now.')),
+      );
+    }
+  }
+
+  Future<void> _scrollToTop() async {
+    if (!_scrollController.hasClients) return;
+    await _scrollController.animateTo(
+      0,
+      duration: const Duration(milliseconds: 320),
+      curve: Curves.easeOutCubic,
+    );
   }
 
   // ---------- Meta (userCount + services) ----------
@@ -792,7 +836,6 @@ class _ParksTabState extends State<ParksTab>
           _favoriteParks.add(park);
         }
       }
-      _cachedNearbyParksVisible = null; // invalidate cache
       if (mounted) setState(() {});
       _cacheStateDebounced();
     } catch (_) {
@@ -876,6 +919,38 @@ class _ParksTabState extends State<ParksTab>
   };
   IconData _serviceIcon(String s) => _svcIcons[s] ?? Icons.park;
 
+  String _formatDistance(double distanceKm) {
+    if (distanceKm < 1) {
+      return '${(distanceKm * 1000).round()} m away';
+    }
+    return '${distanceKm.toStringAsFixed(distanceKm < 10 ? 1 : 0)} km away';
+  }
+
+  String _parkMetaLine(Park park, int userCount) {
+    final parts = <String>[];
+    if (park.distance != null) {
+      parts.add(_formatDistance(park.distance!));
+    }
+    parts.add(userCount == 1 ? '1 active user' : '$userCount active users');
+    return parts.join('  •  ');
+  }
+
+  String _formatArticleTime(DateTime? publishedAt) {
+    if (publishedAt == null) return 'Recently';
+    final diff = DateTime.now().difference(publishedAt);
+    if (diff.inMinutes < 60) {
+      final mins = math.max(1, diff.inMinutes);
+      return '$mins min ago';
+    }
+    if (diff.inHours < 24) {
+      return '${diff.inHours}h ago';
+    }
+    if (diff.inDays < 7) {
+      return '${diff.inDays}d ago';
+    }
+    return DateFormat('MMM d').format(publishedAt);
+  }
+
   Widget _buildParkCard(Park park, {required bool isFavorite}) {
     final parkId = park.id;
     final liked = _favoriteParkIds.contains(parkId);
@@ -948,11 +1023,15 @@ class _ParksTabState extends State<ParksTab>
                     ],
 
                     const SizedBox(height: 6),
-
-                    // Active users count
-                    Text("Active Users: $userCount"),
-
-                    const SizedBox(height: 8),
+                    Text(
+                      _parkMetaLine(park, userCount),
+                      style: const TextStyle(
+                        fontSize: 13,
+                        color: Colors.black54,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    const SizedBox(height: 10),
 
                     // Actions
                     Row(
@@ -968,14 +1047,6 @@ class _ParksTabState extends State<ParksTab>
                                     ),
                                   ),
                           child: const Text("Park Chat",
-                              style: TextStyle(fontSize: 12)),
-                        ),
-                        const SizedBox(width: 8),
-                        ElevatedButton(
-                          onPressed: isOpening
-                              ? null
-                              : () => widget.onShowEvents(parkId),
-                          child: const Text("Park Events",
                               style: TextStyle(fontSize: 12)),
                         ),
                         const SizedBox(width: 8),
@@ -1016,7 +1087,7 @@ class _ParksTabState extends State<ParksTab>
             Positioned.fill(
               child: AbsorbPointer(
                 child: Container(
-                  color: Colors.black.withOpacity(0.08),
+                  color: Colors.black.withValues(alpha: 0.08),
                   alignment: Alignment.center,
                   child: const SizedBox(
                     width: 28,
@@ -1031,82 +1102,436 @@ class _ParksTabState extends State<ParksTab>
     );
   }
 
+  Widget _buildSectionTitle(String title, {Widget? trailing}) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      child: Row(
+        children: [
+          Text(
+            title,
+            style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+          ),
+          const Spacer(),
+          if (trailing != null) trailing,
+        ],
+      ),
+    );
+  }
+
+  Widget _buildNewsCard(FeedArticle article) {
+    return Card(
+      margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: () => _openNewsArticle(article),
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 4,
+                    ),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFEAF3E2),
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                    child: Text(
+                      article.source,
+                      style: const TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700,
+                        color: Color(0xFF365A38),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      _formatArticleTime(article.publishedAt),
+                      textAlign: TextAlign.right,
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: Colors.black54,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  const Icon(
+                    Icons.open_in_new_rounded,
+                    size: 18,
+                    color: Colors.black38,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Text(
+                article.title,
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w700,
+                  height: 1.28,
+                ),
+              ),
+              if (article.summary.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                Text(
+                  article.summary,
+                  maxLines: 5,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 13,
+                    color: Colors.black87,
+                    height: 1.4,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildNewsSection() {
+    final visibleArticles = _newsArticles.take(_visibleNewsCount).toList();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _buildSectionTitle(
+          'Dog News & Tips',
+          trailing: IconButton(
+            onPressed: _isRefreshingNews
+                ? null
+                : () => _loadNewsArticles(forceRefresh: true),
+            tooltip: 'Refresh news',
+            icon: _isRefreshingNews
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.refresh_rounded),
+          ),
+        ),
+        if (_isLoadingNews)
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 24),
+            child: Center(child: CircularProgressIndicator()),
+          )
+        else if (_newsError != null)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            child: Text(
+              _newsError!,
+              style: const TextStyle(color: Colors.black54),
+            ),
+          )
+        else ...[
+          ...visibleArticles.map(_buildNewsCard),
+          if (_visibleNewsCount < _newsArticles.length)
+            const Padding(
+              padding: EdgeInsets.fromLTRB(10, 6, 10, 10),
+              child: Text(
+                'Scroll for more articles',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Colors.black54,
+                  fontStyle: FontStyle.italic,
+                ),
+              ),
+            ),
+        ],
+      ],
+    );
+  }
+
   // ---------- Build ----------
   @override
   Widget build(BuildContext context) {
     super.build(context); // KeepAlive mixin
-    final nearbyVisible = _nearbyParksVisible;
+    final searchActive = _parkSearchQuery.isNotEmpty;
+    final searchUiActive = searchActive || _parkSearchFocusNode.hasFocus;
+    final displayedParks = _searchedParks;
 
     return Scaffold(
       body: Stack(
         children: [
           RepaintBoundary(
             child: ListView(
+              controller: _scrollController,
               cacheExtent: 1200, // Increased from 800 to reduce scroll jank
               padding: const EdgeInsets.only(bottom: 70),
               children: [
-                // Favorites
-                if (_favoriteParks.isNotEmpty) ...[
-                  const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                    child: Text("Favourite Parks",
-                        style: TextStyle(
-                            fontSize: 16, fontWeight: FontWeight.bold)),
+                Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                  child: Container(
+                    padding: const EdgeInsets.all(6),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.16),
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(
+                        color: Colors.white.withValues(alpha: 0.14),
+                      ),
+                    ),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: _parkSearchController,
+                            focusNode: _parkSearchFocusNode,
+                            textInputAction: TextInputAction.search,
+                            onTapOutside: (_) =>
+                                FocusScope.of(context).unfocus(),
+                            onChanged: (_) {
+                              if (mounted) setState(() {});
+                            },
+                            onSubmitted: (_) => _searchParksByName(),
+                            style: const TextStyle(
+                              color: Colors.black87,
+                              fontWeight: FontWeight.w600,
+                            ),
+                            decoration: InputDecoration(
+                              hintText: 'Search parks by name',
+                              hintStyle: const TextStyle(color: Colors.black45),
+                              prefixIcon: const Icon(
+                                Icons.search_rounded,
+                                color: Color(0xFF365A38),
+                              ),
+                              suffixIcon: _parkSearchController.text.isEmpty &&
+                                      !searchActive
+                                  ? null
+                                  : IconButton(
+                                      tooltip: 'Clear search',
+                                      icon: const Icon(Icons.close),
+                                      onPressed: _clearParkSearch,
+                                    ),
+                              filled: true,
+                              fillColor: Colors.white,
+                              contentPadding: const EdgeInsets.symmetric(
+                                horizontal: 18,
+                                vertical: 14,
+                              ),
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(16),
+                                borderSide: const BorderSide(
+                                  color: Color(0x22000000),
+                                  width: 1.2,
+                                ),
+                              ),
+                              enabledBorder: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(16),
+                                borderSide: const BorderSide(
+                                  color: Color(0x22000000),
+                                  width: 1.2,
+                                ),
+                              ),
+                              focusedBorder: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(16),
+                                borderSide: const BorderSide(
+                                  color: Color(0xFF567D46),
+                                  width: 1.5,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        DecoratedBox(
+                          decoration: BoxDecoration(
+                            gradient: const LinearGradient(
+                              colors: [Color(0xFF567D46), Color(0xFF365A38)],
+                              begin: Alignment.topLeft,
+                              end: Alignment.bottomRight,
+                            ),
+                            borderRadius: BorderRadius.circular(16),
+                          ),
+                          child: ElevatedButton(
+                            onPressed: _isSearching ? null : _searchParksByName,
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.transparent,
+                              shadowColor: Colors.transparent,
+                              foregroundColor: Colors.white,
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 18,
+                                vertical: 16,
+                              ),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(16),
+                              ),
+                            ),
+                            child: const Text(
+                              'Search',
+                              style: TextStyle(fontWeight: FontWeight.w700),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
+                ),
+                if (searchActive || _isSearching) ...[
+                  _buildSectionTitle('Search Results'),
+                  if (_isSearching)
+                    const Padding(
+                      padding: EdgeInsets.symmetric(vertical: 20),
+                      child: Center(child: CircularProgressIndicator()),
+                    )
+                  else if (displayedParks.isEmpty)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 8,
+                      ),
+                      child: Text(
+                        'No parks found for "$_parkSearchQuery". Try a broader name.',
+                        style: const TextStyle(color: Colors.black54),
+                      ),
+                    )
+                  else
+                    ...displayedParks.map((p) => _buildParkCard(
+                          p,
+                          isFavorite: _favoriteParkIds.contains(p.id),
+                        )),
+                ],
+                if (_favoriteParks.isNotEmpty) ...[
+                  _buildSectionTitle("Liked Parks"),
                   ..._favoriteParks
                       .map((p) => _buildParkCard(p, isFavorite: true))
                       .toList(),
                 ],
-
-                // Nearby header
-                Padding(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                  child: Row(
-                    children: [
-                      const Text(
-                        "Nearby Parks",
-                        style: TextStyle(
-                            fontSize: 16, fontWeight: FontWeight.bold),
-                      ),
-                      const Spacer(),
-                      TextButton.icon(
-                        onPressed: _isSearching ? null : _fetchNearbyParks,
-                        icon: const Icon(Icons.near_me, size: 16),
-                        label: const Text("Find Nearby"),
-                        style: TextButton.styleFrom(
-                          visualDensity:
-                              const VisualDensity(horizontal: -2, vertical: -2),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-
-                // CTA to fetch nearby (only shows if we didn’t have a cached fix)
-                if (!_isSearching && nearbyVisible.isEmpty)
-                  Padding(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                    child: ElevatedButton(
-                      onPressed: _fetchNearbyParks,
-                      child: const Text("Find Nearby Parks"),
-                    ),
-                  ),
-
-                if (_isSearching)
-                  const Padding(
-                    padding: EdgeInsets.symmetric(vertical: 20),
-                    child: Center(child: CircularProgressIndicator()),
-                  ),
-
-                // Nearby list (favorites excluded)
-                ...nearbyVisible
-                    .map((p) => _buildParkCard(p, isFavorite: false))
-                    .toList(),
+                _buildNewsSection(),
               ],
             ),
           ),
+          // Start Walk button - floating above ad banner
+          if (!widget.isWalkActive && !searchUiActive)
+            Positioned(
+              left: 16,
+              right: 16,
+              bottom: 78,
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Container(
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(16),
+                        boxShadow: [
+                          BoxShadow(
+                            color:
+                                const Color(0xFF567D46).withValues(alpha: 0.4),
+                            blurRadius: 12,
+                            offset: const Offset(0, 4),
+                          ),
+                        ],
+                      ),
+                      child: Material(
+                        borderRadius: BorderRadius.circular(16),
+                        child: InkWell(
+                          onTap: widget.onStartWalk,
+                          borderRadius: BorderRadius.circular(16),
+                          child: Container(
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(16),
+                              gradient: const LinearGradient(
+                                colors: [
+                                  Color(0xFF567D46),
+                                  Color(0xFF4a6c3a),
+                                ],
+                                begin: Alignment.topLeft,
+                                end: Alignment.bottomRight,
+                              ),
+                            ),
+                            padding: const EdgeInsets.symmetric(
+                              vertical: 16,
+                              horizontal: 20,
+                            ),
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                const Icon(
+                                  Icons.directions_walk,
+                                  color: Colors.white,
+                                  size: 22,
+                                ),
+                                const SizedBox(width: 6),
+                                const Icon(
+                                  Icons.pets,
+                                  color: Colors.white,
+                                  size: 18,
+                                ),
+                                const SizedBox(width: 10),
+                                Text(
+                                  "Start a Walk",
+                                  style: Theme.of(context)
+                                      .textTheme
+                                      .titleMedium
+                                      ?.copyWith(
+                                        color: Colors.white,
+                                        fontWeight: FontWeight.w700,
+                                        fontSize: 17,
+                                      ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  SizedBox(
+                    width: 64,
+                    child: Container(
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(16),
+                        boxShadow: [
+                          BoxShadow(
+                            color:
+                                const Color(0xFF365A38).withValues(alpha: 0.18),
+                            blurRadius: 12,
+                            offset: const Offset(0, 4),
+                          ),
+                        ],
+                      ),
+                      child: Material(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(16),
+                        child: InkWell(
+                          onTap: _scrollToTop,
+                          borderRadius: BorderRadius.circular(16),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                              vertical: 16,
+                              horizontal: 0,
+                            ),
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                const Icon(
+                                  Icons.vertical_align_top_rounded,
+                                  color: Color(0xFF365A38),
+                                  size: 20,
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           const Positioned(
             left: 0,
             right: 0,

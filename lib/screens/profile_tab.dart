@@ -2,23 +2,28 @@ import 'package:flutter/material.dart';
 import 'package:flutter/cupertino.dart' show CupertinoIcons;
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_storage/firebase_storage.dart';
 
 import 'package:inthepark/services/firestore_service.dart';
 import 'package:inthepark/models/owner_model.dart';
 import 'package:inthepark/models/pet_model.dart';
+import 'package:inthepark/models/pet_document_model.dart';
+import 'package:inthepark/utils/document_upload_util.dart';
 import 'package:inthepark/utils/image_upload_util.dart';
 import 'package:inthepark/screens/owner_detail_screen.dart';
 import 'package:inthepark/screens/edit_profile_screen.dart';
 import 'package:inthepark/widgets/rewarded_streak_ads.dart';
-import 'dart:io' show Platform;
+import 'dart:io' show File, Platform;
 import 'package:share_plus/share_plus.dart';
 import 'package:intl/intl.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:flutter/services.dart'
-    show Clipboard, ClipboardData, rootBundle;
+    show Clipboard, ClipboardData, FilteringTextInputFormatter, rootBundle;
 import 'dart:ui' as ui;
 import 'dart:async';
 import 'package:inthepark/widgets/ad_banner.dart';
+import 'package:open_filex/open_filex.dart';
 
 class VisitHistoryCta extends StatelessWidget {
   const VisitHistoryCta({super.key, required this.onTap});
@@ -124,7 +129,7 @@ class ShareAppCta extends StatelessWidget {
                   mainAxisSize: MainAxisSize.min,
                   children: const [
                     Text(
-                      'Share In The Park To Your Friends!',
+                      'Invite Friends to the App!',
                       style: TextStyle(
                         color: Colors.white,
                         fontSize: 18,
@@ -134,7 +139,7 @@ class ShareAppCta extends StatelessWidget {
                     ),
                     SizedBox(height: 2),
                     Text(
-                      'Invite a friend — it’s free',
+                      'More friends. More dogs. More fun.',
                       style: TextStyle(
                         color: Colors.white70,
                         fontSize: 12,
@@ -162,6 +167,23 @@ class ProfileTab extends StatefulWidget {
 }
 
 class _ProfileTabState extends State<ProfileTab> {
+  static const List<String> _petSexOptions = ['Male', 'Female'];
+  static const List<String> _petSizeOptions = [
+    'Small',
+    'Medium',
+    'Large',
+    'Extra Large',
+  ];
+
+  static const Map<String, String> _documentTypeLabels = {
+    'vaccine': 'Vaccine',
+    'licence': 'Licence',
+    'microchip': 'Microchip',
+    'medical': 'Medical Record',
+    'insurance': 'Insurance',
+    'other': 'Other Document',
+  };
+
   final _firestoreService = FirestoreService();
 
   // Controllers (initialized immediately to avoid late-init issues)
@@ -178,6 +200,7 @@ class _ProfileTabState extends State<ProfileTab> {
   bool _isLoading = true;
   Owner? _owner;
   List<Pet> _pets = [];
+  Map<String, List<PetDocumentRecord>> _petDocumentsByPetId = {};
 
   // For sheet upload spinners (add/edit pet)
   bool _sheetUploading = false;
@@ -411,7 +434,6 @@ class _ProfileTabState extends State<ProfileTab> {
         final today = DateTime(now.year, now.month, now.day);
         final yesterdayKey =
             _dayKeyLocal(today.subtract(const Duration(days: 1)));
-        final dbyKey = _dayKeyLocal(today.subtract(const Duration(days: 2)));
         final lastDay = (lastDate != null && lastDate.isNotEmpty)
             ? _parseDayKey(lastDate)
             : null;
@@ -542,15 +564,31 @@ class _ProfileTabState extends State<ProfileTab> {
 
   // ---------- UI helpers ----------
 
-  void _shareApp() {
+  Future<void> _shareApp() async {
     const androidUrl =
         'https://play.google.com/store/apps/details?id=ca.inthepark&pcampaignid=web_share';
     const iosUrl = 'https://apps.apple.com/ca/app/in-the-park/id6752841263';
 
-    Share.share(
-      'Check out In The Park!\n\niOS: $iosUrl\nAndroid: $androidUrl',
-      subject: 'In The Park',
-    );
+    final text = 'Check out In The Park!\n\n'
+        'Connect, Play, Explore 🐾\n\n'
+        'iOS: $iosUrl\n'
+        'Android: $androidUrl';
+
+    try {
+      final box = context.findRenderObject() as RenderBox?;
+
+      await Share.share(
+        text,
+        subject: 'In The Park',
+        sharePositionOrigin: box!.localToGlobal(Offset.zero) & box.size,
+      );
+    } catch (e) {
+      debugPrint('Share failed: $e');
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not open share sheet: $e')),
+      );
+    }
   }
 
   InputDecoration _outlinedDecoration(String hint) {
@@ -607,6 +645,7 @@ class _ProfileTabState extends State<ProfileTab> {
       }
 
       final pets = await _firestoreService.getPetsForOwner(owner.uid);
+      final petDocumentsByPetId = await _loadDocumentsForPets(pets);
 
       // Fill controllers
       firstNameController.text = owner.firstName;
@@ -622,12 +661,39 @@ class _ProfileTabState extends State<ProfileTab> {
       setState(() {
         _owner = owner;
         _pets = pets;
+        _petDocumentsByPetId = petDocumentsByPetId;
       });
     } catch (e) {
       debugPrint("Error loading profile data: $e");
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
+  }
+
+  CollectionReference<Map<String, dynamic>> _documentsCollection(String petId) {
+    return FirebaseFirestore.instance
+        .collection('pets')
+        .doc(petId)
+        .collection('documents');
+  }
+
+  Future<Map<String, List<PetDocumentRecord>>> _loadDocumentsForPets(
+    List<Pet> pets,
+  ) async {
+    if (pets.isEmpty) return {};
+
+    final entries = await Future.wait(
+      pets.map((pet) async {
+        final snap = await _documentsCollection(pet.id).get();
+        final docs = snap.docs
+            .map((doc) => PetDocumentRecord.fromFirestore(doc))
+            .toList();
+        docs.sort((a, b) => a.expiryDate.compareTo(b.expiryDate));
+        return MapEntry(pet.id, docs);
+      }),
+    );
+
+    return Map<String, List<PetDocumentRecord>>.fromEntries(entries);
   }
 
   Future<void> _saveUpdatedOwner({
@@ -795,6 +861,11 @@ class _ProfileTabState extends State<ProfileTab> {
     final newPetId = FirebaseFirestore.instance.collection('pets').doc().id;
     final nameController = TextEditingController();
     final breedController = TextEditingController();
+    final temperamentController = TextEditingController();
+    final weightController = TextEditingController();
+    String? selectedSex;
+    String? selectedSize;
+    DateTime? birthday;
     String? photoUrl; // stays null until user uploads
     _sheetUploading = false;
     bool triedSave = false; // show error only after first save attempt
@@ -845,6 +916,107 @@ class _ProfileTabState extends State<ProfileTab> {
                     controller: breedController,
                     decoration: _outlinedDecoration("Pet breed (optional)"),
                   ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: DropdownButtonFormField<String?>(
+                          initialValue: selectedSex,
+                          decoration: _outlinedDecoration("Sex"),
+                          items: [
+                            const DropdownMenuItem<String?>(
+                              value: null,
+                              child: Text("Not specified"),
+                            ),
+                            ..._petSexOptions.map(
+                              (option) => DropdownMenuItem<String?>(
+                                value: option,
+                                child: Text(option),
+                              ),
+                            ),
+                          ],
+                          onChanged: (value) {
+                            setSheetState(() => selectedSex = value);
+                          },
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: DropdownButtonFormField<String?>(
+                          initialValue: selectedSize,
+                          decoration: _outlinedDecoration("Size"),
+                          items: [
+                            const DropdownMenuItem<String?>(
+                              value: null,
+                              child: Text("Not specified"),
+                            ),
+                            ..._petSizeOptions.map(
+                              (option) => DropdownMenuItem<String?>(
+                                value: option,
+                                child: Text(option),
+                              ),
+                            ),
+                          ],
+                          onChanged: (value) {
+                            setSheetState(() => selectedSize = value);
+                          },
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: weightController,
+                          keyboardType: const TextInputType.numberWithOptions(
+                            decimal: true,
+                          ),
+                          inputFormatters: [
+                            FilteringTextInputFormatter.allow(
+                              RegExp(r'[0-9.]'),
+                            ),
+                          ],
+                          decoration: _outlinedDecoration("Weight (lb)"),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: () async {
+                            final picked = await _pickPetBirthday(
+                              initialDate: birthday,
+                            );
+                            if (picked == null) return;
+                            setSheetState(() => birthday = picked);
+                          },
+                          icon: const Icon(Icons.cake_outlined),
+                          label: Text(
+                            birthday == null
+                                ? 'Birthday'
+                                : DateFormat('MMM d, yyyy').format(birthday!),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  if (birthday != null) ...[
+                    const SizedBox(height: 8),
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: TextButton(
+                        onPressed: () => setSheetState(() => birthday = null),
+                        child: const Text('Clear birthday'),
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: temperamentController,
+                    maxLines: 2,
+                    decoration: _outlinedDecoration("Temperament / notes"),
+                  ),
                   const SizedBox(height: 18),
                   Row(
                     children: [
@@ -873,6 +1045,12 @@ class _ProfileTabState extends State<ProfileTab> {
                                     petId: newPetId,
                                     name: name,
                                     breed: breedController.text.trim(),
+                                    sex: selectedSex,
+                                    size: selectedSize,
+                                    temperament:
+                                        temperamentController.text.trim(),
+                                    weightText: weightController.text.trim(),
+                                    birthday: birthday,
                                     photoUrl:
                                         photoUrl, // nullable; defaulted inside
                                   );
@@ -921,6 +1099,14 @@ class _ProfileTabState extends State<ProfileTab> {
   Future<void> _showEditPetSheet(Pet pet) async {
     final nameController = TextEditingController(text: pet.name);
     final breedController = TextEditingController(text: pet.breed ?? "");
+    final temperamentController =
+        TextEditingController(text: pet.temperament ?? "");
+    final weightController = TextEditingController(
+      text: pet.weight == null ? "" : _formatWeightInput(pet.weight!),
+    );
+    String? selectedSex = pet.sex;
+    String? selectedSize = pet.size;
+    DateTime? birthday = pet.birthday;
     String? photoUrl = pet.photoUrl; // start with current
     _sheetUploading = false;
     bool triedSave = false;
@@ -971,6 +1157,107 @@ class _ProfileTabState extends State<ProfileTab> {
                     controller: breedController,
                     decoration: _outlinedDecoration("Pet breed (optional)"),
                   ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: DropdownButtonFormField<String?>(
+                          initialValue: selectedSex,
+                          decoration: _outlinedDecoration("Sex"),
+                          items: [
+                            const DropdownMenuItem<String?>(
+                              value: null,
+                              child: Text("Not specified"),
+                            ),
+                            ..._petSexOptions.map(
+                              (option) => DropdownMenuItem<String?>(
+                                value: option,
+                                child: Text(option),
+                              ),
+                            ),
+                          ],
+                          onChanged: (value) {
+                            setSheetState(() => selectedSex = value);
+                          },
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: DropdownButtonFormField<String?>(
+                          initialValue: selectedSize,
+                          decoration: _outlinedDecoration("Size"),
+                          items: [
+                            const DropdownMenuItem<String?>(
+                              value: null,
+                              child: Text("Not specified"),
+                            ),
+                            ..._petSizeOptions.map(
+                              (option) => DropdownMenuItem<String?>(
+                                value: option,
+                                child: Text(option),
+                              ),
+                            ),
+                          ],
+                          onChanged: (value) {
+                            setSheetState(() => selectedSize = value);
+                          },
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextField(
+                          controller: weightController,
+                          keyboardType: const TextInputType.numberWithOptions(
+                            decimal: true,
+                          ),
+                          inputFormatters: [
+                            FilteringTextInputFormatter.allow(
+                              RegExp(r'[0-9.]'),
+                            ),
+                          ],
+                          decoration: _outlinedDecoration("Weight (lb)"),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: () async {
+                            final picked = await _pickPetBirthday(
+                              initialDate: birthday,
+                            );
+                            if (picked == null) return;
+                            setSheetState(() => birthday = picked);
+                          },
+                          icon: const Icon(Icons.cake_outlined),
+                          label: Text(
+                            birthday == null
+                                ? 'Birthday'
+                                : DateFormat('MMM d, yyyy').format(birthday!),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  if (birthday != null) ...[
+                    const SizedBox(height: 8),
+                    Align(
+                      alignment: Alignment.centerRight,
+                      child: TextButton(
+                        onPressed: () => setSheetState(() => birthday = null),
+                        child: const Text('Clear birthday'),
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: temperamentController,
+                    maxLines: 2,
+                    decoration: _outlinedDecoration("Temperament / notes"),
+                  ),
                   const SizedBox(height: 18),
                   Row(
                     children: [
@@ -999,6 +1286,12 @@ class _ProfileTabState extends State<ProfileTab> {
                                     oldPet: pet,
                                     newName: name,
                                     newBreed: breedController.text.trim(),
+                                    newSex: selectedSex,
+                                    newSize: selectedSize,
+                                    newTemperament:
+                                        temperamentController.text.trim(),
+                                    newWeightText: weightController.text.trim(),
+                                    newBirthday: birthday,
                                     newPhotoUrl:
                                         photoUrl, // nullable; handled inside
                                   );
@@ -1050,6 +1343,11 @@ class _ProfileTabState extends State<ProfileTab> {
     required String petId,
     required String name,
     required String breed,
+    String? sex,
+    String? size,
+    required String temperament,
+    required String weightText,
+    DateTime? birthday,
     String? photoUrl, // nullable incoming
   }) async {
     if (_owner == null) return;
@@ -1060,9 +1358,11 @@ class _ProfileTabState extends State<ProfileTab> {
       name: name.isEmpty ? "Unnamed Pet" : name,
       photoUrl: (photoUrl == null || photoUrl.isEmpty) ? null : photoUrl,
       breed: breed.isEmpty ? null : breed,
-      temperament: null,
-      weight: null,
-      birthday: null,
+      sex: _normalizeOptionalText(sex),
+      size: _normalizeOptionalText(size),
+      temperament: _normalizeOptionalText(temperament),
+      weight: _parsePetWeight(weightText),
+      birthday: birthday,
     );
 
     try {
@@ -1082,6 +1382,11 @@ class _ProfileTabState extends State<ProfileTab> {
     required Pet oldPet,
     required String newName,
     required String newBreed,
+    String? newSex,
+    String? newSize,
+    required String newTemperament,
+    required String newWeightText,
+    DateTime? newBirthday,
     String? newPhotoUrl, // nullable – keep old if null
   }) async {
     final updatedPet = Pet(
@@ -1092,9 +1397,11 @@ class _ProfileTabState extends State<ProfileTab> {
           ? oldPet.photoUrl
           : newPhotoUrl,
       breed: newBreed.isEmpty ? null : newBreed,
-      temperament: oldPet.temperament,
-      weight: oldPet.weight,
-      birthday: oldPet.birthday,
+      sex: _normalizeOptionalText(newSex),
+      size: _normalizeOptionalText(newSize),
+      temperament: _normalizeOptionalText(newTemperament),
+      weight: _parsePetWeight(newWeightText),
+      birthday: newBirthday,
     );
     try {
       await _firestoreService.updatePet(updatedPet);
@@ -1114,9 +1421,32 @@ class _ProfileTabState extends State<ProfileTab> {
 
   Future<void> _removePet(String petId) async {
     try {
+      final docs = List<PetDocumentRecord>.from(
+        _petDocumentsByPetId[petId] ?? const [],
+      );
+
+      final batch = FirebaseFirestore.instance.batch();
+      for (final doc in docs) {
+        if (doc.storagePath.isNotEmpty) {
+          try {
+            await FirebaseStorage.instance
+                .ref()
+                .child(doc.storagePath)
+                .delete();
+          } catch (_) {}
+        }
+        batch.delete(_documentsCollection(petId).doc(doc.id));
+      }
+      if (docs.isNotEmpty) {
+        await batch.commit();
+      }
+
       await _firestoreService.deletePet(petId);
       if (!mounted) return;
-      setState(() => _pets.removeWhere((p) => p.id == petId));
+      setState(() {
+        _pets.removeWhere((p) => p.id == petId);
+        _petDocumentsByPetId.remove(petId);
+      });
     } catch (e) {
       debugPrint("Error removing pet: $e");
       if (!mounted) return;
@@ -1124,6 +1454,775 @@ class _ProfileTabState extends State<ProfileTab> {
         SnackBar(content: Text("Error removing pet: $e")),
       );
     }
+  }
+
+  String _documentTypeLabel(String type) {
+    return _documentTypeLabels[type] ?? 'Document';
+  }
+
+  String _documentDisplayName(PetDocumentRecord doc) {
+    final custom = (doc.customName ?? '').trim();
+    if (doc.type == 'vaccine' && custom.isNotEmpty) return custom;
+    if (doc.type == 'other' && custom.isNotEmpty) return custom;
+    return _documentTypeLabel(doc.type);
+  }
+
+  IconData _documentIcon(String type) {
+    switch (type) {
+      case 'vaccine':
+        return Icons.vaccines;
+      case 'licence':
+        return Icons.badge_outlined;
+      case 'microchip':
+        return Icons.memory;
+      case 'medical':
+        return Icons.medical_services_outlined;
+      case 'insurance':
+        return Icons.shield_outlined;
+      default:
+        return Icons.description_outlined;
+    }
+  }
+
+  _DocumentExpiryStatus _documentExpiryStatus(DateTime expiryDate) {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final expiry = DateTime(expiryDate.year, expiryDate.month, expiryDate.day);
+    final daysLeft = expiry.difference(today).inDays;
+
+    if (daysLeft < 0) {
+      return const _DocumentExpiryStatus(
+        label: 'Expired',
+        color: Color(0xFFD32F2F),
+        background: Color(0xFFFFEBEE),
+      );
+    }
+    if (daysLeft <= 30) {
+      return const _DocumentExpiryStatus(
+        label: 'Expires soon',
+        color: Color(0xFFB26A00),
+        background: Color(0xFFFFF3E0),
+      );
+    }
+    return const _DocumentExpiryStatus(
+      label: 'Active',
+      color: Color(0xFF2E7D32),
+      background: Color(0xFFE8F5E9),
+    );
+  }
+
+  String? _normalizeOptionalText(String? value) {
+    final trimmed = value?.trim() ?? '';
+    return trimmed.isEmpty ? null : trimmed;
+  }
+
+  double? _parsePetWeight(String value) {
+    final trimmed = value.trim();
+    if (trimmed.isEmpty) return null;
+    return double.tryParse(trimmed);
+  }
+
+  String _formatWeightInput(double value) {
+    if (value == value.roundToDouble()) {
+      return value.toStringAsFixed(0);
+    }
+    return value.toStringAsFixed(1);
+  }
+
+  Future<DateTime?> _pickPetBirthday({
+    DateTime? initialDate,
+  }) async {
+    final now = DateTime.now();
+    final selected = await showDatePicker(
+      context: context,
+      initialDate: initialDate ?? DateTime(now.year - 1, now.month, now.day),
+      firstDate: DateTime(now.year - 30),
+      lastDate: now,
+    );
+    if (selected == null) return null;
+    return DateTime(selected.year, selected.month, selected.day);
+  }
+
+  String _petAgeLabel(DateTime birthday) {
+    final now = DateTime.now();
+    int years = now.year - birthday.year;
+    int months = now.month - birthday.month;
+    if (now.day < birthday.day) {
+      months -= 1;
+    }
+    if (months < 0) {
+      years -= 1;
+      months += 12;
+    }
+
+    if (years > 0 && months > 0) return '$years yr $months mo';
+    if (years > 0) return '$years yr';
+    if (months > 0) return '$months mo';
+    return '<1 mo';
+  }
+
+  List<Widget> _buildPetDetailPills(Pet pet) {
+    final widgets = <Widget>[];
+    final breed = _normalizeOptionalText(pet.breed);
+    final sex = _normalizeOptionalText(pet.sex);
+    final size = _normalizeOptionalText(pet.size);
+    final temperament = _normalizeOptionalText(pet.temperament);
+
+    if (breed != null) {
+      widgets.add(_TinyInfoPill(icon: Icons.pets, text: breed));
+    }
+    if (sex != null) {
+      widgets.add(_TinyInfoPill(icon: Icons.badge_outlined, text: sex));
+    }
+    if (size != null) {
+      widgets.add(_TinyInfoPill(icon: Icons.straighten, text: size));
+    }
+    if (pet.birthday != null) {
+      widgets.add(
+        _TinyInfoPill(
+          icon: Icons.cake_outlined,
+          text: _petAgeLabel(pet.birthday!),
+        ),
+      );
+    }
+    if (pet.weight != null) {
+      widgets.add(
+        _TinyInfoPill(
+          icon: Icons.monitor_weight_outlined,
+          text: '${_formatWeightInput(pet.weight!)} lb',
+        ),
+      );
+    }
+    if (temperament != null) {
+      widgets
+          .add(_TinyInfoPill(icon: Icons.favorite_outline, text: temperament));
+    }
+
+    return widgets;
+  }
+
+  Future<DateTime?> _pickExpiryDate({
+    DateTime? initialDate,
+  }) async {
+    final now = DateTime.now();
+    final selected = await showDatePicker(
+      context: context,
+      initialDate: initialDate ?? DateTime(now.year + 1, now.month, now.day),
+      firstDate: DateTime(now.year - 5),
+      lastDate: DateTime(now.year + 25),
+    );
+    if (selected == null) return null;
+    return DateTime(selected.year, selected.month, selected.day);
+  }
+
+  Future<PetDocumentPickerSource?> _chooseDocumentSource(
+    BuildContext sheetContext,
+  ) {
+    return showModalBottomSheet<PetDocumentPickerSource>(
+      context: sheetContext,
+      builder: (context) {
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.photo_library_outlined),
+                title: const Text('Photo Library'),
+                subtitle: const Text('Pick an image from your photos'),
+                onTap: () => Navigator.of(context).pop(
+                  PetDocumentPickerSource.photoLibrary,
+                ),
+              ),
+              ListTile(
+                leading: const Icon(Icons.folder_open_outlined),
+                title: const Text('Files'),
+                subtitle: const Text('Pick a PDF or file from device storage'),
+                onTap: () =>
+                    Navigator.of(context).pop(PetDocumentPickerSource.files),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _showAddDocumentSheet(Pet pet) async {
+    if (_owner == null) return;
+
+    final docId = _documentsCollection(pet.id).doc().id;
+    final nameController = TextEditingController();
+    String selectedType = 'vaccine';
+    DateTime? expiryDate;
+    UploadedPetDocument? uploadedFile;
+    bool isUploading = false;
+    bool isSaving = false;
+
+    String fieldLabel() {
+      if (selectedType == 'vaccine') {
+        return 'Vaccine type';
+      }
+      return 'Document name';
+    }
+
+    bool requiresCustomName() {
+      return selectedType == 'vaccine' || selectedType == 'other';
+    }
+
+    await showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) {
+        return _ModernSheet(
+          child: StatefulBuilder(
+            builder: (sheetContext, setSheetState) {
+              final normalizedName = nameController.text.trim();
+              final needsName = requiresCustomName();
+              final canSave = uploadedFile != null &&
+                  expiryDate != null &&
+                  !isUploading &&
+                  !isSaving &&
+                  (!needsName || normalizedName.isNotEmpty);
+
+              Future<void> pickDocument() async {
+                final source = await _chooseDocumentSource(sheetContext);
+                if (source == null) return;
+
+                setSheetState(() => isUploading = true);
+                try {
+                  final picked =
+                      await DocumentUploadUtil.pickAndUploadPetDocument(
+                    petId: pet.id,
+                    documentId: docId,
+                    source: source,
+                  );
+                  if (picked == null) return;
+                  setSheetState(() => uploadedFile = picked);
+                } catch (e) {
+                  if (!mounted) return;
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('Upload failed: $e')),
+                  );
+                } finally {
+                  if (mounted) {
+                    setSheetState(() => isUploading = false);
+                  }
+                }
+              }
+
+              Future<void> saveDocument() async {
+                if (!canSave || uploadedFile == null || expiryDate == null) {
+                  return;
+                }
+
+                setSheetState(() => isSaving = true);
+                try {
+                  final record = PetDocumentRecord(
+                    id: docId,
+                    petId: pet.id,
+                    ownerId: _owner!.uid,
+                    type: selectedType,
+                    customName: needsName ? normalizedName : null,
+                    fileName: uploadedFile!.fileName,
+                    storagePath: uploadedFile!.storagePath,
+                    contentType: uploadedFile!.contentType,
+                    expiryDate: expiryDate!,
+                    uploadedAt: DateTime.now(),
+                  );
+
+                  await _documentsCollection(pet.id).doc(docId).set(
+                        record.toMap(),
+                        SetOptions(merge: true),
+                      );
+
+                  if (!mounted) return;
+                  setState(() {
+                    final next = List<PetDocumentRecord>.from(
+                      _petDocumentsByPetId[pet.id] ?? const [],
+                    )..add(record);
+                    next.sort((a, b) => a.expiryDate.compareTo(b.expiryDate));
+                    _petDocumentsByPetId[pet.id] = next;
+                  });
+
+                  if (!sheetContext.mounted || !mounted) return;
+                  Navigator.of(sheetContext).pop();
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text(
+                        '${_documentDisplayName(record)} uploaded for ${pet.name}.',
+                      ),
+                    ),
+                  );
+                } catch (e) {
+                  if (!mounted) return;
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(content: Text('Could not save document: $e')),
+                  );
+                } finally {
+                  if (mounted) {
+                    setSheetState(() => isSaving = false);
+                  }
+                }
+              }
+
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const _SheetHeader(title: 'Add Document'),
+                  const SizedBox(height: 12),
+                  Text(
+                    pet.name,
+                    style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 14),
+                  DropdownButtonFormField<String>(
+                    initialValue: selectedType,
+                    decoration: _outlinedDecoration('Document type'),
+                    items: _documentTypeLabels.entries
+                        .map(
+                          (entry) => DropdownMenuItem<String>(
+                            value: entry.key,
+                            child: Text(entry.value),
+                          ),
+                        )
+                        .toList(),
+                    onChanged: (value) {
+                      if (value == null) return;
+                      setSheetState(() {
+                        selectedType = value;
+                        if (!requiresCustomName()) {
+                          nameController.clear();
+                        }
+                      });
+                    },
+                  ),
+                  if (needsName) ...[
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: nameController,
+                      decoration: _outlinedDecoration(fieldLabel()).copyWith(
+                        hintText: selectedType == 'vaccine'
+                            ? 'Rabies, DHPP, Bordetella...'
+                            : 'Enter a document name',
+                      ),
+                      onChanged: (_) => setSheetState(() {}),
+                    ),
+                  ],
+                  const SizedBox(height: 12),
+                  OutlinedButton.icon(
+                    onPressed: isUploading || isSaving ? null : pickDocument,
+                    icon: isUploading
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.upload_file),
+                    label: Text(
+                      uploadedFile == null
+                          ? 'Upload photo or file'
+                          : 'Change file',
+                    ),
+                  ),
+                  if (uploadedFile != null) ...[
+                    const SizedBox(height: 8),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Colors.grey.shade100,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Row(
+                        children: [
+                          const Icon(Icons.attach_file, color: Colors.black54),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              uploadedFile!.fileName,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 12),
+                  OutlinedButton.icon(
+                    onPressed: isSaving
+                        ? null
+                        : () async {
+                            final picked = await _pickExpiryDate(
+                              initialDate: expiryDate,
+                            );
+                            if (picked == null) return;
+                            setSheetState(() => expiryDate = picked);
+                          },
+                    icon: const Icon(Icons.event_outlined),
+                    label: Text(
+                      expiryDate == null
+                          ? 'Select expiry date'
+                          : 'Expiry: ${DateFormat('MMM d, yyyy').format(expiryDate!)}',
+                    ),
+                  ),
+                  const SizedBox(height: 18),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton(
+                          onPressed: isSaving
+                              ? null
+                              : () => Navigator.of(sheetContext).pop(),
+                          child: const Text('Cancel'),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: ElevatedButton(
+                          onPressed: canSave ? saveDocument : null,
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.tealAccent,
+                            foregroundColor: Colors.black,
+                          ),
+                          child: Text(isSaving ? 'Saving...' : 'Save'),
+                        ),
+                      ),
+                    ],
+                  ),
+                  SizedBox(
+                    height: MediaQuery.of(sheetContext).viewInsets.bottom + 8,
+                  ),
+                ],
+              );
+            },
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _openPetDocument(PetDocumentRecord doc) async {
+    if (doc.storagePath.isEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('This document is not available.')),
+      );
+      return;
+    }
+
+    try {
+      final tempDir = await getTemporaryDirectory();
+      final ext = _documentFileExtension(doc);
+      final localPath =
+          '${tempDir.path}/${doc.id}${ext.isEmpty ? '' : '.$ext'}';
+      final localFile = File(localPath);
+
+      await FirebaseStorage.instance
+          .ref()
+          .child(doc.storagePath)
+          .writeToFile(localFile);
+
+      if (_isImageDocument(doc)) {
+        if (!mounted) return;
+        await Navigator.of(context).push(
+          MaterialPageRoute(
+            builder: (_) => _PetDocumentImageViewer(
+              file: localFile,
+              title: _documentDisplayName(doc),
+            ),
+          ),
+        );
+        return;
+      }
+
+      final result = await OpenFilex.open(localFile.path);
+      if (result.type != ResultType.done && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              result.message.isEmpty
+                  ? 'Could not open this document.'
+                  : result.message,
+            ),
+          ),
+        );
+      }
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Could not open this document.')),
+      );
+    }
+  }
+
+  bool _isImageDocument(PetDocumentRecord doc) {
+    final contentType = (doc.contentType ?? '').trim().toLowerCase();
+    if (contentType.startsWith('image/')) return true;
+
+    const imageExts = {
+      'jpg',
+      'jpeg',
+      'png',
+      'gif',
+      'webp',
+      'bmp',
+      'heic',
+      'heif',
+    };
+    return imageExts.contains(_documentFileExtension(doc));
+  }
+
+  String _documentFileExtension(PetDocumentRecord doc) {
+    final fileName = doc.fileName.trim();
+    final dot = fileName.lastIndexOf('.');
+    if (dot != -1 && dot < fileName.length - 1) {
+      return fileName.substring(dot + 1).toLowerCase();
+    }
+
+    final storagePath = doc.storagePath.trim();
+    final slash = storagePath.lastIndexOf('/');
+    final baseName =
+        slash == -1 ? storagePath : storagePath.substring(slash + 1);
+    final pathDot = baseName.lastIndexOf('.');
+    if (pathDot != -1 && pathDot < baseName.length - 1) {
+      return baseName.substring(pathDot + 1).toLowerCase();
+    }
+
+    return '';
+  }
+
+  Future<void> _confirmDeleteDocument(
+    Pet pet,
+    PetDocumentRecord doc,
+  ) async {
+    final ok = await showDialog<bool>(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: Text('Delete ${_documentDisplayName(doc)}?'),
+            content: const Text(
+              'This will remove the document from the pet profile.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(false),
+                child: const Text('Cancel'),
+              ),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+                onPressed: () => Navigator.of(ctx).pop(true),
+                child: const Text('Delete'),
+              ),
+            ],
+          ),
+        ) ??
+        false;
+
+    if (!ok) return;
+
+    try {
+      if (doc.storagePath.isNotEmpty) {
+        try {
+          await FirebaseStorage.instance.ref().child(doc.storagePath).delete();
+        } catch (_) {}
+      }
+      await _documentsCollection(pet.id).doc(doc.id).delete();
+
+      if (!mounted) return;
+      setState(() {
+        final next = List<PetDocumentRecord>.from(
+          _petDocumentsByPetId[pet.id] ?? const [],
+        )..removeWhere((item) => item.id == doc.id);
+        _petDocumentsByPetId[pet.id] = next;
+      });
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('${_documentDisplayName(doc)} deleted.'),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not delete document: $e')),
+      );
+    }
+  }
+
+  Widget _buildDocumentTile(Pet pet, PetDocumentRecord doc) {
+    final expiryText = DateFormat('MMM d, yyyy').format(doc.expiryDate);
+    final status = _documentExpiryStatus(doc.expiryDate);
+
+    return Container(
+      margin: const EdgeInsets.only(top: 10),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.grey.shade50,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: Colors.black.withOpacity(0.06)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            width: 40,
+            height: 40,
+            decoration: BoxDecoration(
+              color: const Color(0xFF567D46).withOpacity(0.12),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Icon(
+              _documentIcon(doc.type),
+              color: const Color(0xFF365A38),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  _documentDisplayName(doc),
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w800,
+                    fontSize: 14.5,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    _TinyInfoPill(
+                      icon: Icons.event_outlined,
+                      text: 'Expires $expiryText',
+                    ),
+                    _StatusPill(status: status),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          Column(
+            children: [
+              IconButton(
+                tooltip: 'Open document',
+                onPressed: () => _openPetDocument(doc),
+                icon: const Icon(Icons.open_in_new, color: Colors.black54),
+              ),
+              IconButton(
+                tooltip: 'Delete document',
+                onPressed: () => _confirmDeleteDocument(pet, doc),
+                icon: const Icon(Icons.delete_outline, color: Colors.red),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPetCard(Pet pet) {
+    final photo = pet.photoUrl ?? '';
+    final hasPhoto = photo.trim().isNotEmpty;
+    final ImageProvider? petImage = hasPhoto ? NetworkImage(photo) : null;
+    final docs = _petDocumentsByPetId[pet.id] ?? const [];
+    final detailPills = _buildPetDetailPills(pet);
+    final breedText = _normalizeOptionalText(pet.breed);
+
+    return Container(
+      decoration: _glassCardDecoration(),
+      margin: const EdgeInsets.symmetric(vertical: 8),
+      padding: const EdgeInsets.all(14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              CircleAvatar(
+                radius: 24,
+                backgroundColor: Colors.black12,
+                backgroundImage: petImage,
+                child: petImage == null
+                    ? const Icon(Icons.pets, color: Colors.black45)
+                    : null,
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      pet.name,
+                      style: const TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(breedText ?? 'Add a few more details for this dog'),
+                    if (detailPills.isNotEmpty) ...[
+                      const SizedBox(height: 10),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: detailPills,
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              IconButton(
+                icon: const Icon(Icons.edit, color: Colors.blueGrey),
+                onPressed: () => _showEditPetSheet(pet),
+              ),
+              IconButton(
+                icon: const Icon(Icons.delete, color: Colors.red),
+                onPressed: () => _confirmAndDeletePet(pet),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Divider(color: Colors.black.withOpacity(0.08), height: 1),
+          const SizedBox(height: 12),
+          Row(
+            children: [
+              const Expanded(
+                child: Text(
+                  'Documents',
+                  style: TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
+              OutlinedButton.icon(
+                onPressed: () => _showAddDocumentSheet(pet),
+                icon: const Icon(Icons.upload_file),
+                label: const Text('Add'),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          if (docs.isEmpty)
+            Text(
+              'No documents uploaded yet.',
+              style: TextStyle(color: Colors.black.withOpacity(0.6)),
+            )
+          else
+            Column(
+              children:
+                  docs.map((doc) => _buildDocumentTile(pet, doc)).toList(),
+            ),
+        ],
+      ),
+    );
   }
 
   Future<void> _logout() async {
@@ -1251,48 +2350,7 @@ class _ProfileTabState extends State<ProfileTab> {
                       )
                     else
                       Column(
-                        children: _pets.map((pet) {
-                          // Safe check for a non-empty URL
-                          final photo = pet.photoUrl ?? '';
-                          final hasPhoto = photo.trim().isNotEmpty;
-                          final ImageProvider? petImage =
-                              hasPhoto ? NetworkImage(photo) : null;
-
-                          return Container(
-                            decoration: _glassCardDecoration(),
-                            margin: const EdgeInsets.symmetric(vertical: 8),
-                            child: ListTile(
-                              contentPadding: const EdgeInsets.symmetric(
-                                  horizontal: 14, vertical: 8),
-                              leading: CircleAvatar(
-                                radius: 24,
-                                backgroundColor: Colors.black12,
-                                backgroundImage: petImage,
-                                child: petImage == null
-                                    ? const Icon(Icons.pets,
-                                        color: Colors.black45)
-                                    : null,
-                              ),
-                              title: Text(pet.name),
-                              subtitle: Text(pet.breed ?? "No breed info"),
-                              trailing: Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  IconButton(
-                                    icon: const Icon(Icons.edit,
-                                        color: Colors.blueGrey),
-                                    onPressed: () => _showEditPetSheet(pet),
-                                  ),
-                                  IconButton(
-                                    icon: const Icon(Icons.delete,
-                                        color: Colors.red),
-                                    onPressed: () => _confirmAndDeletePet(pet),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          );
-                        }).toList(),
+                        children: _pets.map(_buildPetCard).toList(),
                       ),
                     const SizedBox(height: 16),
 
@@ -1311,7 +2369,11 @@ class _ProfileTabState extends State<ProfileTab> {
                     const SizedBox(height: 12),
 
                     // NEW: Enticing “Share this app” CTA
-                    ShareAppCta(onPressed: _shareApp),
+                    ShareAppCta(
+                      onPressed: () {
+                        _shareApp();
+                      },
+                    ),
 
                     const SizedBox(height: 20),
 
@@ -1536,6 +2598,136 @@ class _AvatarPicker extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _DocumentExpiryStatus {
+  final String label;
+  final Color color;
+  final Color background;
+
+  const _DocumentExpiryStatus({
+    required this.label,
+    required this.color,
+    required this.background,
+  });
+}
+
+class _TinyInfoPill extends StatelessWidget {
+  const _TinyInfoPill({
+    required this.icon,
+    required this.text,
+  });
+
+  final IconData icon;
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: Colors.black.withOpacity(0.08)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 14, color: Colors.black54),
+          const SizedBox(width: 6),
+          Text(
+            text,
+            style: const TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _StatusPill extends StatelessWidget {
+  const _StatusPill({required this.status});
+
+  final _DocumentExpiryStatus status;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: status.background,
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Text(
+        status.label,
+        style: TextStyle(
+          color: status.color,
+          fontSize: 12,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+    );
+  }
+}
+
+class _PetDocumentImageViewer extends StatelessWidget {
+  const _PetDocumentImageViewer({
+    required this.file,
+    required this.title,
+  });
+
+  final File file;
+  final String title;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        backgroundColor: Colors.black,
+        foregroundColor: Colors.white,
+        automaticallyImplyLeading: false,
+        elevation: 0,
+        title: Text(
+          title,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
+        actions: [
+          IconButton(
+            tooltip: 'Close',
+            icon: const Icon(Icons.close),
+            onPressed: () => Navigator.of(context).pop(),
+          ),
+        ],
+      ),
+      body: SafeArea(
+        top: false,
+        child: Center(
+          child: InteractiveViewer(
+            minScale: 0.8,
+            maxScale: 4,
+            child: Image.file(
+              file,
+              fit: BoxFit.contain,
+              errorBuilder: (context, error, stackTrace) {
+                return const Padding(
+                  padding: EdgeInsets.all(24),
+                  child: Text(
+                    'Could not display this image.',
+                    style: TextStyle(color: Colors.white),
+                  ),
+                );
+              },
+            ),
+          ),
+        ),
       ),
     );
   }

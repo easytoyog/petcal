@@ -333,50 +333,50 @@ exports.autoCheckoutInactiveUsers = onSchedule({ schedule: "every 10 minutes" },
   const threeHoursAgo = new Date(now.getTime() - THREE_HOURS);
   const twelveHoursAhead = new Date(now.getTime() + 12 * 60 * 60 * 1000);
 
-  const collectRefs = async () => {
-    const uniq = new Map();
+  const uniq = new Map();
 
-    // 1) Properly stamped & stale
-    const q1 = await db.collectionGroup("active_users")
-      .where("checkedInAt", "<", threeHoursAgo).get();
-    q1.docs.forEach(d => uniq.set(d.ref.path, d.ref));
+  const expiredSnap = await db.collectionGroup("active_users")
+    .where("expiresAt", "<=", now)
+    .get();
+  expiredSnap.docs.forEach((d) => uniq.set(d.ref.path, d));
 
-    // 2) Bad future timestamps (client clock wrong)
-    const q3 = await db.collectionGroup("active_users")
-      .where("checkedInAt", ">", twelveHoursAhead).get();
-    q3.docs.forEach(d => uniq.set(d.ref.path, d.ref));
+  const futureSnap = await db.collectionGroup("active_users")
+    .where("checkedInAt", ">", twelveHoursAhead)
+    .get();
+  futureSnap.docs.forEach((d) => uniq.set(d.ref.path, d));
 
-    // 3) Legacy field `checkInAt` (no checkedInAt)
-    const qLegacy = await db.collectionGroup("active_users")
-      .where("checkInAt", "<", threeHoursAgo).get();
-    qLegacy.docs.forEach(d => uniq.set(d.ref.path, d.ref));
+  // Backstop for older docs that predate expiresAt stamping.
+  const staleCheckedInSnap = await db.collectionGroup("active_users")
+    .where("checkedInAt", "<", threeHoursAgo)
+    .get();
+  staleCheckedInSnap.docs.forEach((d) => uniq.set(d.ref.path, d));
 
-    // 4) Unknown/missing `checkedInAt`: can’t query “missing”, so scan a bounded window
-    // Pull candidates by createdAt and inspect in process.
-    const qCreated = await db.collectionGroup("active_users")
-      .where("createdAt", "<", threeHoursAgo).get();
-    qCreated.docs.forEach(d => uniq.set(d.ref.path, d.ref));
+  const staleLegacyCheckInSnap = await db.collectionGroup("active_users")
+    .where("checkInAt", "<", threeHoursAgo)
+    .get();
+  staleLegacyCheckInSnap.docs.forEach((d) => uniq.set(d.ref.path, d));
 
-    return Array.from(uniq.values());
-  };
+  const legacyCreatedSnap = await db.collectionGroup("active_users")
+    .where("createdAt", "<", threeHoursAgo)
+    .get();
+  legacyCreatedSnap.docs.forEach((d) => uniq.set(d.ref.path, d));
 
-  const refs = await collectRefs();
-  if (!refs.length) return null;
+  if (!uniq.size) return null;
 
-  // Filter & normalize before deciding to delete
   const toDelete = [];
-  for (const ref of refs) {
-    const snap = await ref.get();
-    if (!snap.exists) continue;
+  for (const snap of uniq.values()) {
     const x = snap.data() || {};
+    const checkInTs = x.checkedInAt || x.checkInAt || x.createdAt;
+    const checkInDate =
+      checkInTs && typeof checkInTs.toDate === "function" ? checkInTs.toDate() : null;
+    const expiresAt =
+      x.expiresAt && typeof x.expiresAt.toDate === "function" ? x.expiresAt.toDate() : null;
 
-    // Prefer checkedInAt; fallback to legacy checkInAt; fallback to createdAt
-    const ts = x.checkedInAt || x.checkInAt || x.createdAt;
-    const checkInDate = (ts && typeof ts.toDate === "function") ? ts.toDate() : null;
+    const isExpired = expiresAt ? expiresAt <= now : (checkInDate ? checkInDate < threeHoursAgo : true);
+    const isFutureSkew = checkInDate ? checkInDate > twelveHoursAhead : false;
 
-    // If we still can’t tell when they checked in, or it’s clearly stale → delete
-    if (!checkInDate || checkInDate < threeHoursAgo || checkInDate > twelveHoursAhead) {
-      toDelete.push(ref);
+    if (isExpired || isFutureSkew) {
+      toDelete.push(snap.ref);
     }
   }
 
@@ -557,7 +557,14 @@ exports.mirrorOwnerToPublicProfile = onDocumentWritten(
 // Daily steps recap (with local time + minutes)
 // =========================
 exports.sendDailyStepsRecap = onSchedule({ schedule: "every 5 minutes", timeZone: "UTC" }, async () => {
-  const ownersSnap = await db.collection("owners").where("fcmToken", "!=", null).get();
+  const nowUtc = new Date();
+  const runHour = nowUtc.getUTCHours();
+  const runMinuteBucket = Math.floor(nowUtc.getUTCMinutes() / 5) * 5;
+
+  const ownersSnap = await db.collection("owners")
+    .where("dailyStepsHourUtc", "==", runHour)
+    .where("dailyStepsMinuteBucketUtc", "==", runMinuteBucket)
+    .get();
   const owners = ownersSnap.docs.filter(d => {
     const x = d.data() || {};
     return x.dailyStepsOptIn !== false && typeof x.fcmToken === "string" && x.fcmToken.trim();
@@ -772,9 +779,19 @@ exports.onActiveUserCreated = onDocumentCreated(
    ? event.data.data()
    : {};
 
-    // Normalize to `checkedInAt` (the field your cleaner expects)
+    let checkedInAt = new Date();
+    if (d.checkedInAt && typeof d.checkedInAt.toDate === "function") {
+      checkedInAt = d.checkedInAt.toDate();
+    } else if (d.checkInAt && typeof d.checkInAt.toDate === "function") {
+      checkedInAt = d.checkInAt.toDate();
+    }
+
+    // Normalize to `checkedInAt` and stamp an expiry time for cheaper cleanup scans.
     const updates = {
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      expiresAt: admin.firestore.Timestamp.fromDate(
+        new Date(checkedInAt.getTime() + 3 * 60 * 60 * 1000)
+      ),
     };
 
     if (!d.checkedInAt && d.checkInAt && typeof d.checkInAt.toDate === "function") {
@@ -848,6 +865,92 @@ exports.onDmMessageCreated = onDocumentCreated(
           .set({ fcmToken: admin.firestore.FieldValue.delete() }, { merge: true });
       } else {
         console.error("dm push failed:", threadId, recipientId, e);
+      }
+    }
+  }
+);
+
+exports.onGroupMessageCreated = onDocumentCreated(
+  "groups/{groupId}/messages/{messageId}",
+  async (event) => {
+    const snap = event.data;
+    if (!snap) return;
+
+    const { groupId, messageId } = event.params;
+    const msg = snap.data() || {};
+    const senderId = String(msg.senderId || "").trim();
+    const text = String(msg.text || "").trim();
+
+    if (!senderId || !text) return;
+
+    const senderName = await getOwnerDisplayName(senderId);
+
+    const groupSnap = await db.collection("groups").doc(groupId).get();
+    if (!groupSnap.exists) return;
+
+    const group = groupSnap.data() || {};
+    const groupName = String(group.name || "Group").trim() || "Group";
+    const members = Array.isArray(group.members) ? group.members : [];
+    const recipientIds = Array.from(new Set(members))
+      .filter((uid) => typeof uid === "string" && uid && uid !== senderId);
+
+    if (!recipientIds.length) return;
+
+    let tokens = [];
+    for (const ids of chunk(recipientIds, 10)) {
+      const ownersSnap = await db.collection("owners")
+        .where(FieldPath.documentId(), "in", ids)
+        .select("fcmToken")
+        .get();
+
+      ownersSnap.forEach((doc) => {
+        const token = doc.get("fcmToken");
+        if (typeof token === "string" && token.trim()) {
+          tokens.push({ uid: doc.id, token: token.trim() });
+        }
+      });
+    }
+
+    const seen = new Set();
+    tokens = tokens.filter((item) => !seen.has(item.token) && seen.add(item.token));
+    if (!tokens.length) return;
+
+    const body = `${senderName}: ${text.length > 120 ? text.slice(0, 117) + "..." : text}`;
+    const payload = {
+      notification: {
+        title: groupName,
+        body,
+      },
+      data: {
+        type: "group_chat",
+        groupId,
+        groupName,
+        senderId,
+        senderName,
+        messageId,
+        click_action: "FLUTTER_NOTIFICATION_CLICK",
+      },
+      android: { priority: "high" },
+      apns: { payload: { aps: { sound: "default" } } },
+    };
+
+    for (const groupTokens of chunk(tokens, 500)) {
+      const res = await getMessaging().sendEachForMulticast({
+        tokens: groupTokens.map((x) => x.token),
+        ...payload,
+      });
+
+      for (let i = 0; i < res.responses.length; i++) {
+        const response = res.responses[i];
+        if (
+          !response.success &&
+          response.error &&
+          String(response.error.code).includes("registration-token-not-registered")
+        ) {
+          const dead = groupTokens[i];
+          await db.collection("owners").doc(dead.uid)
+            .set({ fcmToken: admin.firestore.FieldValue.delete() }, { merge: true });
+        }
       }
     }
   }

@@ -17,7 +17,6 @@ import 'package:location/location.dart' as loc;
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:inthepark/features/add_event_sheet.dart';
 import 'package:inthepark/features/celebration_dialog.dart';
 import 'package:inthepark/features/walk_manager.dart';
 import 'package:inthepark/models/park_model.dart';
@@ -37,11 +36,12 @@ class _FilterOption {
 }
 
 class MapTab extends StatefulWidget {
-  final void Function(String parkId) onShowEvents;
-  // 👇 new optional callback
   final VoidCallback? onXpGained;
-  const MapTab({Key? key, required this.onShowEvents, this.onXpGained})
-      : super(key: key);
+
+  const MapTab({
+    Key? key,
+    this.onXpGained,
+  }) : super(key: key);
 
   @override
   State<MapTab> createState() => _MapTabState();
@@ -49,6 +49,8 @@ class MapTab extends StatefulWidget {
 
 class _MapTabState extends State<MapTab>
     with AutomaticKeepAliveClientMixin<MapTab>, WidgetsBindingObserver {
+  static const LatLng _fallbackMapCenter = LatLng(43.7615, -79.4111);
+
   // --- Map Controller + Completer (for reliable camera ops) ---
   GoogleMapController? _mapController;
   final Completer<GoogleMapController> _mapCtlCompleter = Completer();
@@ -67,7 +69,7 @@ class _MapTabState extends State<MapTab>
 
   bool _resumeRefreshing = false;
   LatLng? _finalPosition;
-  LatLng _currentMapCenter = const LatLng(43.7615, -79.4111);
+  LatLng _currentMapCenter = _fallbackMapCenter;
   bool _isMapReady = false;
 
   // ---- Smooth polyline state (avoid rebuilding whole route each frame) ----
@@ -87,6 +89,7 @@ class _MapTabState extends State<MapTab>
   final Map<String, Marker> _markersMap = {}; // keyed by parkId
   final Map<String, List<String>> _parkServicesById = {}; // cache per parkId
   List<Park> _allParks = []; // current parks list
+  static const String _dogParkFilterValue = 'Off-leash Dog Park';
 
   bool _celebratePending = false;
   int? _pcSteps;
@@ -126,6 +129,8 @@ class _MapTabState extends State<MapTab>
   Timer? _parksUiDebounce; // debounce UI after Firestore snapshot bursts
   final List<StreamSubscription<QuerySnapshot>> _parksSubs = [];
   String _parksListenerKey = '';
+  BitmapDescriptor? _parkMarkerIcon;
+  BitmapDescriptor? _dogParkMarkerIcon;
 
   // --- Timer text without rebuilding map ---
   final ValueNotifier<String> _elapsedText = ValueNotifier('00:00');
@@ -654,6 +659,25 @@ class _MapTabState extends State<MapTab>
     });
   }
 
+  Future<void> _handleLeavingMapTab() async {
+    if (!_walk.isActive || _finishingWalk || _manualFinishing) return;
+
+    _manualFinishing = true;
+    try {
+      await _walk.stop();
+      await _handleWalkFinished(auto: false, silent: true);
+    } catch (e, st) {
+      debugPrint('Error stopping walk on tab leave: $e\n$st');
+      try {
+        await _walk.reset();
+      } catch (_) {}
+    } finally {
+      _manualFinishing = false;
+      _finishingWalk = false;
+      if (mounted) setState(() {});
+    }
+  }
+
   Future<void> _fetchFavorites() async {
     if (currentUserId == null) return;
     try {
@@ -718,6 +742,47 @@ class _MapTabState extends State<MapTab>
     return BitmapDescriptor.fromBytes(byteData!.buffer.asUint8List());
   }
 
+  Future<void> _ensureParkMarkerIcons() async {
+    _parkMarkerIcon ??= await _bitmapFromIcon(
+      Icons.park_rounded,
+      fg: Colors.white,
+      bg: const Color(0xFF567D46),
+      size: 72,
+    );
+    _dogParkMarkerIcon ??= await _bitmapFromIcon(
+      Icons.pets_rounded,
+      fg: Colors.white,
+      bg: const Color(0xFF8B5E3C),
+      size: 72,
+    );
+  }
+
+  List<String> _mergeDogParkServiceFlag(
+    List<String> services, {
+    required bool isDogPark,
+  }) {
+    final next = List<String>.from(services);
+    if (isDogPark && !next.contains(_dogParkFilterValue)) {
+      next.add(_dogParkFilterValue);
+    }
+    return next;
+  }
+
+  bool _isDogParkFor(Park park) {
+    final services = _parkServicesById[park.id] ?? park.services;
+    return park.isDogPark || services.contains(_dogParkFilterValue);
+  }
+
+  String? _parkSnippetFor(Park park) {
+    final isDogPark = _isDogParkFor(park);
+    if (park.userCount > 0) {
+      return isDogPark
+          ? 'Dog Park • Users: ${park.userCount}'
+          : 'Users: ${park.userCount}';
+    }
+    return isDogPark ? 'Dog Park' : null;
+  }
+
   static const _encouragements = <String>[
     "Way to go!",
     "Good job!",
@@ -777,6 +842,7 @@ class _MapTabState extends State<MapTab>
     _walk = WalkManager(location: _location);
 
     _walkListener = () async {
+      debugPrint('🔔 Walk listener fired: _walk.isActive=${_walk.isActive}');
       final changed = _syncPolylineIfNeeded();
       if (changed && mounted) setState(() {});
       _elapsedText.value = _formatElapsed();
@@ -786,12 +852,19 @@ class _MapTabState extends State<MapTab>
           !_walk.isActive &&
           !_manualFinishing &&
           !_finishingWalk) {
+        debugPrint('🔄 Walk listener: auto-finishing walk');
         await _handleWalkFinished(auto: true);
+      } else if (_wasActive && !_walk.isActive) {
+        debugPrint(
+            '⏭️ Walk listener: skipping auto-finish (_manualFinishing=$_manualFinishing, _finishingWalk=$_finishingWalk)');
       }
       _wasActive = _walk.isActive;
     };
     _walk.addListener(_walkListener);
-    _walk.restoreIfAny();
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      await _walk.restoreIfAny();
+      if (mounted) setState(() {});
+    });
 
     _adManager = InterstitialAdManager(cooldownSeconds: 60);
     _adManager.preload();
@@ -810,6 +883,8 @@ class _MapTabState extends State<MapTab>
     // Prewarm icons (best-effort)
     // ignore: discarded_futures
     _ensureNoteIcons();
+    // ignore: discarded_futures
+    _ensureParkMarkerIcons();
   }
 
   // --------------- Walk notes (pee/poop/caution) ---------------
@@ -945,8 +1020,10 @@ class _MapTabState extends State<MapTab>
   // --------------- Lifecycle & map setup ---------------
   Future<void> _loadSavedLocationAndSetMap() async {
     final savedLocation = await _locationService.getSavedUserLocation();
+    final savedMapCenter = await _locationService.getSavedMapCenter();
     setState(() {
-      _finalPosition = savedLocation ?? const LatLng(43.7615, -79.4111);
+      _finalPosition = savedLocation;
+      _currentMapCenter = savedMapCenter ?? savedLocation ?? _fallbackMapCenter;
       _isMapReady = true;
     });
   }
@@ -981,6 +1058,13 @@ class _MapTabState extends State<MapTab>
 
     super.dispose();
   }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Public API for parent widgets (e.g., accessing walk state from ParksTab)
+  // ═══════════════════════════════════════════════════════════════════════════
+  bool getIsWalkActive() => _walk.isActive;
+
+  Future<void> startWalk() async => _toggleWalk();
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
@@ -1077,7 +1161,14 @@ class _MapTabState extends State<MapTab>
   // ★ Change signature to support silent mode
   Future<void> _handleWalkFinished(
       {bool auto = false, bool silent = false}) async {
-    if (_finishingWalk) return;
+    debugPrint(
+        '📊 _handleWalkFinished called (auto=$auto, silent=$silent), _finishingWalk=$_finishingWalk');
+
+    if (_finishingWalk) {
+      debugPrint('⚠️ Already finishing walk, returning early');
+      return;
+    }
+
     _finishingWalk = true;
     if (mounted) setState(() {});
     _stopUiTicker();
@@ -1088,44 +1179,120 @@ class _MapTabState extends State<MapTab>
     } catch (_) {}
 
     if (!_walk.meetsMinimum) {
+      final reason = _walk.tooShortReason; // capture before reset
+      debugPrint('⚠️ Walk too short: $reason');
+
+      await _walk.reset();
+
       _resetLiveRoute();
-      if (!silent && mounted) {
-        setState(() => _finishingWalk = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text("Walk not saved. ${_walk.tooShortReason}")),
-        );
-      } else {
-        _finishingWalk = false;
-        if (mounted) setState(() {});
+      _wasActive = false;
+      _manualFinishing = false;
+      _finishingWalk = false;
+      _elapsedText.value = '00:00';
+
+      _noteMarkers.clear();
+      _noteMeta.clear();
+      _noteIndexById.clear();
+      _noteRecords.clear();
+      _noteSeq = 0;
+
+      if (mounted) {
+        setState(() {});
       }
+
+      if (!silent && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text("Walk not saved. $reason")),
+        );
+      }
+
       return;
     }
 
     _StreakResult? streak;
+    bool savedSuccessfully = false;
+    int finalSteps = 0;
+    double finalMeters = 0;
+
     try {
       final saved = await _persistWalkSession();
-      if (!saved) return; // bail before queuing/showing
+      if (!saved) {
+        debugPrint('Walk session failed to persist');
+
+        await _walk.reset();
+        _resetLiveRoute();
+        _wasActive = false;
+        _manualFinishing = false;
+        _elapsedText.value = '00:00';
+        _noteMarkers.clear();
+        _noteMeta.clear();
+        _noteIndexById.clear();
+        _noteRecords.clear();
+        _noteSeq = 0;
+
+        if (!silent && mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Walk failed to save')),
+          );
+        }
+
+        _finishingWalk = false;
+        if (mounted) setState(() {});
+        return;
+      }
+
+      savedSuccessfully = true;
+
+      // capture final walk stats BEFORE reset
+      finalSteps = _walk.steps;
+      finalMeters = _walk.meters;
+
       streak = await _updateDailyStreak();
-    } catch (e) {
+
+      await _walk.reset();
+      _resetLiveRoute();
+      _wasActive = false;
+      _manualFinishing = false;
+      _elapsedText.value = '00:00';
+      _noteMarkers.clear();
+      _noteMeta.clear();
+      _noteIndexById.clear();
+      _noteRecords.clear();
+      _noteSeq = 0;
+
+      if (mounted) {
+        setState(() {});
+      }
+    } catch (e, st) {
+      debugPrint('Error persisting walk: $e\n$st');
       if (!silent && mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Save failed: $e')),
         );
       }
-    } finally {
       _finishingWalk = false;
       if (mounted) setState(() {});
+      return;
     }
+
+    if (!savedSuccessfully) {
+      _finishingWalk = false;
+      if (mounted) setState(() {});
+      return;
+    }
+
+    _finishingWalk = false;
+    if (mounted) setState(() {});
 
     if (silent) return;
 
-    final steps_ = _walk.steps;
-    final meters_ = _walk.meters;
-    final streakCurrent_ = streak?.current;
-    final streakLongest_ = streak?.longest;
-    final streakIsNewRecord_ = streak?.isNewRecord ?? false;
-    final reviveEligible_ = streak?.reviveEligible == true;
-    final prevBeforeLoss_ = streak?.prevBeforeLoss;
+    final steps_ = finalSteps;
+    final meters_ = finalMeters;
+    final streakCurrent_ = streak.current;
+    final streakLongest_ = streak.longest;
+    final streakIsNewRecord_ = streak.isNewRecord ?? false;
+    final reviveEligible_ = streak.reviveEligible == true;
+    final prevBeforeLoss_ = streak.prevBeforeLoss;
 
     // If the app is not in foreground, queue celebration for later.
     final life = WidgetsBinding.instance.lifecycleState;
@@ -1197,10 +1364,38 @@ class _MapTabState extends State<MapTab>
     if (_walk.isActive) {
       _manualFinishing = true;
       try {
+        debugPrint('🛑 Stopping walk...');
         await _walk.stop();
+        debugPrint('✅ Walk stopped, _walk.isActive = ${_walk.isActive}');
+
+        // Ensure UI reflects walk has stopped even if handleWalkFinished has issues
+        if (mounted) setState(() {});
+
+        debugPrint('⏱️ Calling _handleWalkFinished...');
         await _handleWalkFinished(auto: false);
+        debugPrint('✅ _handleWalkFinished completed');
+      } catch (e, st) {
+        debugPrint('❌ Error finishing walk: $e\n$st');
+        // Force walk to stop and reset UI on error
+        try {
+          if (_walk.isActive) {
+            debugPrint('⚠️ Walk still active after error, forcing stop...');
+            await _walk.stop();
+          }
+        } catch (_) {}
+
+        if (mounted) {
+          setState(() {});
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Walk ended (with error): $e')),
+          );
+        }
       } finally {
         _manualFinishing = false;
+        _finishingWalk = false; // Extra safety: ensure this is always reset
+        debugPrint(
+            '🔄 Finishing complete, _manualFinishing = false, _finishingWalk = false, _walk.isActive = ${_walk.isActive}');
+        if (mounted) setState(() {});
       }
       return;
     }
@@ -1485,8 +1680,6 @@ class _MapTabState extends State<MapTab>
       }
 
       _currentWalkId = null;
-      _resetLiveRoute();
-      _recomputeVisibleMarkers();
       return true;
     } catch (e) {
       if (mounted) {
@@ -1612,6 +1805,7 @@ class _MapTabState extends State<MapTab>
       if (userLocation != null) {
         setState(() {
           _finalPosition = userLocation;
+          _currentMapCenter = userLocation;
           _isMapReady = true;
         });
 
@@ -1622,7 +1816,7 @@ class _MapTabState extends State<MapTab>
         await _loadNearbyParks(userLocation);
       } else {
         setState(() {
-          _finalPosition = const LatLng(43.7615, -79.4111);
+          _finalPosition = null;
           _isMapReady = true;
           _isSearching = false;
         });
@@ -1654,16 +1848,20 @@ class _MapTabState extends State<MapTab>
 
       final nextMarkers = <String, Marker>{};
       for (final p in parks) {
-        final snippet = (p.userCount > 0) ? 'Users: ${p.userCount}' : null;
-        nextMarkers[p.id] = Marker(
-          markerId: MarkerId(p.id),
-          position: LatLng(p.latitude, p.longitude),
-          infoWindow: InfoWindow(title: p.name, snippet: snippet),
-          onTap: () => _showUsersInPark(p.id, p.name, p.latitude, p.longitude),
+        _parkServicesById[p.id] = _mergeDogParkServiceFlag(
+          p.services,
+          isDogPark: p.isDogPark,
         );
-        if (p.services.isNotEmpty) {
-          _parkServicesById[p.id] = List<String>.from(p.services);
-        }
+      }
+
+      final entries = await Future.wait(
+        parks.map(
+          (p) async =>
+              MapEntry<String, Marker>(p.id, await _createParkMarker(p)),
+        ),
+      );
+      for (final entry in entries) {
+        nextMarkers[entry.key] = entry.value;
       }
 
       if (!mounted) return;
@@ -1703,9 +1901,13 @@ class _MapTabState extends State<MapTab>
         .get()));
     for (final qs in snaps) {
       for (final d in qs.docs) {
-        final svcs =
-            (d.data()['services'] as List?)?.cast<String>() ?? const [];
-        _parkServicesById[d.id] = svcs;
+        final data = d.data();
+        final svcs = (data['services'] as List?)?.cast<String>() ?? const [];
+        final isDogPark = data['isDogPark'] == true;
+        _parkServicesById[d.id] = _mergeDogParkServiceFlag(
+          svcs,
+          isDogPark: isDogPark,
+        );
       }
     }
   }
@@ -1739,7 +1941,7 @@ class _MapTabState extends State<MapTab>
     for (final p in parks) {
       final old = _markersMap[p.id];
       if (old == null) continue;
-      final newSnippet = (p.userCount > 0) ? 'Users: ${p.userCount}' : null;
+      final newSnippet = _parkSnippetFor(p);
       if (old.infoWindow.snippet != newSnippet ||
           old.infoWindow.title != p.name) {
         _markersMap[p.id] = old.copyWith(
@@ -1785,9 +1987,33 @@ class _MapTabState extends State<MapTab>
             final count = (data['userCount'] ?? 0) as int;
             final services =
                 (data['services'] as List?)?.cast<String>() ?? const [];
+            final mergedServices = _mergeDogParkServiceFlag(
+              services,
+              isDogPark: data['isDogPark'] == true,
+            );
 
             final oldMarker = _markersMap[parkId]!;
-            final newSnippet = count > 0 ? 'Users: $count' : null;
+            final park = _allParks.firstWhere(
+              (p) => p.id == parkId,
+              orElse: () => Park(
+                id: parkId,
+                name: oldMarker.infoWindow.title ?? 'Park',
+                latitude: oldMarker.position.latitude,
+                longitude: oldMarker.position.longitude,
+                isDogPark: data['isDogPark'] == true,
+              ),
+            );
+            final displayPark = Park(
+              id: park.id,
+              name: park.name,
+              latitude: park.latitude,
+              longitude: park.longitude,
+              userCount: count,
+              distance: park.distance,
+              services: park.services,
+              isDogPark: park.isDogPark || data['isDogPark'] == true,
+            );
+            final newSnippet = _parkSnippetFor(displayPark);
 
             final oldSnippet = oldMarker.infoWindow.snippet;
             if (oldSnippet != newSnippet) {
@@ -1801,8 +2027,8 @@ class _MapTabState extends State<MapTab>
             }
 
             final prevSvcs = _parkServicesById[parkId] ?? const [];
-            if (!_listEquals(prevSvcs, services)) {
-              _parkServicesById[parkId] = services;
+            if (!_listEquals(prevSvcs, mergedServices)) {
+              _parkServicesById[parkId] = mergedServices;
               servicesChanged = true;
             }
           }
@@ -1845,11 +2071,16 @@ class _MapTabState extends State<MapTab>
     if (!_mapCtlCompleter.isCompleted) {
       _mapCtlCompleter.complete(controller);
     }
-    _currentMapCenter = _finalPosition ?? const LatLng(43.7615, -79.4111);
 
-    if (_finalPosition != null) {
-      _moveCameraTo(_finalPosition!, zoom: 17, instant: true);
+    if (_currentMapCenter == _fallbackMapCenter && _finalPosition != null) {
+      _currentMapCenter = _finalPosition!;
     }
+
+    await _moveCameraTo(
+      _currentMapCenter,
+      zoom: _finalPosition != null ? 17 : 12,
+      instant: true,
+    );
   }
 
   void _onCameraMove(CameraPosition position) {
@@ -1859,7 +2090,7 @@ class _MapTabState extends State<MapTab>
     _locationSaveDebounce = Timer(const Duration(seconds: 2), () {
       final c = _currentMapCenter;
       // ignore: discarded_futures
-      _locationService.saveUserLocation(c.latitude, c.longitude);
+      _locationService.saveMapCenter(c.latitude, c.longitude);
     });
   }
 
@@ -1876,6 +2107,11 @@ class _MapTabState extends State<MapTab>
   }
 
   // --------------- Center-on-me (more robust) ---------------
+  bool _isUsableLocationPermission(loc.PermissionStatus status) {
+    return status == loc.PermissionStatus.granted ||
+        status == loc.PermissionStatus.grantedLimited;
+  }
+
   Future<bool> _ensureLocationPermission() async {
     bool serviceEnabled = await _location.serviceEnabled();
     if (!serviceEnabled) {
@@ -1886,28 +2122,57 @@ class _MapTabState extends State<MapTab>
     var permissionGranted = await _location.hasPermission();
     if (permissionGranted == loc.PermissionStatus.denied) {
       permissionGranted = await _location.requestPermission();
-      if (permissionGranted != loc.PermissionStatus.granted) return false;
+      if (!_isUsableLocationPermission(permissionGranted)) return false;
     }
     if (permissionGranted == loc.PermissionStatus.deniedForever) {
       return false;
     }
-    return true;
+    return _isUsableLocationPermission(permissionGranted);
   }
 
   Future<void> _centerOnUser() async {
     if (_isCentering) return;
     setState(() => _isCentering = true);
     try {
-      // super short fresh attempt
+      final hasPermission = await _ensureLocationPermission();
+      if (!hasPermission) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Location access is needed to center the map on you.',
+            ),
+          ),
+        );
+        return;
+      }
+
       final user = await _getFreshUserLatLng(
-            freshTimeout: const Duration(milliseconds: 1200),
-            minAccuracyMeters: 100,
-          ) ??
-          _currentMapCenter;
+        freshTimeout: const Duration(seconds: 3),
+        minAccuracyMeters: 150,
+      );
+
+      if (user == null) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'We could not get your current location. Please try again.',
+            ),
+          ),
+        );
+        return;
+      }
 
       _finalPosition = user;
       _currentMapCenter = user;
+      await _locationService.saveUserLocation(user.latitude, user.longitude);
       await _moveCameraTo(user, zoom: 17);
+
+      if (_metersBetween(_currentMapCenter, user) > 20) {
+        _currentMapCenter = user;
+        await _moveCameraTo(user, zoom: 17, instant: true);
+      }
 
       // background refresh of parks
       // ignore: discarded_futures
@@ -1956,10 +2221,14 @@ class _MapTabState extends State<MapTab>
       }
     } catch (_) {}
 
-    final saved = await _locationService.getUserLocationOrCached();
+    final saved = await _locationService.getUserLocationOrCached(
+      maxAgeSeconds: 90,
+    );
     if (saved != null) return saved;
 
-    return _currentMapCenter;
+    if (_finalPosition != null) return _finalPosition;
+
+    return null;
   }
 
   // --- Assets -> Bitmap ---
@@ -2034,8 +2303,6 @@ class _MapTabState extends State<MapTab>
       firestoreService: FirestoreService(),
       locationService: _locationService,
       favoritePetIds: _favoritePetIds,
-      onShowEvents: widget.onShowEvents,
-      onAddEvent: _addEvent,
       onAddFriend: _addFriend,
       onUnfriend: _unfriend,
       checkedInForSince: _checkedInForSince,
@@ -2053,31 +2320,19 @@ class _MapTabState extends State<MapTab>
     );
   }
 
-  void _addEvent(String parkId, double parkLatitude, double parkLongitude) {
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.white,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-      ),
-      builder: (_) => AddEventSheet(
-        parkId: parkId,
-        parkLatitude: parkLatitude,
-        parkLongitude: parkLongitude,
-      ),
-    );
-  }
-
   Future<Marker> _createParkMarker(Park park) async {
+    await _ensureParkMarkerIcons();
+    final isDogPark = _isDogParkFor(park);
     return Marker(
       markerId: MarkerId(park.id),
       position: LatLng(park.latitude, park.longitude),
+      icon: isDogPark ? _dogParkMarkerIcon! : _parkMarkerIcon!,
       onTap: () {
         _showUsersInPark(park.id, park.name, park.latitude, park.longitude);
       },
       infoWindow: InfoWindow(
         title: park.name,
+        snippet: _parkSnippetFor(park),
         onTap: () {
           _showUsersInPark(park.id, park.name, park.latitude, park.longitude);
         },
@@ -2227,7 +2482,11 @@ class _MapTabState extends State<MapTab>
   Widget build(BuildContext context) {
     super.build(context);
 
-    if (!_isMapReady || _finalPosition == null) {
+    // Debug: log current walk state on every build
+    debugPrint(
+        '🔷 MapTab.build() - _walk.isActive=${_walk.isActive}, _finishingWalk=$_finishingWalk, _manualFinishing=$_manualFinishing');
+
+    if (!_isMapReady) {
       return Container(
         decoration: const BoxDecoration(
           gradient: LinearGradient(
@@ -2605,7 +2864,11 @@ class _MapTabState extends State<MapTab>
     final filtered = _selectedFilters.isEmpty
         ? _allParks
         : _allParks.where((p) {
-            final svcs = _parkServicesById[p.id] ?? p.services;
+            final svcs = _parkServicesById[p.id] ??
+                _mergeDogParkServiceFlag(
+                  p.services,
+                  isDogPark: p.isDogPark,
+                );
             return svcs.any((s) => _selectedFilters.contains(s));
           }).toList();
 
@@ -2838,7 +3101,7 @@ class _MapTabState extends State<MapTab>
     );
 
     // Helper to pull the latest streak from Firestore
-    Future<(int?, int?)> _loadLatestStreak() async {
+    Future<(int?, int?)> loadLatestStreak() async {
       final uid = FirebaseAuth.instance.currentUser?.uid;
       if (uid == null) return (streakCurrent, streakLongest);
 
@@ -2867,7 +3130,7 @@ class _MapTabState extends State<MapTab>
       int? latestLng = streakLongest;
       try {
         await _applyStreakFallbackForToday();
-        final pair = await _loadLatestStreak();
+        final pair = await loadLatestStreak();
         latestCur = pair.$1;
         latestLng = pair.$2;
       } catch (e) {
@@ -2875,7 +3138,7 @@ class _MapTabState extends State<MapTab>
       }
 
       final isNew =
-          (latestCur != null && latestLng != null && latestCur! >= latestLng!)
+          (latestCur != null && latestLng != null && latestCur >= latestLng)
               ? true
               : streakIsNewRecord;
 
@@ -2954,11 +3217,11 @@ class _MapTabState extends State<MapTab>
         await applyStreakReviveAfterReward();
 
         // pull the *updated* streak
-        final pair = await _loadLatestStreak();
+        final pair = await loadLatestStreak();
         finalCur = pair.$1;
         finalLng = pair.$2;
 
-        if (finalCur != null && finalLng != null && finalCur! >= finalLng!) {
+        if (finalCur != null && finalLng != null && finalCur >= finalLng) {
           finalIsNewRecord = true;
         }
 

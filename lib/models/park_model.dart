@@ -9,6 +9,7 @@ class Park {
   int userCount; // Number of users currently in the park
   double? distance; // Distance from the user (optional)
   List<String> services; // List of services provided by the park
+  final bool isDogPark;
 
   Park({
     required this.id,
@@ -18,6 +19,7 @@ class Park {
     this.userCount = 0,
     this.distance,
     this.services = const [],
+    this.isDogPark = false,
   });
 
   factory Park.fromJson(Map<String, dynamic> json) {
@@ -29,6 +31,7 @@ class Park {
       userCount: json['userCount'] ?? 0,
       distance: json['distance'],
       services: List<String>.from(json['services'] ?? []),
+      isDogPark: json['isDogPark'] == true,
     );
   }
 
@@ -41,6 +44,7 @@ class Park {
       'userCount': userCount,
       'distance': distance,
       'services': services,
+      'isDogPark': isDogPark,
     };
   }
 
@@ -52,6 +56,7 @@ class Park {
       latitude: data['latitude']?.toDouble() ?? 0.0,
       longitude: data['longitude']?.toDouble() ?? 0.0,
       services: List<String>.from(data['services'] ?? []),
+      isDogPark: data['isDogPark'] == true,
     );
   }
 

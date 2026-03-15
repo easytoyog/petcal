@@ -1,13 +1,15 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 
 class Pet {
-  final String id;          // Firestore doc id (not stored in map)
-  final String ownerId;     // required
-  final String name;        // required, non-empty
-  final String? photoUrl;   // optional
-  final String? breed;      // optional
-  final String? temperament;// optional
-  final double? weight;     // optional
+  final String id; // Firestore doc id (not stored in map)
+  final String ownerId; // required
+  final String name; // required, non-empty
+  final String? photoUrl; // optional
+  final String? breed; // optional
+  final String? sex; // optional
+  final String? size; // optional
+  final String? temperament; // optional
+  final double? weight; // optional
   final DateTime? birthday; // optional
 
   Pet({
@@ -16,6 +18,8 @@ class Pet {
     required this.name,
     this.photoUrl,
     this.breed,
+    this.sex,
+    this.size,
     this.temperament,
     this.weight,
     this.birthday,
@@ -30,8 +34,11 @@ class Pet {
       name: (data['name'] ?? '') as String,
       photoUrl: data['photoUrl'] as String?,
       breed: data['breed'] as String?,
+      sex: data['sex'] as String?,
+      size: data['size'] as String?,
       temperament: data['temperament'] as String?,
-      weight: (data['weight'] is num) ? (data['weight'] as num).toDouble() : null,
+      weight:
+          (data['weight'] is num) ? (data['weight'] as num).toDouble() : null,
       birthday: (data['birthday'] is Timestamp)
           ? (data['birthday'] as Timestamp).toDate()
           : null,
@@ -46,6 +53,8 @@ class Pet {
     };
     if (photoUrl != null) map['photoUrl'] = photoUrl;
     if (breed != null) map['breed'] = breed;
+    if (sex != null) map['sex'] = sex;
+    if (size != null) map['size'] = size;
     if (temperament != null) map['temperament'] = temperament;
     if (weight != null) map['weight'] = weight;
     if (birthday != null) map['birthday'] = Timestamp.fromDate(birthday!);
@@ -58,6 +67,8 @@ class Pet {
     String? name,
     String? photoUrl,
     String? breed,
+    String? sex,
+    String? size,
     String? temperament,
     double? weight,
     DateTime? birthday,
@@ -68,6 +79,8 @@ class Pet {
       name: name ?? this.name,
       photoUrl: photoUrl ?? this.photoUrl,
       breed: breed ?? this.breed,
+      sex: sex ?? this.sex,
+      size: size ?? this.size,
       temperament: temperament ?? this.temperament,
       weight: weight ?? this.weight,
       birthday: birthday ?? this.birthday,

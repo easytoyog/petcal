@@ -45,21 +45,21 @@ class StreakChip extends StatelessWidget {
 
         final data = snapshot.data!.data() as Map<String, dynamic>? ?? {};
 
-        int _readInt(dynamic v) {
+        int readInt(dynamic v) {
           if (v is int) return v;
           return int.tryParse('$v') ?? 0;
         }
 
-        final int current = _readInt(data['current']);
-        final int longest = _readInt(data['longest']);
+        final int current = readInt(data['current']);
+        final int longest = readInt(data['longest']);
         final int? prevBeforeLoss = data['prevBeforeLoss'] != null
-            ? _readInt(data['prevBeforeLoss'])
+            ? readInt(data['prevBeforeLoss'])
             : null;
 
         final String? lastDateStr = (data['lastDate'] as String?)?.trim();
 
         // ---- DATE-ONLY REVIVE LOGIC ----
-        DateTime? _parseDayKey(String s) {
+        DateTime? parseDayKey(String s) {
           final parts = s.split('-');
           if (parts.length != 3) return null;
           final y = int.tryParse(parts[0]);
@@ -71,7 +71,7 @@ class StreakChip extends StatelessWidget {
 
         bool reviveEligible = false;
         if (lastDateStr != null && lastDateStr.isNotEmpty) {
-          final lastDay = _parseDayKey(lastDateStr);
+          final lastDay = parseDayKey(lastDateStr);
           if (lastDay != null) {
             final now = DateTime.now();
             final today = DateTime(now.year, now.month, now.day);

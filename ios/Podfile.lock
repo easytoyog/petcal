@@ -1212,6 +1212,40 @@ PODS:
     - Firebase/Firestore (= 11.10.0)
     - firebase_core
     - Flutter
+  - DKImagePickerController/Core (4.3.9):
+    - DKImagePickerController/ImageDataManager
+    - DKImagePickerController/Resource
+  - DKImagePickerController/ImageDataManager (4.3.9)
+  - DKImagePickerController/PhotoGallery (4.3.9):
+    - DKImagePickerController/Core
+    - DKPhotoGallery
+  - DKImagePickerController/Resource (4.3.9)
+  - DKPhotoGallery (0.0.19):
+    - DKPhotoGallery/Core (= 0.0.19)
+    - DKPhotoGallery/Model (= 0.0.19)
+    - DKPhotoGallery/Preview (= 0.0.19)
+    - DKPhotoGallery/Resource (= 0.0.19)
+    - SDWebImage
+    - SwiftyGif
+  - DKPhotoGallery/Core (0.0.19):
+    - DKPhotoGallery/Model
+    - DKPhotoGallery/Preview
+    - SDWebImage
+    - SwiftyGif
+  - DKPhotoGallery/Model (0.0.19):
+    - SDWebImage
+    - SwiftyGif
+  - DKPhotoGallery/Preview (0.0.19):
+    - DKPhotoGallery/Model
+    - DKPhotoGallery/Resource
+    - SDWebImage
+    - SwiftyGif
+  - DKPhotoGallery/Resource (0.0.19):
+    - SDWebImage
+    - SwiftyGif
+  - file_picker (0.0.1):
+    - DKImagePickerController/PhotoGallery
+    - Flutter
   - Firebase/Auth (11.10.0):
     - Firebase/CoreOnly
     - FirebaseAuth (~> 11.10.0)
@@ -1536,6 +1570,8 @@ PODS:
     - nanopb/encode (= 3.30910.0)
   - nanopb/decode (3.30910.0)
   - nanopb/encode (3.30910.0)
+  - open_filex (0.0.2):
+    - Flutter
   - package_info_plus (0.4.5):
     - Flutter
   - path_provider_foundation (0.0.1):
@@ -1563,6 +1599,7 @@ PODS:
   - sqflite_darwin (0.0.4):
     - Flutter
     - FlutterMacOS
+  - SwiftyGif (5.4.5)
   - url_launcher_ios (0.0.1):
     - Flutter
   - webview_flutter_wkwebview (0.0.1):
@@ -1573,6 +1610,7 @@ DEPENDENCIES:
   - app_badge_plus (from `.symlinks/plugins/app_badge_plus/ios`)
   - app_tracking_transparency (from `.symlinks/plugins/app_tracking_transparency/ios`)
   - cloud_firestore (from `.symlinks/plugins/cloud_firestore/ios`)
+  - file_picker (from `.symlinks/plugins/file_picker/ios`)
   - firebase_app_check (from `.symlinks/plugins/firebase_app_check/ios`)
   - firebase_auth (from `.symlinks/plugins/firebase_auth/ios`)
   - firebase_core (from `.symlinks/plugins/firebase_core/ios`)
@@ -1591,6 +1629,7 @@ DEPENDENCIES:
   - google_sign_in_ios (from `.symlinks/plugins/google_sign_in_ios/darwin`)
   - image_picker_ios (from `.symlinks/plugins/image_picker_ios/ios`)
   - location (from `.symlinks/plugins/location/ios`)
+  - open_filex (from `.symlinks/plugins/open_filex/ios`)
   - package_info_plus (from `.symlinks/plugins/package_info_plus/ios`)
   - path_provider_foundation (from `.symlinks/plugins/path_provider_foundation/darwin`)
   - pedometer (from `.symlinks/plugins/pedometer/ios`)
@@ -1608,6 +1647,8 @@ SPEC REPOS:
     - AppAuth
     - AppCheckCore
     - BoringSSL-GRPC
+    - DKImagePickerController
+    - DKPhotoGallery
     - Firebase
     - FirebaseABTesting
     - FirebaseAppCheck
@@ -1645,6 +1686,7 @@ SPEC REPOS:
     - RecaptchaInterop
     - SDWebImage
     - SDWebImageWebPCoder
+    - SwiftyGif
 
 EXTERNAL SOURCES:
   app_badge_plus:
@@ -1653,6 +1695,8 @@ EXTERNAL SOURCES:
     :path: ".symlinks/plugins/app_tracking_transparency/ios"
   cloud_firestore:
     :path: ".symlinks/plugins/cloud_firestore/ios"
+  file_picker:
+    :path: ".symlinks/plugins/file_picker/ios"
   firebase_app_check:
     :path: ".symlinks/plugins/firebase_app_check/ios"
   firebase_auth:
@@ -1689,6 +1733,8 @@ EXTERNAL SOURCES:
     :path: ".symlinks/plugins/image_picker_ios/ios"
   location:
     :path: ".symlinks/plugins/location/ios"
+  open_filex:
+    :path: ".symlinks/plugins/open_filex/ios"
   package_info_plus:
     :path: ".symlinks/plugins/package_info_plus/ios"
   path_provider_foundation:
@@ -1718,6 +1764,9 @@ SPEC CHECKSUMS:
   AppCheckCore: cc8fd0a3a230ddd401f326489c99990b013f0c4f
   BoringSSL-GRPC: dded2a44897e45f28f08ae87a55ee4bcd19bc508
   cloud_firestore: 3faf949fd9fa8e5465a3e5e574452638246c26ef
+  DKImagePickerController: 946cec48c7873164274ecc4624d19e3da4c1ef3c
+  DKPhotoGallery: b3834fecb755ee09a593d7c9e389d8b5d6deed60
+  file_picker: a0560bc09d61de87f12d246fc47d2119e6ef37be
   Firebase: 1fe1c0a7d9aaea32efe01fbea5f0ebd8d70e53a2
   firebase_app_check: 78b9c59091bfafaae8fb4bfcca39ad9cc9e2831f
   firebase_auth: 87363cb34bc9f842d8479be67200723e2f0ec770
@@ -1769,6 +1818,7 @@ SPEC CHECKSUMS:
   location: 155caecf9da4f280ab5fe4a55f94ceccfab838f8
   Mantle: c5aa8794a29a022dfbbfc9799af95f477a69b62d
   nanopb: fad817b59e0457d11a5dfbde799381cd727c1275
+  open_filex: 432f3cd11432da3e39f47fcc0df2b1603854eff1
   package_info_plus: af8e2ca6888548050f16fa2f1938db7b5a5df499
   path_provider_foundation: 080d55be775b7414fd5a5ef3ac137b97b097e564
   pedometer: 1c5eaab0c6bce8eb7651f7095553b5081c9d06ed
@@ -1781,6 +1831,7 @@ SPEC CHECKSUMS:
   shared_preferences_foundation: 9e1978ff2562383bd5676f64ec4e9aa8fa06a6f7
   sign_in_with_apple: c5dcc141574c8c54d5ac99dd2163c0c72ad22418
   sqflite_darwin: 20b2a3a3b70e43edae938624ce550a3cbf66a3d0
+  SwiftyGif: 706c60cf65fa2bc5ee0313beece843c8eb8194d4
   url_launcher_ios: 694010445543906933d732453a59da0a173ae33d
   webview_flutter_wkwebview: 1821ceac936eba6f7984d89a9f3bcb4dea99ebb2
 

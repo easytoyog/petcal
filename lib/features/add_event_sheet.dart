@@ -111,7 +111,7 @@ class _AddEventSheetState extends State<AddEventSheet> {
                 _sectionHeader(context, "Recurrence"),
                 const SizedBox(height: 8),
                 DropdownButtonFormField<String>(
-                  value: _recurrence,
+                  initialValue: _recurrence,
                   decoration: _dropdownDeco(context, "Recurrence"),
                   items: const ["One Time", "Daily", "Weekly", "Monthly"]
                       .map((v) => DropdownMenuItem(value: v, child: Text(v)))
@@ -145,7 +145,7 @@ class _AddEventSheetState extends State<AddEventSheet> {
 
                 if (_recurrence == "Weekly")
                   DropdownButtonFormField<String>(
-                    value: _weekday,
+                    initialValue: _weekday,
                     decoration: _dropdownDeco(context, "Select Day of Week"),
                     items: const [
                       "Monday",

@@ -8,7 +8,6 @@ class XpFlyUpOverlay {
     int count = 18, // more particles
   }) {
     final overlay = Overlay.of(context);
-    if (overlay == null) return;
 
     final barContext = xpBarKey.currentContext;
     if (barContext == null) return;

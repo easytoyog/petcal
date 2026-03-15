@@ -7,7 +7,7 @@ import 'package:flutter_html/flutter_html.dart';
 
 import 'package:inthepark/legal/terms_conditions.dart';
 import 'package:inthepark/legal/privacy_policy.dart';
-import 'package:inthepark/screens/wait_screen.dart';
+import 'package:inthepark/screens/owner_detail_screen.dart';
 
 class AccountCreationScreen extends StatefulWidget {
   const AccountCreationScreen({Key? key}) : super(key: key);
@@ -19,6 +19,7 @@ class AccountCreationScreen extends StatefulWidget {
 class _AccountCreationScreenState extends State<AccountCreationScreen> {
   // --- Controllers & Focus ---
   final _emailCtl = TextEditingController();
+  final _email2Ctl = TextEditingController();
   final _emailFocus = FocusNode();
   final _passCtl = TextEditingController();
   final _pass2Ctl = TextEditingController();
@@ -40,6 +41,7 @@ class _AccountCreationScreenState extends State<AccountCreationScreen> {
   @override
   void dispose() {
     _emailCtl.dispose();
+    _email2Ctl.dispose();
     _emailFocus.dispose();
     _passCtl.dispose();
     _pass2Ctl.dispose();
@@ -65,33 +67,33 @@ class _AccountCreationScreenState extends State<AccountCreationScreen> {
 
     // Normalize inputs
     final email = _normalizeEmail(_emailCtl.text);
+    final confirmEmail = _normalizeEmail(_email2Ctl.text);
     final pass = _passCtl.text;
+
+    if (email != confirmEmail) {
+      _toast('Email addresses do not match.');
+      return;
+    }
 
     try {
       // If user is anonymous, LINK instead of creating a new account (keeps same UID)
       final cred = EmailAuthProvider.credential(email: email, password: pass);
 
-      UserCredential userCred;
       if (auth.currentUser?.isAnonymous == true) {
-        userCred = await auth.currentUser!.linkWithCredential(cred);
+        await auth.currentUser!.linkWithCredential(cred);
       } else {
-        userCred = await auth.createUserWithEmailAndPassword(
+        await auth.createUserWithEmailAndPassword(
           email: email,
           password: pass,
         );
-      }
-
-      // Send verification (best effort)
-      final user = userCred.user ?? auth.currentUser;
-      if (user != null && !user.emailVerified) {
-        await user.sendEmailVerification();
       }
 
       if (!mounted) return;
       Navigator.pushReplacement(
         context,
         MaterialPageRoute(
-            builder: (_) => WaitForEmailVerificationScreen(user: user!)),
+          builder: (_) => OwnerDetailsScreen(),
+        ),
       );
     } on FirebaseAuthException catch (e) {
       // Strong handling for common cases
@@ -204,6 +206,39 @@ class _AccountCreationScreenState extends State<AccountCreationScreen> {
                         if (!RegExp(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
                             .hasMatch(value)) {
                           return 'Enter a valid email';
+                        }
+                        return null;
+                      },
+                      onFieldSubmitted: (_) =>
+                          FocusScope.of(context).nextFocus(),
+                    ),
+                    const SizedBox(height: 20),
+
+                    // Confirm email
+                    TextFormField(
+                      controller: _email2Ctl,
+                      textInputAction: TextInputAction.next,
+                      keyboardType: TextInputType.emailAddress,
+                      autofillHints: const [AutofillHints.email],
+                      style: const TextStyle(color: Colors.white),
+                      cursorColor: Colors.tealAccent,
+                      inputFormatters: [
+                        FilteringTextInputFormatter.deny(RegExp(r"\s")),
+                      ],
+                      decoration: _inputDecoration(
+                        hint: 'Confirm Email',
+                        icon: Icons.mark_email_read_outlined,
+                      ),
+                      validator: (v) {
+                        final value = (v ?? '').trim();
+                        if (value.isEmpty) return 'Please confirm your email';
+                        if (!RegExp(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+                            .hasMatch(value)) {
+                          return 'Enter a valid email';
+                        }
+                        if (_normalizeEmail(value) !=
+                            _normalizeEmail(_emailCtl.text)) {
+                          return 'Emails do not match';
                         }
                         return null;
                       },

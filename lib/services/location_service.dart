@@ -15,6 +15,13 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// Atmosphere & Contact data charges.
 /// Requested: id, displayName, location, types, primaryType (still "basic")
 class LocationService {
+  static const String _lastLatitudeKey = 'last_latitude';
+  static const String _lastLongitudeKey = 'last_longitude';
+  static const String _lastLocationTimestampKey = 'last_location_timestamp';
+  static const String _lastMapCenterLatitudeKey = 'last_map_center_latitude';
+  static const String _lastMapCenterLongitudeKey = 'last_map_center_longitude';
+  static const String _lastMapCenterTimestampKey = 'last_map_center_timestamp';
+
   final loc.Location _location = loc.Location();
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
   final String _googlePlacesApiKey;
@@ -47,6 +54,7 @@ class LocationService {
   // ---------- Places (New) helpers ----------
   static const _placesHost = 'places.googleapis.com';
   static const _nearbyPath = '/v1/places:searchNearby';
+  static const _textSearchPath = '/v1/places:searchText';
 
   // Types to exclude even if the result says "park"
   static const Set<String> _bannedTypes = {
@@ -142,6 +150,67 @@ class LocationService {
         .toList();
   }
 
+  Future<List<Map<String, dynamic>>> _placesSearchText({
+    required String query,
+    required double lat,
+    required double lng,
+    int pageSize = 20,
+    double biasRadiusMeters = 50000,
+  }) async {
+    final uri = Uri.https(_placesHost, _textSearchPath);
+    final body = jsonEncode({
+      "textQuery": query,
+      "pageSize": pageSize,
+      "locationBias": {
+        "circle": {
+          "center": {"latitude": lat, "longitude": lng},
+          "radius": biasRadiusMeters,
+        }
+      }
+    });
+
+    final resp = await http.post(
+      uri,
+      headers: {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": _googlePlacesApiKey,
+        "X-Goog-FieldMask":
+            "places.id,places.displayName,places.location,places.types,places.primaryType",
+      },
+      body: body,
+    );
+
+    if (resp.statusCode != 200) {
+      return const [];
+    }
+
+    final data = jsonDecode(resp.body);
+    final List places = (data["places"] as List?) ?? const [];
+
+    return places
+        .map<Map<String, dynamic>>((p) {
+          final loc = p["location"] as Map<String, dynamic>? ?? const {};
+          final nameObj = p["displayName"] as Map<String, dynamic>? ?? const {};
+          final types = ((p["types"] as List?) ?? const [])
+              .map((e) => (e as String).toLowerCase())
+              .toList(growable: false);
+          final primaryType = (p["primaryType"] as String? ?? '').toLowerCase();
+          return {
+            "id": p["id"] ?? "",
+            "name": (nameObj["text"] ?? "").toString(),
+            "lat": (loc["latitude"] as num?)?.toDouble(),
+            "lng": (loc["longitude"] as num?)?.toDouble(),
+            "types": types,
+            "primaryType": primaryType,
+          };
+        })
+        .where((m) =>
+            m["lat"] != null &&
+            m["lng"] != null &&
+            (m["name"] as String).isNotEmpty)
+        .toList();
+  }
+
   // ---------- Filtering helpers ----------
   bool _looksLikeRealPark(Map<String, dynamic> p) {
     final name = (p['name'] as String).trim();
@@ -149,7 +218,10 @@ class LocationService {
     final types = (p['types'] as List).cast<String>();
 
     // Must be a park by primary or secondary type
-    final isPark = primary == 'park' || types.contains('park');
+    final isPark = primary == 'park' ||
+        primary == 'dog_park' ||
+        types.contains('park') ||
+        types.contains('dog_park');
     if (!isPark) return false;
 
     // Exclude noisy categories
@@ -170,6 +242,18 @@ class LocationService {
     if (badNameSnippets.any((s) => lower.contains(s))) return false;
 
     return true;
+  }
+
+  bool _isLikelyDogPark(Map<String, dynamic> p) {
+    final name = (p['name'] as String).toLowerCase();
+    final primary = (p['primaryType'] as String);
+    final types = (p['types'] as List).cast<String>();
+
+    return primary == 'dog_park' ||
+        types.contains('dog_park') ||
+        name.contains('dog park') ||
+        name.contains('off leash') ||
+        name.contains('off-leash');
   }
 
   double _haversine(double lat1, double lng1, double lat2, double lng2) {
@@ -227,6 +311,109 @@ class LocationService {
     return kept;
   }
 
+  String _normalizeSearchText(String value) {
+    return value
+        .toLowerCase()
+        .replaceAll(RegExp(r'[^a-z0-9\s]'), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+  }
+
+  List<String> _searchTokens(String value) {
+    final normalized = _normalizeSearchText(value);
+    if (normalized.isEmpty) return const [];
+    return normalized.split(' ').where((part) => part.isNotEmpty).toList();
+  }
+
+  int _levenshtein(String a, String b) {
+    if (a == b) return 0;
+    if (a.isEmpty) return b.length;
+    if (b.isEmpty) return a.length;
+
+    var previous = List<int>.generate(b.length + 1, (i) => i);
+    for (var i = 0; i < a.length; i++) {
+      final current = <int>[i + 1];
+      for (var j = 0; j < b.length; j++) {
+        final cost = a[i] == b[j] ? 0 : 1;
+        current.add([
+          current[j] + 1,
+          previous[j + 1] + 1,
+          previous[j] + cost,
+        ].reduce(min));
+      }
+      previous = current;
+    }
+    return previous.last;
+  }
+
+  int _parkQueryScore(String query, String parkName) {
+    final normalizedQuery = _normalizeSearchText(query);
+    final normalizedName = _normalizeSearchText(parkName);
+    if (normalizedQuery.isEmpty || normalizedName.isEmpty) return 0;
+
+    if (normalizedName.contains(normalizedQuery)) {
+      return 500 - normalizedName.indexOf(normalizedQuery);
+    }
+
+    final queryTokens = _searchTokens(normalizedQuery);
+    final nameTokens = _searchTokens(normalizedName);
+    if (queryTokens.isEmpty || nameTokens.isEmpty) return 0;
+
+    var score = 0;
+    for (final queryToken in queryTokens) {
+      var matched = false;
+      for (final nameToken in nameTokens) {
+        if (nameToken == queryToken) {
+          score += 90;
+          matched = true;
+          break;
+        }
+        if (nameToken.startsWith(queryToken) ||
+            queryToken.startsWith(nameToken)) {
+          score += 70;
+          matched = true;
+          break;
+        }
+
+        final distance = _levenshtein(queryToken, nameToken);
+        final allowDistance = queryToken.length >= 6
+            ? 2
+            : queryToken.length >= 4
+                ? 1
+                : 0;
+        if (distance <= allowDistance) {
+          score += 45 - (distance * 10);
+          matched = true;
+          break;
+        }
+      }
+      if (!matched) return 0;
+    }
+
+    if (normalizedName.contains('park')) score += 15;
+    return score;
+  }
+
+  List<String> _searchQueryVariants(String query) {
+    final normalized = _normalizeSearchText(query);
+    if (normalized.isEmpty) return const [];
+
+    final variants = <String>[normalized];
+    final tokens = _searchTokens(normalized);
+
+    if (!normalized.contains('park')) {
+      variants.add('$normalized park');
+    }
+    if (tokens.length > 1) {
+      variants.add(tokens.first);
+      if (!tokens.first.contains('park')) {
+        variants.add('${tokens.first} park');
+      }
+    }
+
+    return variants.toSet().toList();
+  }
+
   // ---------- Public API ----------
   /// Find nearby parks around (userLat,userLng).
   /// Uses Places (New) Nearby with basic fields only, then filters locally.
@@ -265,11 +452,80 @@ class LocationService {
             name: name,
             latitude: lat,
             longitude: lng,
+            distance: _haversine(userLat, userLng, lat, lng) / 1000,
+            isDogPark: _isLikelyDogPark(p),
           ),
         );
       }
     } catch (_) {
       // Swallow network/parse errors; return what we have.
+    }
+
+    return parks;
+  }
+
+  Future<List<Park>> searchParksByName(
+    String query,
+    double userLat,
+    double userLng,
+  ) async {
+    final normalizedQuery = query.trim();
+    if (normalizedQuery.isEmpty) return const [];
+
+    final parks = <Park>[];
+    final seenIds = <String>{};
+
+    try {
+      final rawLists = await Future.wait(
+        _searchQueryVariants(normalizedQuery).map(
+          (variant) => _placesSearchText(
+            query: variant,
+            lat: userLat,
+            lng: userLng,
+          ),
+        ),
+      );
+      final raw = rawLists.expand((items) => items).toList();
+
+      final filtered = raw.where(_looksLikeRealPark).toList();
+      final deduped = _dedupeByProximity(filtered, thresholdM: 120);
+
+      for (final p in deduped) {
+        final name = (p['name'] as String).trim();
+        final matchScore = _parkQueryScore(normalizedQuery, name);
+        if (matchScore <= 0) continue;
+
+        final lat = p['lat'] as double;
+        final lng = p['lng'] as double;
+        final parkId = generateParkID(lat, lng, name);
+        if (!seenIds.add(parkId)) continue;
+
+        parks.add(
+          Park(
+            id: parkId,
+            name: name,
+            latitude: lat,
+            longitude: lng,
+            distance: _haversine(userLat, userLng, lat, lng) / 1000,
+            isDogPark: _isLikelyDogPark(p),
+          ),
+        );
+      }
+
+      parks.sort((a, b) {
+        final scoreA = _parkQueryScore(normalizedQuery, a.name);
+        final scoreB = _parkQueryScore(normalizedQuery, b.name);
+        final byScore = scoreB.compareTo(scoreA);
+        if (byScore != 0) return byScore;
+
+        final da = a.distance ?? double.infinity;
+        final db = b.distance ?? double.infinity;
+        final byDistance = da.compareTo(db);
+        if (byDistance != 0) return byDistance;
+        return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+      });
+    } catch (_) {
+      return const [];
     }
 
     return parks;
@@ -390,17 +646,19 @@ class LocationService {
 
   Future<void> saveUserLocation(double latitude, double longitude) async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setDouble('last_latitude', latitude);
-    await prefs.setDouble('last_longitude', longitude);
+    await prefs.setDouble(_lastLatitudeKey, latitude);
+    await prefs.setDouble(_lastLongitudeKey, longitude);
     await prefs.setInt(
-        'last_location_timestamp', DateTime.now().millisecondsSinceEpoch);
+      _lastLocationTimestampKey,
+      DateTime.now().millisecondsSinceEpoch,
+    );
   }
 
   Future<LatLng?> getSavedUserLocation({int maxAgeSeconds = 300}) async {
     final prefs = await SharedPreferences.getInstance();
-    final latitude = prefs.getDouble('last_latitude');
-    final longitude = prefs.getDouble('last_longitude');
-    final timestamp = prefs.getInt('last_location_timestamp');
+    final latitude = prefs.getDouble(_lastLatitudeKey);
+    final longitude = prefs.getDouble(_lastLongitudeKey);
+    final timestamp = prefs.getInt(_lastLocationTimestampKey);
 
     if (latitude != null && longitude != null && timestamp != null) {
       final ageMs = DateTime.now().millisecondsSinceEpoch - timestamp;
@@ -422,5 +680,30 @@ class LocationService {
 
     await saveUserLocation(lat, lng);
     return LatLng(lat, lng);
+  }
+
+  Future<void> saveMapCenter(double latitude, double longitude) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setDouble(_lastMapCenterLatitudeKey, latitude);
+    await prefs.setDouble(_lastMapCenterLongitudeKey, longitude);
+    await prefs.setInt(
+      _lastMapCenterTimestampKey,
+      DateTime.now().millisecondsSinceEpoch,
+    );
+  }
+
+  Future<LatLng?> getSavedMapCenter({int maxAgeSeconds = 86400}) async {
+    final prefs = await SharedPreferences.getInstance();
+    final latitude = prefs.getDouble(_lastMapCenterLatitudeKey);
+    final longitude = prefs.getDouble(_lastMapCenterLongitudeKey);
+    final timestamp = prefs.getInt(_lastMapCenterTimestampKey);
+
+    if (latitude != null && longitude != null && timestamp != null) {
+      final ageMs = DateTime.now().millisecondsSinceEpoch - timestamp;
+      if (ageMs < maxAgeSeconds * 1000) {
+        return LatLng(latitude, longitude);
+      }
+    }
+    return null;
   }
 }

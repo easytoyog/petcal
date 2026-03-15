@@ -40,7 +40,7 @@ import 'package:inthepark/screens/pet_detail_screen.dart';
 import 'package:inthepark/screens/location_service_choice.dart';
 import 'package:inthepark/screens/allsetup.dart';
 import 'package:inthepark/screens/forgot_password_screen.dart';
-import 'package:inthepark/screens/wait_screen.dart';
+import 'package:inthepark/screens/group_chat_screen.dart';
 
 // ✅ DM screen route (adjust import path if yours differs)
 import 'package:inthepark/screens/dm_chat_screen.dart';
@@ -58,6 +58,7 @@ const bool isRelease = kReleaseMode;
 const bool isDebug = !kReleaseMode;
 
 bool _appCheckActivated = false;
+StreamSubscription<String>? _fcmTokenRefreshSub;
 
 final RouteObserver<PageRoute> routeObserver = RouteObserver<PageRoute>();
 final ValueNotifier<String?> currentRouteName = ValueNotifier<String?>('/');
@@ -155,27 +156,28 @@ Future<void> _gatherConsentIfNeeded() async {
   return completer.future;
 }
 
+Future<void> _persistFcmToken(User user, String token) async {
+  await FirebaseFirestore.instance
+      .collection('owners')
+      .doc(user.uid)
+      .set({'fcmToken': token}, SetOptions(merge: true));
+}
+
 Future<void> _ensureFcmTokenPersistenceForSignedInUser() async {
   final user = FirebaseAuth.instance.currentUser;
   if (user == null) return;
 
   final messaging = FirebaseMessaging.instance;
 
-  // Save current token
   final token = await messaging.getToken();
   if (token != null) {
-    await FirebaseFirestore.instance
-        .collection('owners')
-        .doc(user.uid)
-        .set({'fcmToken': token}, SetOptions(merge: true));
+    await _persistFcmToken(user, token);
   }
 
-  // Keep it updated
-  messaging.onTokenRefresh.listen((t) async {
-    await FirebaseFirestore.instance
-        .collection('owners')
-        .doc(user.uid)
-        .set({'fcmToken': t}, SetOptions(merge: true));
+  _fcmTokenRefreshSub ??= messaging.onTokenRefresh.listen((token) async {
+    final currentUser = FirebaseAuth.instance.currentUser;
+    if (currentUser == null) return;
+    await _persistFcmToken(currentUser, token);
   });
 }
 
@@ -314,10 +316,6 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
 
           if (snapshot.hasData) {
             final user = snapshot.data!;
-            if (!user.emailVerified) {
-              return WaitForEmailVerificationScreen(user: user);
-            }
-
             return FutureBuilder<DocumentSnapshot>(
               future: FirebaseFirestore.instance
                   .collection('owners')
@@ -382,6 +380,19 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
           return DmChatScreen(
             otherUserId: otherUserId,
             otherDisplayName: otherDisplayName,
+          );
+        },
+        '/group-chat': (context) {
+          final args = ModalRoute.of(context)?.settings.arguments
+              as Map<String, dynamic>?;
+          final groupId = (args?['groupId'] ?? '').toString();
+          final groupName = (args?['groupName'] ?? 'Group').toString();
+          final currentUserName =
+              (FirebaseAuth.instance.currentUser?.displayName ?? '').trim();
+          return GroupChatScreen(
+            groupId: groupId,
+            groupName: groupName,
+            currentUserName: currentUserName,
           );
         },
       },
@@ -579,13 +590,11 @@ class ModernLoginScreen extends StatefulWidget {
 class _ModernLoginScreenState extends State<ModernLoginScreen> {
   final TextEditingController emailController = TextEditingController();
   final TextEditingController passwordController = TextEditingController();
-  StreamSubscription<String>? _tokenSub;
 
   bool _isLoading = false;
 
   @override
   void dispose() {
-    _tokenSub?.cancel();
     emailController.dispose();
     passwordController.dispose();
     super.dispose();
@@ -633,20 +642,12 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
       final settings = await messaging.getNotificationSettings();
       if (settings.authorizationStatus == AuthorizationStatus.authorized ||
           settings.authorizationStatus == AuthorizationStatus.provisional) {
-        _tokenSub = messaging.onTokenRefresh.listen((token) async {
-          await FirebaseFirestore.instance
-              .collection('owners')
-              .doc(user.uid)
-              .set({'fcmToken': token}, SetOptions(merge: true));
-        });
-
         final token = await messaging.getToken();
         if (token != null) {
-          await FirebaseFirestore.instance
-              .collection('owners')
-              .doc(user.uid)
-              .set({'fcmToken': token}, SetOptions(merge: true));
+          await _persistFcmToken(user, token);
         }
+
+        await _ensureFcmTokenPersistenceForSignedInUser();
       }
     } catch (_) {}
   }
@@ -665,16 +666,6 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
       if (user == null) return null;
 
       await user.reload();
-      if (!user.emailVerified) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-                content: Text("Please verify your email before logging in.")),
-          );
-        }
-        await auth.signOut();
-        return null;
-      }
 
       final doc = await FirebaseFirestore.instance
           .collection('owners')
