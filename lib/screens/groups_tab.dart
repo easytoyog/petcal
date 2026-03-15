@@ -432,9 +432,7 @@ class _GroupsTabState extends State<GroupsTab>
     final spotCtrl = TextEditingController();
 
     bool isPublic = false;
-    bool isSearching = false;
     bool isSaving = false;
-    PlaceResult? selectedPlace;
 
     final Map<String, TimeOfDay?> meetingTimes = {
       'Monday': null,
@@ -494,152 +492,13 @@ class _GroupsTabState extends State<GroupsTab>
                         const SizedBox(height: 24),
                         _sectionTitle('Frequent Meeting Spot'),
                         const SizedBox(height: 8),
-                        Row(
-                          children: [
-                            Expanded(
-                              child: TextField(
-                                controller: spotCtrl,
-                                decoration: _inputDecoration(
-                                  hint: 'e.g., Ellerslie Park',
-                                  icon: Icons.location_on,
-                                ),
-                              ),
-                            ),
-                            const SizedBox(width: 12),
-                            ElevatedButton(
-                              onPressed: () async {
-                                if (spotCtrl.text.trim().isEmpty) {
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    const SnackBar(
-                                      content: Text('Please enter a park name'),
-                                    ),
-                                  );
-                                  return;
-                                }
-
-                                if (_userLocation == null) {
-                                  await _fetchUserLocation();
-                                }
-
-                                if (_userLocation == null) {
-                                  if (mounted) {
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      const SnackBar(
-                                        content: Text(
-                                          'Your location is not available yet',
-                                        ),
-                                      ),
-                                    );
-                                  }
-                                  return;
-                                }
-
-                                setLocalState(() => isSearching = true);
-
-                                final results = await _searchPlaces(
-                                  spotCtrl.text.trim(),
-                                  _userLocation!,
-                                );
-
-                                if (!mounted) return;
-                                setLocalState(() => isSearching = false);
-
-                                if (results.isEmpty) {
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    const SnackBar(
-                                      content: Text('No matching parks found'),
-                                    ),
-                                  );
-                                  return;
-                                }
-
-                                final pickedPlace =
-                                    await _showPlaceResultsModal(results);
-
-                                if (pickedPlace != null) {
-                                  setLocalState(() {
-                                    selectedPlace = pickedPlace;
-                                    spotCtrl.text = pickedPlace.name;
-                                  });
-                                }
-                              },
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: const Color(0xFF567D46),
-                                foregroundColor: Colors.white,
-                                elevation: 0,
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 18,
-                                  vertical: 16,
-                                ),
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(14),
-                                ),
-                              ),
-                              child: isSearching
-                                  ? const SizedBox(
-                                      width: 20,
-                                      height: 20,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2,
-                                        valueColor:
-                                            AlwaysStoppedAnimation<Color>(
-                                          Colors.white,
-                                        ),
-                                      ),
-                                    )
-                                  : const Text(
-                                      'Search',
-                                      style: TextStyle(
-                                        fontWeight: FontWeight.w700,
-                                      ),
-                                    ),
-                            ),
-                          ],
-                        ),
-                        if (selectedPlace != null) ...[
-                          const SizedBox(height: 12),
-                          Container(
-                            padding: const EdgeInsets.all(14),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFFEAF6E7),
-                              borderRadius: BorderRadius.circular(14),
-                              border: Border.all(
-                                color: const Color(0xFF567D46),
-                              ),
-                            ),
-                            child: Row(
-                              children: [
-                                const Icon(
-                                  Icons.check_circle,
-                                  color: Color(0xFF567D46),
-                                ),
-                                const SizedBox(width: 10),
-                                Expanded(
-                                  child: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      Text(
-                                        selectedPlace!.name,
-                                        style: const TextStyle(
-                                          fontWeight: FontWeight.w700,
-                                          color: Color(0xFF567D46),
-                                        ),
-                                      ),
-                                      Text(
-                                        '${selectedPlace!.latitude.toStringAsFixed(4)}, ${selectedPlace!.longitude.toStringAsFixed(4)}',
-                                        style: TextStyle(
-                                          fontSize: 12,
-                                          color: Colors.grey[700],
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ],
-                            ),
+                        TextField(
+                          controller: spotCtrl,
+                          decoration: _inputDecoration(
+                            hint: 'e.g., Ellerslie Park',
+                            icon: Icons.location_on,
                           ),
-                        ],
+                        ),
                         const SizedBox(height: 24),
                         _sectionTitle('Meeting Schedule'),
                         const SizedBox(height: 8),
@@ -774,7 +633,7 @@ class _GroupsTabState extends State<GroupsTab>
                                       isPublic: isPublic,
                                       frequentTime: frequentTime,
                                       frequentPlaceName: spotCtrl.text.trim(),
-                                      selectedPlace: selectedPlace,
+                                      selectedPlace: null,
                                     );
 
                                     if (!mounted) return;
@@ -2079,7 +1938,6 @@ class _GroupDetailsPageState extends State<GroupDetailsPage> {
     final spotCtrl = TextEditingController(text: group.frequentPlaceName ?? '');
 
     bool isPublic = group.isPublic;
-    bool isSearching = false;
     bool isSaving = false;
 
     TimeOfDay? selectedTime = group.frequentTime;
@@ -2135,156 +1993,20 @@ class _GroupDetailsPageState extends State<GroupDetailsPage> {
                         const SizedBox(height: 24),
                         _sectionTitle('Frequent Meeting Spot'),
                         const SizedBox(height: 8),
-                        Row(
-                          children: [
-                            Expanded(
-                              child: TextField(
-                                controller: spotCtrl,
-                                decoration: _inputDecoration(
-                                  hint: 'e.g., Ellerslie Park',
-                                  icon: Icons.location_on,
-                                ),
-                              ),
-                            ),
-                            const SizedBox(width: 12),
-                            ElevatedButton(
-                              onPressed: () async {
-                                if (spotCtrl.text.trim().isEmpty) {
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    const SnackBar(
-                                      content: Text('Please enter a park name'),
-                                    ),
-                                  );
-                                  return;
-                                }
-
-                                if (_userLocation == null) {
-                                  await _fetchUserLocation();
-                                }
-
-                                if (_userLocation == null) {
-                                  if (mounted) {
-                                    ScaffoldMessenger.of(context).showSnackBar(
-                                      const SnackBar(
-                                        content: Text(
-                                          'Your location is not available yet',
-                                        ),
-                                      ),
-                                    );
-                                  }
-                                  return;
-                                }
-
-                                setLocalState(() => isSearching = true);
-
-                                final results = await _searchPlaces(
-                                  spotCtrl.text.trim(),
-                                  _userLocation!,
-                                );
-
-                                if (!mounted) return;
-                                setLocalState(() => isSearching = false);
-
-                                if (results.isEmpty) {
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    const SnackBar(
-                                      content: Text('No matching parks found'),
-                                    ),
-                                  );
-                                  return;
-                                }
-
-                                final pickedPlace =
-                                    await _showPlaceResultsModal(results);
-
-                                if (pickedPlace != null) {
-                                  setLocalState(() {
-                                    selectedPlaceId = pickedPlace.id;
-                                    selectedLatitude = pickedPlace.latitude;
-                                    selectedLongitude = pickedPlace.longitude;
-                                    spotCtrl.text = pickedPlace.name;
-                                  });
-                                }
-                              },
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: const Color(0xFF567D46),
-                                foregroundColor: Colors.white,
-                                elevation: 0,
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 18,
-                                  vertical: 16,
-                                ),
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(14),
-                                ),
-                              ),
-                              child: isSearching
-                                  ? const SizedBox(
-                                      width: 20,
-                                      height: 20,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2,
-                                        valueColor:
-                                            AlwaysStoppedAnimation<Color>(
-                                          Colors.white,
-                                        ),
-                                      ),
-                                    )
-                                  : const Text(
-                                      'Search',
-                                      style: TextStyle(
-                                        fontWeight: FontWeight.w700,
-                                      ),
-                                    ),
-                            ),
-                          ],
-                        ),
-                        if (spotCtrl.text.trim().isNotEmpty) ...[
-                          const SizedBox(height: 12),
-                          Container(
-                            padding: const EdgeInsets.all(14),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFFEAF6E7),
-                              borderRadius: BorderRadius.circular(14),
-                              border: Border.all(
-                                color: const Color(0xFF567D46),
-                              ),
-                            ),
-                            child: Row(
-                              children: [
-                                const Icon(
-                                  Icons.check_circle,
-                                  color: Color(0xFF567D46),
-                                ),
-                                const SizedBox(width: 10),
-                                Expanded(
-                                  child: Column(
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.start,
-                                    children: [
-                                      Text(
-                                        spotCtrl.text.trim(),
-                                        style: const TextStyle(
-                                          fontWeight: FontWeight.w700,
-                                          color: Color(0xFF567D46),
-                                        ),
-                                      ),
-                                      if (selectedLatitude != null &&
-                                          selectedLongitude != null)
-                                        Text(
-                                          '${selectedLatitude!.toStringAsFixed(4)}, ${selectedLongitude!.toStringAsFixed(4)}',
-                                          style: TextStyle(
-                                            fontSize: 12,
-                                            color: Colors.grey[700],
-                                          ),
-                                        ),
-                                    ],
-                                  ),
-                                ),
-                              ],
-                            ),
+                        TextField(
+                          controller: spotCtrl,
+                          onChanged: (_) {
+                            setLocalState(() {
+                              selectedPlaceId = '';
+                              selectedLatitude = null;
+                              selectedLongitude = null;
+                            });
+                          },
+                          decoration: _inputDecoration(
+                            hint: 'e.g., Ellerslie Park',
+                            icon: Icons.location_on,
                           ),
-                        ],
+                        ),
                         const SizedBox(height: 24),
                         _sectionTitle('Meet Up Time'),
                         const SizedBox(height: 8),
