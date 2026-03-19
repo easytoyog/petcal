@@ -9,7 +9,7 @@ class PetDocumentRecord {
   final String fileName;
   final String storagePath;
   final String? contentType;
-  final DateTime expiryDate;
+  final DateTime? expiryDate;
   final DateTime? uploadedAt;
 
   const PetDocumentRecord({
@@ -19,7 +19,7 @@ class PetDocumentRecord {
     required this.type,
     required this.fileName,
     required this.storagePath,
-    required this.expiryDate,
+    this.expiryDate,
     this.customName,
     this.contentType,
     this.uploadedAt,
@@ -28,7 +28,7 @@ class PetDocumentRecord {
   factory PetDocumentRecord.fromFirestore(DocumentSnapshot doc) {
     final data = (doc.data() as Map<String, dynamic>? ?? {});
 
-    DateTime expiryDate = DateTime.now();
+    DateTime? expiryDate;
     final rawExpiry = data['expiryDate'];
     if (rawExpiry is Timestamp) {
       expiryDate = rawExpiry.toDate();
@@ -65,7 +65,7 @@ class PetDocumentRecord {
       'storagePath': storagePath,
       if (contentType != null && contentType!.trim().isNotEmpty)
         'contentType': contentType!.trim(),
-      'expiryDate': Timestamp.fromDate(expiryDate),
+      if (expiryDate != null) 'expiryDate': Timestamp.fromDate(expiryDate!),
       'uploadedAt': uploadedAt != null
           ? Timestamp.fromDate(uploadedAt!)
           : FieldValue.serverTimestamp(),

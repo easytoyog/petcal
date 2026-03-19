@@ -13,9 +13,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:inthepark/widgets/level_system.dart';
+import 'package:intl/intl.dart';
 import 'package:location/location.dart' as loc;
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:share_plus/share_plus.dart';
 
 import 'package:inthepark/features/celebration_dialog.dart';
 import 'package:inthepark/features/walk_manager.dart';
@@ -33,6 +35,82 @@ class _FilterOption {
   final String label; // short label to show
   final IconData icon;
   const _FilterOption(this.value, this.label, this.icon);
+}
+
+class _CautionComposerResult {
+  final String message;
+  final bool shareOnMap;
+
+  const _CautionComposerResult({
+    required this.message,
+    required this.shareOnMap,
+  });
+}
+
+class _SharedMapCaution {
+  final String id;
+  final String createdBy;
+  final String message;
+  final LatLng position;
+  final DateTime createdAt;
+  final DateTime? lastStillThereAt;
+  final List<String> stillThereBy;
+  final List<String> noLongerThereBy;
+
+  const _SharedMapCaution({
+    required this.id,
+    required this.createdBy,
+    required this.message,
+    required this.position,
+    required this.createdAt,
+    required this.lastStillThereAt,
+    required this.stillThereBy,
+    required this.noLongerThereBy,
+  });
+
+  factory _SharedMapCaution.fromSnapshot(
+    DocumentSnapshot<Map<String, dynamic>> doc,
+  ) {
+    final data = doc.data() ?? const <String, dynamic>{};
+    final position = data['position'];
+    final createdAt = data['createdAt'];
+    final lastStillThereAt = data['lastStillThereAt'];
+
+    return _SharedMapCaution(
+      id: doc.id,
+      createdBy: (data['createdBy'] ?? '') as String,
+      message: ((data['message'] ?? '') as String).trim(),
+      position: position is GeoPoint
+          ? LatLng(position.latitude, position.longitude)
+          : const LatLng(0, 0),
+      createdAt: createdAt is Timestamp ? createdAt.toDate() : DateTime.now(),
+      lastStillThereAt:
+          lastStillThereAt is Timestamp ? lastStillThereAt.toDate() : null,
+      stillThereBy: ((data['stillThereBy'] as List?) ?? const [])
+          .whereType<String>()
+          .toList(growable: false),
+      noLongerThereBy: ((data['noLongerThereBy'] as List?) ?? const [])
+          .whereType<String>()
+          .toList(growable: false),
+    );
+  }
+
+  DateTime get activityAt => lastStillThereAt ?? createdAt;
+  bool get isDismissedByReports => noLongerThereBy.length >= 3;
+}
+
+class _MonthWalkStats {
+  final int walksCount;
+  final int totalSteps;
+  final double totalMeters;
+  final Duration totalElapsed;
+
+  const _MonthWalkStats({
+    required this.walksCount,
+    required this.totalSteps,
+    required this.totalMeters,
+    required this.totalElapsed,
+  });
 }
 
 class MapTab extends StatefulWidget {
@@ -90,10 +168,12 @@ class _MapTabState extends State<MapTab>
   final Map<String, List<String>> _parkServicesById = {}; // cache per parkId
   List<Park> _allParks = []; // current parks list
   static const String _dogParkFilterValue = 'Off-leash Dog Park';
+  static const double _sharedCautionNearbyRadiusKm = 0.65;
 
   bool _celebratePending = false;
   int? _pcSteps;
   double? _pcMeters;
+  int? _pcElapsedSec;
   int? _pcStreakCur;
   int? _pcStreakLongest;
   bool _pcIsNewRecord = false;
@@ -747,13 +827,13 @@ class _MapTabState extends State<MapTab>
       Icons.park_rounded,
       fg: Colors.white,
       bg: const Color(0xFF567D46),
-      size: 72,
+      size: 92,
     );
     _dogParkMarkerIcon ??= await _bitmapFromIcon(
       Icons.pets_rounded,
       fg: Colors.white,
       bg: const Color(0xFF8B5E3C),
-      size: 72,
+      size: 92,
     );
   }
 
@@ -807,6 +887,121 @@ class _MapTabState extends State<MapTab>
     return (s >= 3600) ? '$hh:$mm:$ss' : '$mm:$ss';
   }
 
+  String _formatDurationLabel(Duration duration) {
+    final totalMinutes = duration.inMinutes;
+    if (totalMinutes < 1) {
+      return '${math.max(1, duration.inSeconds)} sec';
+    }
+    if (totalMinutes < 60) {
+      return '$totalMinutes min';
+    }
+
+    final hours = duration.inHours;
+    final minutes = duration.inMinutes.remainder(60);
+    if (minutes == 0) return '$hours hr';
+    return '$hours hr $minutes min';
+  }
+
+  Future<void> _shareWalkSummary({
+    required int steps,
+    required double meters,
+    required Duration elapsed,
+    int? streakCurrent,
+  }) async {
+    final km = (meters / 1000).toStringAsFixed(meters >= 100 ? 1 : 2);
+    final lines = <String>[
+      'My dog and I just finished a walk on InThePark.',
+      'Walk time: ${_formatDurationLabel(elapsed)}',
+      'Steps: $steps',
+      'Distance: $km km',
+      if (streakCurrent != null)
+        'Streak: $streakCurrent day${streakCurrent == 1 ? '' : 's'}',
+    ];
+    await SharePlus.instance.share(
+      ShareParams(text: lines.join('\n')),
+    );
+  }
+
+  Future<_MonthWalkStats> _loadCurrentMonthWalkStats({
+    required int fallbackSteps,
+    required double fallbackMeters,
+    required Duration fallbackElapsed,
+  }) async {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) {
+      return _MonthWalkStats(
+        walksCount: 1,
+        totalSteps: fallbackSteps,
+        totalMeters: fallbackMeters,
+        totalElapsed: fallbackElapsed,
+      );
+    }
+
+    final now = DateTime.now();
+    final monthStart = DateTime(now.year, now.month, 1);
+    final nextMonthStart = (now.month == 12)
+        ? DateTime(now.year + 1, 1, 1)
+        : DateTime(now.year, now.month + 1, 1);
+
+    try {
+      final snap = await FirebaseFirestore.instance
+          .collection('owners')
+          .doc(uid)
+          .collection('walks')
+          .where(
+            'startedAt',
+            isGreaterThanOrEqualTo: Timestamp.fromDate(monthStart),
+          )
+          .where(
+            'startedAt',
+            isLessThan: Timestamp.fromDate(nextMonthStart),
+          )
+          .get();
+
+      if (snap.docs.isEmpty) {
+        return _MonthWalkStats(
+          walksCount: 1,
+          totalSteps: fallbackSteps,
+          totalMeters: fallbackMeters,
+          totalElapsed: fallbackElapsed,
+        );
+      }
+
+      var totalSteps = 0;
+      var totalMeters = 0.0;
+      var totalElapsedSec = 0;
+
+      for (final doc in snap.docs) {
+        final data = doc.data();
+        totalSteps += (data['steps'] as num?)?.toInt() ?? 0;
+        totalMeters += (data['distanceMeters'] as num?)?.toDouble() ?? 0.0;
+
+        final storedDuration = (data['durationSec'] as num?)?.toInt();
+        final startedAt = (data['startedAt'] as Timestamp?)?.toDate();
+        final endedAt = (data['endedAt'] as Timestamp?)?.toDate();
+        totalElapsedSec += storedDuration ??
+            ((startedAt != null && endedAt != null)
+                ? endedAt.difference(startedAt).inSeconds
+                : 0);
+      }
+
+      return _MonthWalkStats(
+        walksCount: snap.docs.length,
+        totalSteps: totalSteps,
+        totalMeters: totalMeters,
+        totalElapsed: Duration(seconds: totalElapsedSec),
+      );
+    } catch (e) {
+      debugPrint('Failed to load current month walk stats: $e');
+      return _MonthWalkStats(
+        walksCount: 1,
+        totalSteps: fallbackSteps,
+        totalMeters: fallbackMeters,
+        totalElapsed: fallbackElapsed,
+      );
+    }
+  }
+
   @override
   bool get wantKeepAlive => true;
 
@@ -820,6 +1015,12 @@ class _MapTabState extends State<MapTab>
   final Map<String, int> _noteIndexById = {}; // id -> index in _noteRecords
   final List<Map<String, dynamic>> _noteRecords = [];
   int _noteSeq = 0;
+
+  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
+  final Map<String, _SharedMapCaution> _sharedCautionsById = {};
+  final Map<String, Marker> _sharedCautionMarkers = {};
+  StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _sharedCautionsSub;
+  static const Duration _sharedCautionTtl = Duration(days: 5);
 
   // When viewing a past walk
   Set<Polyline> _historicPolylines = {};
@@ -844,7 +1045,11 @@ class _MapTabState extends State<MapTab>
     _walkListener = () async {
       debugPrint('🔔 Walk listener fired: _walk.isActive=${_walk.isActive}');
       final changed = _syncPolylineIfNeeded();
-      if (changed && mounted) setState(() {});
+      final walkStateChanged = _wasActive != _walk.isActive;
+      if (walkStateChanged) {
+        _recomputeVisibleMarkers();
+      }
+      if ((changed || walkStateChanged) && mounted) setState(() {});
       _elapsedText.value = _formatElapsed();
 
       // Only auto-finish if we didn't just manually stop
@@ -882,7 +1087,10 @@ class _MapTabState extends State<MapTab>
 
     // Prewarm icons (best-effort)
     // ignore: discarded_futures
-    _ensureNoteIcons();
+    _ensureNoteIcons().then((_) {
+      if (!mounted) return;
+      _listenToSharedCautions();
+    });
     // ignore: discarded_futures
     _ensureParkMarkerIcons();
   }
@@ -903,6 +1111,340 @@ class _MapTabState extends State<MapTab>
     return cached;
   }
 
+  Future<_CautionComposerResult?> _showCautionComposer() async {
+    return showDialog<_CautionComposerResult>(
+      context: context,
+      barrierDismissible: true,
+      builder: (ctx) {
+        final ctrl = TextEditingController();
+        bool shareOnMap = false;
+        return StatefulBuilder(
+          builder: (dialogContext, setDialogState) {
+            return AlertDialog(
+              title: const Text('Add Caution'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  TextField(
+                    controller: ctrl,
+                    autofocus: true,
+                    maxLines: 2,
+                    decoration: const InputDecoration(
+                      hintText: 'What should others watch out for?',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  CheckboxListTile(
+                    value: shareOnMap,
+                    contentPadding: EdgeInsets.zero,
+                    controlAffinity: ListTileControlAffinity.leading,
+                    title: const Text('Post on shared map'),
+                    subtitle: const Text(
+                      'Other walkers can see it and mark whether it is still there.',
+                    ),
+                    onChanged: (value) {
+                      setDialogState(() => shareOnMap = value ?? false);
+                    },
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(ctx).pop(null),
+                  child: const Text('Cancel'),
+                ),
+                ElevatedButton(
+                  onPressed: () {
+                    Navigator.of(ctx).pop(
+                      _CautionComposerResult(
+                        message: ctrl.text.trim(),
+                        shareOnMap: shareOnMap,
+                      ),
+                    );
+                  },
+                  child: const Text('Save'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  bool _isSharedCautionVisible(_SharedMapCaution caution) {
+    if (caution.position.latitude == 0 && caution.position.longitude == 0) {
+      return false;
+    }
+    if (caution.isDismissedByReports) return false;
+    return DateTime.now().difference(caution.activityAt) <= _sharedCautionTtl;
+  }
+
+  LatLng? _sharedCautionAnchor() {
+    if (_walk.points.isNotEmpty) return _walk.points.last;
+    if (_finalPosition != null) return _finalPosition;
+    if (_currentMapCenter != _fallbackMapCenter) return _currentMapCenter;
+    return null;
+  }
+
+  bool _isSharedCautionNearby(_SharedMapCaution caution) {
+    final anchor = _sharedCautionAnchor();
+    if (anchor == null) return false;
+    return _metersBetween(anchor, caution.position) <=
+        (_sharedCautionNearbyRadiusKm * 1000);
+  }
+
+  String _formatSharedCautionDate(DateTime? date) {
+    if (date == null) return 'Not yet confirmed';
+    return DateFormat('MMM d, yyyy • h:mm a').format(date);
+  }
+
+  Future<void> _listenToSharedCautions() async {
+    await _sharedCautionsSub?.cancel();
+    _sharedCautionsSub = _firestore
+        .collection('map_cautions')
+        .orderBy('createdAt', descending: true)
+        .limit(100)
+        .snapshots()
+        .listen((snapshot) {
+      final nextCautions = <String, _SharedMapCaution>{};
+      final nextMarkers = <String, Marker>{};
+
+      for (final doc in snapshot.docs) {
+        final caution = _SharedMapCaution.fromSnapshot(doc);
+        if (!_isSharedCautionVisible(caution)) continue;
+        nextCautions[caution.id] = caution;
+        nextMarkers[caution.id] = Marker(
+          markerId: MarkerId('shared_caution_${caution.id}'),
+          position: caution.position,
+          icon: _cautionIcon ?? BitmapDescriptor.defaultMarker,
+          infoWindow: const InfoWindow(
+            title: 'Shared Caution',
+            snippet: 'Tap for details',
+          ),
+          onTap: () => _openSharedCautionSheet(caution.id),
+        );
+      }
+
+      if (!mounted) return;
+      setState(() {
+        _sharedCautionsById
+          ..clear()
+          ..addAll(nextCautions);
+        _sharedCautionMarkers
+          ..clear()
+          ..addAll(nextMarkers);
+        _recomputeVisibleMarkers();
+      });
+    });
+  }
+
+  Future<String?> _createSharedCaution({
+    required String message,
+    required LatLng position,
+  }) async {
+    final currentUid = FirebaseAuth.instance.currentUser?.uid;
+    if (currentUid == null) return null;
+
+    final ref = _firestore.collection('map_cautions').doc();
+    await ref.set({
+      'createdBy': currentUid,
+      'message': message,
+      'position': GeoPoint(position.latitude, position.longitude),
+      'createdAt': FieldValue.serverTimestamp(),
+      'lastStillThereAt': FieldValue.serverTimestamp(),
+      'stillThereBy': [currentUid],
+      'noLongerThereBy': <String>[],
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+    return ref.id;
+  }
+
+  Future<void> _setSharedCautionVote(
+    String cautionId, {
+    required bool stillThere,
+  }) async {
+    final currentUid = FirebaseAuth.instance.currentUser?.uid;
+    if (currentUid == null) return;
+
+    await _firestore.collection('map_cautions').doc(cautionId).update({
+      'stillThereBy': stillThere
+          ? FieldValue.arrayUnion([currentUid])
+          : FieldValue.arrayRemove([currentUid]),
+      'noLongerThereBy': stillThere
+          ? FieldValue.arrayRemove([currentUid])
+          : FieldValue.arrayUnion([currentUid]),
+      'updatedAt': FieldValue.serverTimestamp(),
+      if (stillThere) 'lastStillThereAt': FieldValue.serverTimestamp(),
+    });
+  }
+
+  Future<void> _removeSharedCaution(String cautionId) async {
+    await _firestore.collection('map_cautions').doc(cautionId).delete();
+  }
+
+  Future<void> _openSharedCautionSheet(String cautionId) async {
+    final caution = _sharedCautionsById[cautionId];
+    if (caution == null || !mounted) return;
+
+    final currentUid = FirebaseAuth.instance.currentUser?.uid;
+    final canRemove = currentUid != null && caution.createdBy == currentUid;
+
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (sheetContext) {
+        return SafeArea(
+          child: Container(
+            margin: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+            padding: const EdgeInsets.fromLTRB(18, 14, 18, 18),
+            decoration: const BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Center(
+                  child: Container(
+                    width: 42,
+                    height: 5,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFD8E3D1),
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                const Text(
+                  'Shared Caution',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.w800),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  caution.message,
+                  style: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 14),
+                Text(
+                  'Posted: ${_formatSharedCautionDate(caution.createdAt)}',
+                  style: TextStyle(color: Colors.grey[700]),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  'Last “still there”: ${_formatSharedCautionDate(caution.lastStillThereAt)}',
+                  style: TextStyle(color: Colors.grey[700]),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  'No longer there reports: ${caution.noLongerThereBy.length}/3',
+                  style: TextStyle(color: Colors.grey[700]),
+                ),
+                const SizedBox(height: 18),
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: () async {
+                          Navigator.of(sheetContext).pop();
+                          try {
+                            await _setSharedCautionVote(
+                              cautionId,
+                              stillThere: true,
+                            );
+                            if (!mounted) return;
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text('Marked as still there.'),
+                              ),
+                            );
+                          } catch (e) {
+                            if (!mounted) return;
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text('Could not update marker: $e'),
+                              ),
+                            );
+                          }
+                        },
+                        icon: const Icon(Icons.check_circle_outline),
+                        label: const Text('Still there'),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: OutlinedButton.icon(
+                        onPressed: () async {
+                          Navigator.of(sheetContext).pop();
+                          try {
+                            await _setSharedCautionVote(
+                              cautionId,
+                              stillThere: false,
+                            );
+                            if (!mounted) return;
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text('Marked as no longer there.'),
+                              ),
+                            );
+                          } catch (e) {
+                            if (!mounted) return;
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text('Could not update marker: $e'),
+                              ),
+                            );
+                          }
+                        },
+                        icon: const Icon(Icons.remove_circle_outline),
+                        label: const Text('No longer there'),
+                      ),
+                    ),
+                  ],
+                ),
+                if (canRemove) ...[
+                  const SizedBox(height: 12),
+                  SizedBox(
+                    width: double.infinity,
+                    child: TextButton.icon(
+                      onPressed: () async {
+                        Navigator.of(sheetContext).pop();
+                        try {
+                          await _removeSharedCaution(cautionId);
+                          if (!mounted) return;
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text('Shared caution removed.'),
+                            ),
+                          );
+                        } catch (e) {
+                          if (!mounted) return;
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text('Could not remove marker: $e'),
+                            ),
+                          );
+                        }
+                      },
+                      icon: const Icon(Icons.delete_outline),
+                      label: const Text('Remove marker'),
+                      style: TextButton.styleFrom(foregroundColor: Colors.red),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   Future<void> _addWalkNote(String type) async {
     if (!_walk.isActive) {
       if (!mounted) return;
@@ -915,39 +1457,82 @@ class _MapTabState extends State<MapTab>
     await _ensureNoteIcons();
 
     String? noteMsg;
+    String? sharedCautionId;
     if (type == 'caution') {
-      final input = await showDialog<String>(
-        context: context,
-        barrierDismissible: true,
-        builder: (ctx) {
-          final ctrl = TextEditingController();
-          return AlertDialog(
-            title: const Text('Add Caution'),
-            content: TextField(
-              controller: ctrl,
-              autofocus: true,
-              maxLines: 2,
-              decoration: const InputDecoration(
-                hintText: 'What should others watch out for?',
-                border: OutlineInputBorder(),
-              ),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(ctx).pop(null),
-                child: const Text('Cancel'),
-              ),
-              ElevatedButton(
-                onPressed: () => Navigator.of(ctx).pop(ctrl.text),
-                child: const Text('Save'),
-              ),
-            ],
-          );
-        },
-      );
+      final input = await _showCautionComposer();
       if (input == null) return;
-      noteMsg = input.trim();
+      noteMsg = input.message.trim();
       if (noteMsg.isEmpty) return;
+
+      final here = await _currentUserLatLng();
+      if (here == null) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text("Couldn't get your location.")),
+        );
+        return;
+      }
+
+      if (input.shareOnMap) {
+        try {
+          sharedCautionId = await _createSharedCaution(
+            message: noteMsg,
+            position: here,
+          );
+        } catch (e) {
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Could not share caution on map: $e')),
+          );
+        }
+      }
+
+      late final BitmapDescriptor iconBitmap;
+      late final String title;
+      switch (type) {
+        case 'pee':
+          iconBitmap = _peeIcon!;
+          title = 'Pee';
+        case 'poop':
+          iconBitmap = _poopIcon!;
+          title = 'Poop';
+        default:
+          iconBitmap = _cautionIcon!;
+          title = 'Caution';
+      }
+
+      final id = 'note_${_noteSeq++}';
+      final m = Marker(
+        markerId: MarkerId(id),
+        position: here,
+        draggable: true,
+        icon: iconBitmap,
+        infoWindow: InfoWindow(title: title, snippet: noteMsg),
+        onDragEnd: (pos) => _updateNotePosition(id, pos),
+      );
+
+      setState(() {
+        _noteMeta[id] = {
+          'type': type,
+          'message': noteMsg,
+          'sharedCautionId': sharedCautionId,
+        };
+        _noteMarkers[id] = m;
+        _recomputeVisibleMarkers();
+      });
+
+      final recIndex = _noteRecords.length;
+      _noteIndexById[id] = recIndex;
+      _noteRecords.add({
+        'id': id,
+        'type': type,
+        'message': noteMsg,
+        'lat': here.latitude,
+        'lng': here.longitude,
+        'createdAt': FieldValue.serverTimestamp(),
+        if (sharedCautionId != null) 'sharedCautionId': sharedCautionId,
+      });
+      return;
     }
 
     final here = await _currentUserLatLng();
@@ -1025,7 +1610,20 @@ class _MapTabState extends State<MapTab>
       _finalPosition = savedLocation;
       _currentMapCenter = savedMapCenter ?? savedLocation ?? _fallbackMapCenter;
       _isMapReady = true;
+      _recomputeVisibleMarkers();
     });
+  }
+
+  Future<LatLng?> _bestKnownUserLocation() async {
+    if (_walk.points.isNotEmpty) return _walk.points.last;
+    if (_finalPosition != null) return _finalPosition;
+
+    final saved = await _locationService.getSavedUserLocation(
+      maxAgeSeconds: 60 * 60 * 12,
+    );
+    if (saved != null) return saved;
+
+    return null;
   }
 
   @override
@@ -1055,6 +1653,7 @@ class _MapTabState extends State<MapTab>
     _mapController?.dispose();
 
     _walk.removeListener(_walkListener);
+    _sharedCautionsSub?.cancel();
 
     super.dispose();
   }
@@ -1075,12 +1674,14 @@ class _MapTabState extends State<MapTab>
         _celebratePending = false;
         final s = _pcSteps ?? 0;
         final m = _pcMeters ?? 0.0;
+        final e = Duration(seconds: _pcElapsedSec ?? 0);
         final sc = _pcStreakCur;
         final sl = _pcStreakLongest;
         final nr = _pcIsNewRecord;
         // clear payload
         _pcSteps = null;
         _pcMeters = null;
+        _pcElapsedSec = null;
         _pcStreakCur = null;
         _pcStreakLongest = null;
         _pcIsNewRecord = false;
@@ -1089,6 +1690,7 @@ class _MapTabState extends State<MapTab>
           _showCelebrationDialog(
             steps: s,
             meters: m,
+            elapsed: e,
             streakCurrent: sc,
             streakLongest: sl,
             streakIsNewRecord: nr,
@@ -1103,14 +1705,19 @@ class _MapTabState extends State<MapTab>
     _resumeRefreshing = true;
 
     // 1) Immediately restore camera to last known (no awaits blocking UI)
-    final pos = _finalPosition ?? _currentMapCenter;
+    final knownUser = await _bestKnownUserLocation();
+    final pos = knownUser ?? _currentMapCenter;
+    if (knownUser != null) {
+      _finalPosition = knownUser;
+      _currentMapCenter = knownUser;
+    }
     // fire-and-forget; the map is already on screen
     // ignore: discarded_futures
     _moveCameraTo(pos, zoom: 17, instant: true);
 
     // 2) Light background refresh: only reload parks if we actually moved or cache is stale
     try {
-      final saved = await _locationService.getSavedUserLocation();
+      final saved = knownUser ?? await _locationService.getSavedUserLocation();
       final movedFar =
           (saved != null) && _metersBetween(saved, _currentMapCenter) > 150;
       final stale =
@@ -1213,6 +1820,7 @@ class _MapTabState extends State<MapTab>
     bool savedSuccessfully = false;
     int finalSteps = 0;
     double finalMeters = 0;
+    Duration finalElapsed = Duration.zero;
 
     try {
       final saved = await _persistWalkSession();
@@ -1246,6 +1854,7 @@ class _MapTabState extends State<MapTab>
       // capture final walk stats BEFORE reset
       finalSteps = _walk.steps;
       finalMeters = _walk.meters;
+      finalElapsed = _walk.elapsed;
 
       streak = await _updateDailyStreak();
 
@@ -1288,6 +1897,7 @@ class _MapTabState extends State<MapTab>
 
     final steps_ = finalSteps;
     final meters_ = finalMeters;
+    final elapsed_ = finalElapsed;
     final streakCurrent_ = streak.current;
     final streakLongest_ = streak.longest;
     final streakIsNewRecord_ = streak.isNewRecord ?? false;
@@ -1302,6 +1912,7 @@ class _MapTabState extends State<MapTab>
       _celebratePending = true;
       _pcSteps = steps_;
       _pcMeters = meters_;
+      _pcElapsedSec = elapsed_.inSeconds;
       _pcStreakCur = streakCurrent_;
       _pcStreakLongest = streakLongest_;
       _pcIsNewRecord = streakIsNewRecord_;
@@ -1315,6 +1926,7 @@ class _MapTabState extends State<MapTab>
           previousStreak: prevBeforeLoss_!,
           steps: steps_,
           meters: meters_,
+          elapsed: elapsed_,
           streakCurrent: streakCurrent_,
           streakLongest: streakLongest_,
           streakIsNewRecord: streakIsNewRecord_,
@@ -1352,6 +1964,7 @@ class _MapTabState extends State<MapTab>
         _showCelebrationDialog(
           steps: steps_,
           meters: meters_,
+          elapsed: elapsed_,
           streakCurrent: streakCurrent_,
           streakLongest: streakLongest_,
           streakIsNewRecord: streakIsNewRecord_,
@@ -1671,6 +2284,8 @@ class _MapTabState extends State<MapTab>
               'type': rec['type'],
               'message': rec['message'],
               'position': GeoPoint(rec['lat'] as double, rec['lng'] as double),
+              if (rec['sharedCautionId'] != null)
+                'sharedCautionId': rec['sharedCautionId'],
               'createdAt': FieldValue.serverTimestamp(),
             },
             SetOptions(merge: true),
@@ -2134,6 +2749,14 @@ class _MapTabState extends State<MapTab>
     if (_isCentering) return;
     setState(() => _isCentering = true);
     try {
+      final knownUser = await _bestKnownUserLocation();
+      if (knownUser != null) {
+        _finalPosition = knownUser;
+        _currentMapCenter = knownUser;
+        // ignore: discarded_futures
+        _moveCameraTo(knownUser, zoom: 17);
+      }
+
       final hasPermission = await _ensureLocationPermission();
       if (!hasPermission) {
         if (!mounted) return;
@@ -2455,16 +3078,35 @@ class _MapTabState extends State<MapTab>
       if (!mounted) return;
       final stale = DateTime.now().difference(_lastCameraMove) >
           const Duration(seconds: 5);
-      if (stale && _finalPosition != null && _mapController != null) {
-        _moveCameraTo(_finalPosition!, zoom: 17);
-      }
+      if (!stale || _mapController == null) return;
+      // ignore: discarded_futures
+      _bestKnownUserLocation().then((knownUser) {
+        if (!mounted || knownUser == null || _mapController == null) return;
+        _finalPosition = knownUser;
+        _currentMapCenter = knownUser;
+        _moveCameraTo(knownUser, zoom: 17);
+      });
     });
   }
 
   // ---------- Precomputed visible sets ----------
   void _recomputeVisibleMarkers() {
+    final sharedIdsHiddenByLocalNotes = _noteMeta.values
+        .map((meta) => meta['sharedCautionId'])
+        .whereType<String>()
+        .toSet();
+    final sharedMarkers = _sharedCautionMarkers.entries
+        .where((entry) => !sharedIdsHiddenByLocalNotes.contains(entry.key))
+        .where((entry) {
+      final caution = _sharedCautionsById[entry.key];
+      return caution != null &&
+          _isSharedCautionVisible(caution) &&
+          _isSharedCautionNearby(caution);
+    }).map((entry) => entry.value);
+
     _visibleMarkers = {
       ..._markersMap.values,
+      ...sharedMarkers,
       ..._noteMarkers.values,
       ..._historicNoteMarkers.values,
     };
@@ -2880,6 +3522,7 @@ class _MapTabState extends State<MapTab>
   Future<void> _showCelebrationDialog({
     required int steps,
     required double meters,
+    required Duration elapsed,
     int? streakCurrent,
     int? streakLongest,
     bool streakIsNewRecord = false,
@@ -2912,7 +3555,18 @@ class _MapTabState extends State<MapTab>
       ));
 
       try {
-        await _adManager.show(onUnavailable: _adManager.preload);
+        await _adManager.show(
+          onClosed: () {
+            if (!mounted) return;
+            unawaited(_showPostAdSuccessMoment(
+              steps: steps,
+              meters: meters,
+              elapsed: elapsed,
+              streakCurrent: streakCurrent,
+            ));
+          },
+          onUnavailable: _adManager.preload,
+        );
       } finally {
         _hideAdLoaderOverlay();
         _adManager.preload();
@@ -2920,10 +3574,345 @@ class _MapTabState extends State<MapTab>
     });
   }
 
+  Future<void> _showPostAdSuccessMoment({
+    required int steps,
+    required double meters,
+    required Duration elapsed,
+    int? streakCurrent,
+  }) async {
+    if (!mounted) return;
+    final monthStats = await _loadCurrentMonthWalkStats(
+      fallbackSteps: steps,
+      fallbackMeters: meters,
+      fallbackElapsed: elapsed,
+    );
+    if (!mounted) return;
+
+    final monthKm = (monthStats.totalMeters / 1000)
+        .toStringAsFixed(monthStats.totalMeters >= 100000 ? 1 : 2);
+    final streakEnd = math.max(1, streakCurrent ?? 1);
+    final streakStart = math.max(0, streakEnd - 1);
+    final closeLabels = <String>[
+      'Let’s go!',
+      'Paws up!',
+      'Crushed it!',
+      'Heck yes!',
+      'Keep it rolling!',
+    ];
+    final closeLabel = closeLabels[math.Random().nextInt(closeLabels.length)];
+
+    await showGeneralDialog<void>(
+      context: context,
+      useRootNavigator: true,
+      barrierDismissible: true,
+      barrierLabel: 'Walk summary',
+      barrierColor: Colors.black.withValues(alpha: 0.22),
+      transitionDuration: const Duration(milliseconds: 280),
+      pageBuilder: (_, __, ___) => const SizedBox.shrink(),
+      transitionBuilder: (context, animation, _, __) {
+        final fade = CurvedAnimation(parent: animation, curve: Curves.easeOut);
+        final slide = Tween<Offset>(
+          begin: const Offset(0, 0.06),
+          end: Offset.zero,
+        ).animate(
+          CurvedAnimation(parent: animation, curve: Curves.easeOutCubic),
+        );
+
+        return FadeTransition(
+          opacity: fade,
+          child: SlideTransition(
+            position: slide,
+            child: Center(
+              child: Material(
+                color: Colors.transparent,
+                child: Container(
+                  margin: const EdgeInsets.symmetric(horizontal: 22),
+                  constraints: BoxConstraints(
+                    maxHeight: MediaQuery.of(context).size.height * 0.84,
+                  ),
+                  padding: const EdgeInsets.fromLTRB(22, 22, 22, 18),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(28),
+                    boxShadow: const [
+                      BoxShadow(
+                        color: Color(0x26000000),
+                        blurRadius: 28,
+                        offset: Offset(0, 14),
+                      ),
+                    ],
+                  ),
+                  child: SingleChildScrollView(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Container(
+                          width: 78,
+                          height: 78,
+                          decoration: const BoxDecoration(
+                            shape: BoxShape.circle,
+                            gradient: LinearGradient(
+                              colors: [Color(0xFFEAF4E5), Color(0xFFD8ECCC)],
+                              begin: Alignment.topLeft,
+                              end: Alignment.bottomRight,
+                            ),
+                          ),
+                          child: const Icon(
+                            Icons.local_fire_department_rounded,
+                            color: Color(0xFF567D46),
+                            size: 40,
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        const Text(
+                          'You and your pup crushed it',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            fontSize: 22,
+                            fontWeight: FontWeight.w900,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          'Today\'s walk is locked in. Here\'s where your streak stands now.',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            fontSize: 14.5,
+                            height: 1.35,
+                            color: Colors.grey.shade700,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                        const SizedBox(height: 18),
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 16,
+                            vertical: 16,
+                          ),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF567D46),
+                            borderRadius: BorderRadius.circular(22),
+                          ),
+                          child: Column(
+                            children: [
+                              const Text(
+                                'NEW STREAK',
+                                style: TextStyle(
+                                  color: Colors.white70,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w800,
+                                  letterSpacing: 1.1,
+                                ),
+                              ),
+                              const SizedBox(height: 6),
+                              const Text(
+                                'after today\'s walk',
+                                style: TextStyle(
+                                  color: Colors.white70,
+                                  fontSize: 12.5,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              TweenAnimationBuilder<int>(
+                                tween: IntTween(
+                                    begin: streakStart, end: streakEnd),
+                                duration: const Duration(milliseconds: 900),
+                                curve: Curves.easeOutCubic,
+                                builder: (context, value, child) {
+                                  return Row(
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    crossAxisAlignment: CrossAxisAlignment.end,
+                                    children: [
+                                      Text(
+                                        '$value',
+                                        style: const TextStyle(
+                                          color: Colors.white,
+                                          fontSize: 46,
+                                          fontWeight: FontWeight.w900,
+                                          height: 1,
+                                        ),
+                                      ),
+                                      const SizedBox(width: 8),
+                                      Padding(
+                                        padding:
+                                            const EdgeInsets.only(bottom: 6),
+                                        child: Text(
+                                          'day${value == 1 ? '' : 's'}',
+                                          style: const TextStyle(
+                                            color: Colors.white,
+                                            fontSize: 16,
+                                            fontWeight: FontWeight.w700,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  );
+                                },
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 6,
+                          ),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFEAF4E5),
+                            borderRadius: BorderRadius.circular(999),
+                          ),
+                          child: const Text(
+                            'MONTHLY TOTALS',
+                            style: TextStyle(
+                              color: Color(0xFF567D46),
+                              fontSize: 12,
+                              fontWeight: FontWeight.w800,
+                              letterSpacing: 0.9,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 14),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: _buildPostAdStatTile(
+                                icon: Icons.schedule_rounded,
+                                label: 'Time',
+                                value: _formatDurationLabel(
+                                    monthStats.totalElapsed),
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: _buildPostAdStatTile(
+                                icon: Icons.directions_walk_rounded,
+                                label: 'Steps',
+                                value: NumberFormat.decimalPattern()
+                                    .format(monthStats.totalSteps),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 10),
+                        _buildPostAdStatTile(
+                          icon: Icons.route_rounded,
+                          label: 'Distance',
+                          value:
+                              '$monthKm km • ${monthStats.walksCount} walk${monthStats.walksCount == 1 ? '' : 's'}',
+                        ),
+                        const SizedBox(height: 18),
+                        SizedBox(
+                          width: double.infinity,
+                          child: ElevatedButton.icon(
+                            onPressed: () => _shareWalkSummary(
+                              steps: steps,
+                              meters: meters,
+                              elapsed: elapsed,
+                              streakCurrent: streakCurrent,
+                            ),
+                            icon: const Icon(Icons.ios_share),
+                            label: const Text('Share this win'),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: const Color(0xFF567D46),
+                              foregroundColor: Colors.white,
+                              padding: const EdgeInsets.symmetric(vertical: 14),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(16),
+                              ),
+                              textStyle: const TextStyle(
+                                fontSize: 15.5,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        TextButton(
+                          onPressed: () =>
+                              Navigator.of(context, rootNavigator: true).pop(),
+                          child: Text(
+                            closeLabel,
+                            style: const TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w900,
+                              color: Color(0xFF567D46),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildPostAdStatTile({
+    required IconData icon,
+    required String label,
+    required String value,
+  }) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF6F8F3),
+        borderRadius: BorderRadius.circular(18),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 34,
+            height: 34,
+            decoration: BoxDecoration(
+              color: const Color(0xFFE4EEDC),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Icon(icon, color: const Color(0xFF567D46), size: 18),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  label,
+                  style: TextStyle(
+                    fontSize: 11.5,
+                    color: Colors.grey.shade700,
+                    fontWeight: FontWeight.w700,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  value,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Future<void> _showReviveDialog({
     required int previousStreak,
     required int steps,
     required double meters,
+    required Duration elapsed,
     int? streakCurrent,
     int? streakLongest,
     bool streakIsNewRecord = false,
@@ -3145,6 +4134,7 @@ class _MapTabState extends State<MapTab>
       await _showCelebrationDialog(
         steps: steps,
         meters: meters,
+        elapsed: elapsed,
         streakCurrent: latestCur,
         streakLongest: latestLng,
         streakIsNewRecord: isNew,
@@ -3200,6 +4190,7 @@ class _MapTabState extends State<MapTab>
       await _showCelebrationDialog(
         steps: steps,
         meters: meters,
+        elapsed: elapsed,
         streakCurrent: streakCurrent,
         streakLongest: streakLongest,
         streakIsNewRecord: streakIsNewRecord,
@@ -3254,6 +4245,7 @@ class _MapTabState extends State<MapTab>
     await _showCelebrationDialog(
       steps: steps,
       meters: meters,
+      elapsed: elapsed,
       streakCurrent: finalCur,
       streakLongest: finalLng,
       streakIsNewRecord: finalIsNewRecord,

@@ -400,62 +400,104 @@ class _UsersInParkScaffoldState extends State<_UsersInParkScaffold> {
 
           // Users list
           Expanded(
-            child: ListView.separated(
-              padding: const EdgeInsets.symmetric(horizontal: 12),
-              itemCount: widget.userList.length,
-              separatorBuilder: (_, __) => const SizedBox(height: 6),
-              itemBuilder: (ctx, i) {
-                final petData = widget.userList[i];
-                final ownerId = petData['ownerId'] as String? ?? '';
-                final petId = petData['petId'] as String? ?? '';
-                final petName = petData['petName'] as String? ?? '';
-                final petPhoto = petData['petPhotoUrl'] as String? ?? '';
-                final checkIn = petData['checkInTime'] as String? ?? '';
-                final ownerName =
-                    (petData['ownerName'] as String? ?? '').trim();
-                final mine = (ownerId == widget.currentUser.uid);
+            child: widget.userList.isEmpty
+                ? Center(
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 28),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Container(
+                            width: 72,
+                            height: 72,
+                            decoration: BoxDecoration(
+                              color: Colors.green.shade50,
+                              shape: BoxShape.circle,
+                            ),
+                            child: Icon(
+                              Icons.pets_outlined,
+                              size: 36,
+                              color: Colors.green.shade700,
+                            ),
+                          ),
+                          const SizedBox(height: 16),
+                          Text(
+                            "No pups checked in yet",
+                            textAlign: TextAlign.center,
+                            style: Theme.of(context)
+                                .textTheme
+                                .titleMedium
+                                ?.copyWith(fontWeight: FontWeight.w700),
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            "Looks quiet right now. Swing by and be the first to check in at ${widget.parkName}.",
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              color: Colors.grey.shade700,
+                              height: 1.4,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  )
+                : ListView.separated(
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    itemCount: widget.userList.length,
+                    separatorBuilder: (_, __) => const SizedBox(height: 6),
+                    itemBuilder: (ctx, i) {
+                      final petData = widget.userList[i];
+                      final ownerId = petData['ownerId'] as String? ?? '';
+                      final petId = petData['petId'] as String? ?? '';
+                      final petName = petData['petName'] as String? ?? '';
+                      final petPhoto = petData['petPhotoUrl'] as String? ?? '';
+                      final checkIn = petData['checkInTime'] as String? ?? '';
+                      final ownerName =
+                          (petData['ownerName'] as String? ?? '').trim();
+                      final mine = (ownerId == widget.currentUser.uid);
 
-                return ListTile(
-                  leading: (petPhoto.isNotEmpty)
-                      ? ClipOval(
-                          child: Image.network(
-                            petPhoto,
-                            width: 40,
-                            height: 40,
-                            fit: BoxFit.cover,
-                            filterQuality: FilterQuality.low,
-                            cacheWidth: 120,
-                          ),
-                        )
-                      : const CircleAvatar(
-                          backgroundColor: Colors.brown,
-                          child: Icon(Icons.pets, color: Colors.white),
+                      return ListTile(
+                        leading: (petPhoto.isNotEmpty)
+                            ? ClipOval(
+                                child: Image.network(
+                                  petPhoto,
+                                  width: 40,
+                                  height: 40,
+                                  fit: BoxFit.cover,
+                                  filterQuality: FilterQuality.low,
+                                  cacheWidth: 120,
+                                ),
+                              )
+                            : const CircleAvatar(
+                                backgroundColor: Colors.brown,
+                                child: Icon(Icons.pets, color: Colors.white),
+                              ),
+                        title: Text(petName),
+                        subtitle: Text(
+                          [
+                            if (ownerName.isNotEmpty && !mine) ownerName,
+                            if (mine) "Your pet",
+                            if (checkIn.isNotEmpty) "– Checked in for $checkIn",
+                          ].whereType<String>().join(' '),
                         ),
-                  title: Text(petName),
-                  subtitle: Text(
-                    [
-                      if (ownerName.isNotEmpty && !mine) ownerName,
-                      if (mine) "Your pet",
-                      if (checkIn.isNotEmpty) "– Checked in for $checkIn",
-                    ].whereType<String>().join(' '),
+                        trailing: _favoritePetIds.contains(petId)
+                            ? IconButton(
+                                tooltip: "Remove Favorite",
+                                onPressed: () => _unfriend(ownerId, petId),
+                                icon: const Icon(
+                                  Icons.favorite,
+                                  color: Colors.redAccent,
+                                ),
+                              )
+                            : IconButton(
+                                tooltip: "Add Favorite",
+                                onPressed: () => _addFriend(ownerId, petId),
+                                icon: const Icon(Icons.favorite_border),
+                              ),
+                      );
+                    },
                   ),
-                  trailing: _favoritePetIds.contains(petId)
-                      ? IconButton(
-                          tooltip: "Remove Favorite",
-                          onPressed: () => _unfriend(ownerId, petId),
-                          icon: const Icon(
-                            Icons.favorite,
-                            color: Colors.redAccent,
-                          ),
-                        )
-                      : IconButton(
-                          tooltip: "Add Favorite",
-                          onPressed: () => _addFriend(ownerId, petId),
-                          icon: const Icon(Icons.favorite_border),
-                        ),
-                );
-              },
-            ),
           ),
 
           // Row 1: Check In/Out + Park Chat

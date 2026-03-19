@@ -5,6 +5,10 @@ import 'package:firebase_auth/firebase_auth.dart';
 
 class ActivePetsDialog extends StatefulWidget {
   final List<Map<String, dynamic>> pets;
+  final String parkName;
+  final bool isCheckedIn;
+  final Future<void> Function()? onCheckInToggle;
+  final VoidCallback? onOpenParkChat;
 
   /// Optional: parent callback (we call after DB writes succeed).
   final void Function(String ownerId, String petId)? onFavoriteToggle;
@@ -16,6 +20,10 @@ class ActivePetsDialog extends StatefulWidget {
   const ActivePetsDialog({
     Key? key,
     required this.pets,
+    required this.parkName,
+    required this.isCheckedIn,
+    this.onCheckInToggle,
+    this.onOpenParkChat,
     this.onFavoriteToggle,
     this.favoritePetIds = const {},
     this.currentUserId,
@@ -28,6 +36,7 @@ class ActivePetsDialog extends StatefulWidget {
 class _ActivePetsDialogState extends State<ActivePetsDialog> {
   late Set<String> _favIds;
   bool _busy = false;
+  bool _checkInBusy = false;
   StreamSubscription<QuerySnapshot>? _favSub;
 
   String? get _myUid =>
@@ -56,6 +65,28 @@ class _ActivePetsDialogState extends State<ActivePetsDialog> {
         if (mounted) setState(() => _favIds = serverIds);
       });
     }
+  }
+
+  Future<void> _handleCheckInToggle() async {
+    final action = widget.onCheckInToggle;
+    if (action == null || _checkInBusy) return;
+
+    setState(() => _checkInBusy = true);
+    try {
+      await action();
+      if (mounted) {
+        Navigator.of(context).pop();
+      }
+    } finally {
+      if (mounted) setState(() => _checkInBusy = false);
+    }
+  }
+
+  void _handleOpenParkChat() {
+    final action = widget.onOpenParkChat;
+    if (action == null || _busy || _checkInBusy) return;
+    Navigator.of(context).pop();
+    action();
   }
 
   @override
@@ -187,7 +218,47 @@ class _ActivePetsDialogState extends State<ActivePetsDialog> {
         width: 420,
         height: 500,
         child: widget.pets.isEmpty
-            ? const Center(child: Text("No pets currently checked in."))
+            ? Center(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 28),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Container(
+                        width: 72,
+                        height: 72,
+                        decoration: BoxDecoration(
+                          color: Colors.green.shade50,
+                          shape: BoxShape.circle,
+                        ),
+                        child: Icon(
+                          Icons.pets_outlined,
+                          size: 36,
+                          color: Colors.green.shade700,
+                        ),
+                      ),
+                      const SizedBox(height: 16),
+                      Text(
+                        "No pups checked in yet",
+                        textAlign: TextAlign.center,
+                        style: Theme.of(context)
+                            .textTheme
+                            .titleMedium
+                            ?.copyWith(fontWeight: FontWeight.w700),
+                      ),
+                      const SizedBox(height: 8),
+                      Text(
+                        "Looks quiet right now. Swing by and be the first to check in at ${widget.parkName}.",
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          color: Colors.grey.shade700,
+                          height: 1.4,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              )
             : ListView.separated(
                 itemCount: widget.pets.length,
                 separatorBuilder: (_, __) => const SizedBox(height: 6),
@@ -231,7 +302,32 @@ class _ActivePetsDialogState extends State<ActivePetsDialog> {
       ),
       actions: [
         TextButton(
-          onPressed: _busy ? null : () => Navigator.of(context).pop(),
+          onPressed: (_busy || _checkInBusy) ? null : _handleOpenParkChat,
+          child: const Text("Park Chat"),
+        ),
+        ElevatedButton(
+          style: ElevatedButton.styleFrom(
+            backgroundColor: widget.isCheckedIn ? Colors.red : Colors.green,
+          ),
+          onPressed: (_busy || _checkInBusy) ? null : _handleCheckInToggle,
+          child: _checkInBusy
+              ? const SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+                  ),
+                )
+              : Text(
+                  widget.isCheckedIn ? "Check Out" : "Check In",
+                  style: const TextStyle(color: Colors.white),
+                ),
+        ),
+        TextButton(
+          onPressed: (_busy || _checkInBusy)
+              ? null
+              : () => Navigator.of(context).pop(),
           child: const Text("Close"),
         ),
       ],

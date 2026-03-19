@@ -688,7 +688,7 @@ class _ProfileTabState extends State<ProfileTab> {
         final docs = snap.docs
             .map((doc) => PetDocumentRecord.fromFirestore(doc))
             .toList();
-        docs.sort((a, b) => a.expiryDate.compareTo(b.expiryDate));
+        docs.sort(_compareDocumentExpiry);
         return MapEntry(pet.id, docs);
       }),
     );
@@ -1484,7 +1484,23 @@ class _ProfileTabState extends State<ProfileTab> {
     }
   }
 
-  _DocumentExpiryStatus _documentExpiryStatus(DateTime expiryDate) {
+  int _compareDocumentExpiry(PetDocumentRecord a, PetDocumentRecord b) {
+    final aExpiry = a.expiryDate;
+    final bExpiry = b.expiryDate;
+    if (aExpiry == null && bExpiry == null) return 0;
+    if (aExpiry == null) return 1;
+    if (bExpiry == null) return -1;
+    return aExpiry.compareTo(bExpiry);
+  }
+
+  _DocumentExpiryStatus _documentExpiryStatus(DateTime? expiryDate) {
+    if (expiryDate == null) {
+      return const _DocumentExpiryStatus(
+        label: 'No expiry',
+        color: Color(0xFF455A64),
+        background: Color(0xFFECEFF1),
+      );
+    }
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
     final expiry = DateTime(expiryDate.year, expiryDate.month, expiryDate.day);
@@ -1660,7 +1676,7 @@ class _ProfileTabState extends State<ProfileTab> {
 
     String fieldLabel() {
       if (selectedType == 'vaccine') {
-        return 'Vaccine type';
+        return 'Name of vaccine';
       }
       return 'Document name';
     }
@@ -1680,7 +1696,6 @@ class _ProfileTabState extends State<ProfileTab> {
               final normalizedName = nameController.text.trim();
               final needsName = requiresCustomName();
               final canSave = uploadedFile != null &&
-                  expiryDate != null &&
                   !isUploading &&
                   !isSaving &&
                   (!needsName || normalizedName.isNotEmpty);
@@ -1712,7 +1727,7 @@ class _ProfileTabState extends State<ProfileTab> {
               }
 
               Future<void> saveDocument() async {
-                if (!canSave || uploadedFile == null || expiryDate == null) {
+                if (!canSave || uploadedFile == null) {
                   return;
                 }
 
@@ -1727,7 +1742,7 @@ class _ProfileTabState extends State<ProfileTab> {
                     fileName: uploadedFile!.fileName,
                     storagePath: uploadedFile!.storagePath,
                     contentType: uploadedFile!.contentType,
-                    expiryDate: expiryDate!,
+                    expiryDate: expiryDate,
                     uploadedAt: DateTime.now(),
                   );
 
@@ -1741,7 +1756,7 @@ class _ProfileTabState extends State<ProfileTab> {
                     final next = List<PetDocumentRecord>.from(
                       _petDocumentsByPetId[pet.id] ?? const [],
                     )..add(record);
-                    next.sort((a, b) => a.expiryDate.compareTo(b.expiryDate));
+                    next.sort(_compareDocumentExpiry);
                     _petDocumentsByPetId[pet.id] = next;
                   });
 
@@ -1807,7 +1822,7 @@ class _ProfileTabState extends State<ProfileTab> {
                       controller: nameController,
                       decoration: _outlinedDecoration(fieldLabel()).copyWith(
                         hintText: selectedType == 'vaccine'
-                            ? 'Rabies, DHPP, Bordetella...'
+                            ? 'Name of vaccine, i.e. Rabies'
                             : 'Enter a document name',
                       ),
                       onChanged: (_) => setSheetState(() {}),
@@ -1867,7 +1882,7 @@ class _ProfileTabState extends State<ProfileTab> {
                     icon: const Icon(Icons.event_outlined),
                     label: Text(
                       expiryDate == null
-                          ? 'Select expiry date'
+                          ? 'Add expiry date (optional)'
                           : 'Expiry: ${DateFormat('MMM d, yyyy').format(expiryDate!)}',
                     ),
                   ),
@@ -2006,7 +2021,7 @@ class _ProfileTabState extends State<ProfileTab> {
           builder: (ctx) => AlertDialog(
             title: Text('Delete ${_documentDisplayName(doc)}?'),
             content: const Text(
-              'This will remove the document from the pet profile.',
+              'This will remove the document from the pet profile and storage.',
             ),
             actions: [
               TextButton(
@@ -2055,7 +2070,9 @@ class _ProfileTabState extends State<ProfileTab> {
   }
 
   Widget _buildDocumentTile(Pet pet, PetDocumentRecord doc) {
-    final expiryText = DateFormat('MMM d, yyyy').format(doc.expiryDate);
+    final expiryText = doc.expiryDate == null
+        ? 'No expiry date'
+        : DateFormat('MMM d, yyyy').format(doc.expiryDate!);
     final status = _documentExpiryStatus(doc.expiryDate);
 
     return Container(

@@ -64,6 +64,7 @@ class _ParksTabState extends State<ParksTab>
   bool _isRefreshingNews = false;
   bool _isAutoExpandingNews = false;
   int _visibleNewsCount = 10;
+  int _parkSearchToken = 0;
 
   // Cached park meta
   final Map<String, int> _activeUserCounts = {}; // parkId -> count
@@ -369,11 +370,13 @@ class _ParksTabState extends State<ParksTab>
 
   Future<void> _searchParksByName() async {
     final query = _parkSearchController.text.trim();
+    final token = ++_parkSearchToken;
     if (query.isEmpty) {
       if (!mounted) return;
       setState(() {
         _parkSearchQuery = '';
         _searchedParks = [];
+        _isSearching = false;
       });
       return;
     }
@@ -381,8 +384,9 @@ class _ParksTabState extends State<ParksTab>
     if (mounted) setState(() => _isSearching = true);
     try {
       final origin = await _searchOrigin();
+      if (!mounted || token != _parkSearchToken) return;
       if (origin == null) {
-        if (!mounted) return;
+        if (!mounted || token != _parkSearchToken) return;
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content:
@@ -397,6 +401,7 @@ class _ParksTabState extends State<ParksTab>
         origin.latitude,
         origin.longitude,
       );
+      if (!mounted || token != _parkSearchToken) return;
 
       final ids = parks.map((p) => p.id).toList();
       final toHydrate = ids.where((id) => !_hydratedMeta.contains(id)).toList();
@@ -405,27 +410,32 @@ class _ParksTabState extends State<ParksTab>
         _hydratedMeta.addAll(toHydrate);
       }
 
-      if (!mounted) return;
+      if (!mounted || token != _parkSearchToken) return;
       setState(() {
         _parkSearchQuery = query;
         _searchedParks = parks;
       });
     } catch (_) {
-      if (!mounted) return;
+      if (!mounted || token != _parkSearchToken) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Could not search parks right now.')),
       );
     } finally {
-      if (mounted) setState(() => _isSearching = false);
+      if (mounted && token == _parkSearchToken) {
+        setState(() => _isSearching = false);
+      }
     }
   }
 
   void _clearParkSearch() {
+    _parkSearchToken++;
     _parkSearchController.clear();
+    _parkSearchFocusNode.unfocus();
     if (!mounted) return;
     setState(() {
       _parkSearchQuery = '';
       _searchedParks = [];
+      _isSearching = false;
     });
   }
 
@@ -688,7 +698,8 @@ class _ParksTabState extends State<ParksTab>
   }
 
   // ---------- Active pets dialog ----------
-  Future<void> _showActiveUsersDialog(String parkId) async {
+  Future<void> _showActiveUsersDialog(Park park) async {
+    final parkId = park.id;
     final currentUser = FirebaseAuth.instance.currentUser;
     if (currentUser == null) return;
 
@@ -748,6 +759,17 @@ class _ParksTabState extends State<ParksTab>
       builder: (context) {
         return ActivePetsDialog(
           pets: activePets,
+          parkName: park.name,
+          isCheckedIn: _checkedInParkIds.contains(parkId),
+          onCheckInToggle: () => _toggleCheckIn(park),
+          onOpenParkChat: () {
+            Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (_) => ChatRoomScreen(parkId: parkId),
+              ),
+            );
+          },
           favoritePetIds: favoritePetIds,
           currentUserId: currentUser.uid,
           onFavoriteToggle: (ownerId, petId) async {
@@ -966,16 +988,16 @@ class _ParksTabState extends State<ParksTab>
         children: [
           Card(
             color: isFavorite ? Colors.green.shade50 : null,
-            margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
             child: InkWell(
               onTap: () async {
                 await _runWithCardLoader(parkId, () async {
                   await _ensureParkDoc(parkId, park);
-                  await _showActiveUsersDialog(parkId);
+                  await _showActiveUsersDialog(park);
                 });
               },
               child: Padding(
-                padding: const EdgeInsets.all(12),
+                padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
@@ -986,8 +1008,11 @@ class _ParksTabState extends State<ParksTab>
                           child: Text(
                             park.name,
                             style: const TextStyle(
-                                fontSize: 16, fontWeight: FontWeight.bold),
+                              fontSize: 15,
+                              fontWeight: FontWeight.bold,
+                            ),
                             overflow: TextOverflow.ellipsis,
+                            maxLines: 1,
                           ),
                         ),
                         IconButton(
@@ -996,83 +1021,116 @@ class _ParksTabState extends State<ParksTab>
                           color: liked ? Colors.green : Colors.grey,
                           onPressed: isOpening ? null : () => _toggleLike(park),
                           tooltip: liked ? 'Unlike' : 'Like',
+                          constraints: const BoxConstraints(
+                            minWidth: 36,
+                            minHeight: 36,
+                          ),
+                          padding: EdgeInsets.zero,
+                          visualDensity: VisualDensity.compact,
                         ),
                       ],
                     ),
 
                     // Services chips
                     if (services.isNotEmpty) ...[
-                      const SizedBox(height: 6),
+                      const SizedBox(height: 4),
                       Wrap(
-                        spacing: 6,
-                        runSpacing: -6,
+                        spacing: 4,
+                        runSpacing: -8,
                         children: services.map((s) {
                           return Chip(
                             avatar: Icon(_serviceIcon(s),
-                                size: 16, color: Colors.green),
+                                size: 14, color: Colors.green),
                             label:
-                                Text(s, style: const TextStyle(fontSize: 12)),
+                                Text(s, style: const TextStyle(fontSize: 11.5)),
                             backgroundColor: Colors.green[50],
                             materialTapTargetSize:
                                 MaterialTapTargetSize.shrinkWrap,
                             visualDensity: const VisualDensity(
                                 horizontal: -4, vertical: -4),
+                            labelPadding:
+                                const EdgeInsets.symmetric(horizontal: 2),
+                            padding: EdgeInsets.zero,
                           );
                         }).toList(),
                       ),
                     ],
 
-                    const SizedBox(height: 6),
+                    const SizedBox(height: 4),
                     Text(
                       _parkMetaLine(park, userCount),
                       style: const TextStyle(
-                        fontSize: 13,
+                        fontSize: 12.5,
                         color: Colors.black54,
                         fontWeight: FontWeight.w500,
                       ),
                     ),
-                    const SizedBox(height: 10),
+                    const SizedBox(height: 8),
 
                     // Actions
                     Row(
                       children: [
-                        ElevatedButton(
-                          onPressed: isOpening
-                              ? null
-                              : () => Navigator.push(
-                                    context,
-                                    MaterialPageRoute(
-                                      builder: (_) =>
-                                          ChatRoomScreen(parkId: parkId),
+                        Expanded(
+                          child: OutlinedButton(
+                            onPressed: isOpening
+                                ? null
+                                : () => Navigator.push(
+                                      context,
+                                      MaterialPageRoute(
+                                        builder: (_) =>
+                                            ChatRoomScreen(parkId: parkId),
+                                      ),
                                     ),
-                                  ),
-                          child: const Text("Park Chat",
-                              style: TextStyle(fontSize: 12)),
+                            style: OutlinedButton.styleFrom(
+                              foregroundColor: const Color(0xFF567D46),
+                              side: const BorderSide(color: Color(0xFF567D46)),
+                              padding: const EdgeInsets.symmetric(vertical: 10),
+                              minimumSize: const Size(0, 38),
+                              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                              visualDensity: const VisualDensity(
+                                horizontal: -2,
+                                vertical: -2,
+                              ),
+                            ),
+                            child: const Text(
+                              "Park Chat",
+                              style: TextStyle(fontSize: 12),
+                            ),
+                          ),
                         ),
                         const SizedBox(width: 8),
-                        ElevatedButton(
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor:
-                                isCheckedIn ? Colors.red : Colors.green,
-                          ),
-                          onPressed: (isBusy || isOpening)
-                              ? null
-                              : () => _toggleCheckIn(park),
-                          child: isBusy
-                              ? const SizedBox(
-                                  width: 18,
-                                  height: 18,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                    valueColor: AlwaysStoppedAnimation<Color>(
-                                        Colors.white),
+                        Expanded(
+                          child: ElevatedButton(
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor:
+                                  isCheckedIn ? Colors.red : Colors.green,
+                              padding: const EdgeInsets.symmetric(vertical: 10),
+                              minimumSize: const Size(0, 38),
+                              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                              visualDensity: const VisualDensity(
+                                horizontal: -2,
+                                vertical: -2,
+                              ),
+                            ),
+                            onPressed: (isBusy || isOpening)
+                                ? null
+                                : () => _toggleCheckIn(park),
+                            child: isBusy
+                                ? const SizedBox(
+                                    width: 16,
+                                    height: 16,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                      valueColor: AlwaysStoppedAnimation<Color>(
+                                          Colors.white),
+                                    ),
+                                  )
+                                : Text(
+                                    isCheckedIn ? "Check Out" : "Check In",
+                                    style: const TextStyle(
+                                        fontSize: 12, color: Colors.white),
                                   ),
-                                )
-                              : Text(
-                                  isCheckedIn ? "Check Out" : "Check In",
-                                  style: const TextStyle(
-                                      fontSize: 12, color: Colors.white),
-                                ),
+                          ),
                         ),
                       ],
                     ),
@@ -1223,9 +1281,37 @@ class _ParksTabState extends State<ParksTab>
           ),
         ),
         if (_isLoadingNews)
-          const Padding(
-            padding: EdgeInsets.symmetric(vertical: 24),
-            child: Center(child: CircularProgressIndicator()),
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 18),
+            child: Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 18),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(18),
+                border: Border.all(color: const Color(0xFFDCE7D6)),
+              ),
+              child: const Row(
+                children: [
+                  SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(strokeWidth: 2.2),
+                  ),
+                  SizedBox(width: 14),
+                  Expanded(
+                    child: Text(
+                      'Fetching the latest dog news and park-side tips...',
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.black87,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           )
         else if (_newsError != null)
           Padding(

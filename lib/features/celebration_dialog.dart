@@ -204,85 +204,107 @@ class _CelebrationDialogState extends State<CelebrationDialog> {
             textAlign: TextAlign.center,
             style: TextStyle(fontSize: 26, fontWeight: FontWeight.w900),
           ),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              // Neutral caption under the title, not cheesy
-              Text(
-                neutralLine,
-                textAlign: TextAlign.center,
-                style:
-                    const TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
-              ),
-
-              // Optional streak pill
-              if (widget.streakCurrent != null) ...[
-                const SizedBox(height: 12),
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                  decoration: BoxDecoration(
-                    color: widget.streakIsNewRecord
-                        ? const Color(0xFFFFF7E6) // soft gold
-                        : const Color(0xFFE7F6EA), // soft green
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(
-                      color: widget.streakIsNewRecord
-                          ? const Color(0xFFFFC107)
-                          : const Color(0xFF66BB6A),
+          content: ConstrainedBox(
+            constraints: BoxConstraints(
+              maxHeight: MediaQuery.of(context).size.height * 0.6,
+            ),
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // Neutral caption under the title, not cheesy
+                  Text(
+                    neutralLine,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w700,
                     ),
                   ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        widget.streakIsNewRecord
-                            ? Icons.emoji_events
-                            : Icons.local_fire_department,
-                        size: 20,
-                        color: widget.streakIsNewRecord
-                            ? const Color(0xFFFFC107)
-                            : const Color(0xFF2E7D32),
+
+                  // Optional streak pill
+                  if (widget.streakCurrent != null) ...[
+                    const SizedBox(height: 12),
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 8,
                       ),
-                      const SizedBox(width: 8),
-                      Text(
-                        widget.streakIsNewRecord
-                            ? "New streak record: ${_days(widget.streakCurrent!)}!"
-                            : "Streak: ${_days(widget.streakCurrent!)}"
-                                "${widget.streakLongest != null ? " • Best: ${_days(widget.streakLongest!)}" : ""}",
-                        style: TextStyle(
-                          fontSize: 14.5,
-                          fontWeight: FontWeight.w800,
+                      decoration: BoxDecoration(
+                        color: widget.streakIsNewRecord
+                            ? const Color(0xFFFFF7E6) // soft gold
+                            : const Color(0xFFE7F6EA), // soft green
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
                           color: widget.streakIsNewRecord
-                              ? const Color(0xFF7A5A00)
-                              : const Color(0xFF1B5E20),
+                              ? const Color(0xFFFFC107)
+                              : const Color(0xFF66BB6A),
                         ),
                       ),
-                    ],
-                  ),
-                ),
-              ],
+                      child: Row(
+                        mainAxisSize: MainAxisSize.max,
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Icon(
+                            widget.streakIsNewRecord
+                                ? Icons.emoji_events
+                                : Icons.local_fire_department,
+                            size: 20,
+                            color: widget.streakIsNewRecord
+                                ? const Color(0xFFFFC107)
+                                : const Color(0xFF2E7D32),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              widget.streakIsNewRecord
+                                  ? "New streak record: ${_days(widget.streakCurrent!)}!"
+                                  : "Streak: ${_days(widget.streakCurrent!)}"
+                                      "${widget.streakLongest != null ? " • Best: ${_days(widget.streakLongest!)}" : ""}",
+                              maxLines: 3,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontSize: 14.5,
+                                fontWeight: FontWeight.w800,
+                                color: widget.streakIsNewRecord
+                                    ? const Color(0xFF7A5A00)
+                                    : const Color(0xFF1B5E20),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
 
-              const SizedBox(height: 16),
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton.icon(
-                  icon: const Icon(Icons.ios_share),
-                  label: const Text("Share your walk"),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF567D46),
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 24, vertical: 14),
-                    shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(14)),
-                    textStyle: const TextStyle(
-                        fontSize: 16, fontWeight: FontWeight.w800),
+                  const SizedBox(height: 16),
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton.icon(
+                      icon: const Icon(Icons.ios_share),
+                      label: const Text("Share your walk"),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFF567D46),
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 24,
+                          vertical: 14,
+                        ),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                        textStyle: const TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                      onPressed: _shareSystem,
+                    ),
                   ),
-                  onPressed: _shareSystem,
-                ),
+                ],
               ),
-            ],
+            ),
           ),
           actionsAlignment: MainAxisAlignment.center,
           actions: [

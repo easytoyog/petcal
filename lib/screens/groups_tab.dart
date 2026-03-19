@@ -6,7 +6,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
-import 'package:google_maps_flutter/google_maps_flutter.dart' show LatLng;
+import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:http/http.dart' as http;
 import 'package:location/location.dart' as loc;
 
@@ -42,6 +42,132 @@ class GroupPersonOption {
   });
 }
 
+const LatLng _kDefaultGroupPinCenter = LatLng(43.7615, -79.4111);
+
+Future<LatLng?> _showGroupPinPicker(
+  BuildContext context, {
+  LatLng? initialLocation,
+}) async {
+  var selectedPin = initialLocation;
+
+  return showDialog<LatLng>(
+    context: context,
+    builder: (dialogCtx) {
+      return Dialog(
+        insetPadding: EdgeInsets.zero,
+        child: SizedBox(
+          width: double.infinity,
+          height: MediaQuery.of(dialogCtx).size.height,
+          child: StatefulBuilder(
+            builder: (ctx, setLocalState) {
+              return Scaffold(
+                appBar: AppBar(
+                  elevation: 0,
+                  backgroundColor: Colors.transparent,
+                  title: const Text('Pick Meeting Spot'),
+                  leading: IconButton(
+                    icon: const Icon(Icons.close),
+                    onPressed: () => Navigator.of(dialogCtx).pop(),
+                  ),
+                ),
+                body: Stack(
+                  children: [
+                    GoogleMap(
+                      initialCameraPosition: CameraPosition(
+                        target: selectedPin ??
+                            initialLocation ??
+                            _kDefaultGroupPinCenter,
+                        zoom: 15,
+                      ),
+                      myLocationEnabled: true,
+                      myLocationButtonEnabled: true,
+                      zoomControlsEnabled: false,
+                      onTap: (latLng) {
+                        setLocalState(() => selectedPin = latLng);
+                      },
+                      markers: selectedPin == null
+                          ? const <Marker>{}
+                          : {
+                              Marker(
+                                markerId: const MarkerId('meeting_pin'),
+                                position: selectedPin!,
+                              ),
+                            },
+                    ),
+                    Positioned(
+                      left: 16,
+                      right: 16,
+                      bottom: 24,
+                      child: SafeArea(
+                        top: false,
+                        child: Container(
+                          padding: const EdgeInsets.all(16),
+                          decoration: BoxDecoration(
+                            color: Colors.white,
+                            borderRadius: BorderRadius.circular(18),
+                            boxShadow: const [
+                              BoxShadow(
+                                color: Color(0x22000000),
+                                blurRadius: 20,
+                                offset: Offset(0, 8),
+                              ),
+                            ],
+                          ),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text(
+                                'Tap the map to drop a pin for your group meet-up spot.',
+                                style: TextStyle(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                              if (selectedPin != null) ...[
+                                const SizedBox(height: 8),
+                                Text(
+                                  '${selectedPin!.latitude.toStringAsFixed(5)}, ${selectedPin!.longitude.toStringAsFixed(5)}',
+                                  style: TextStyle(color: Colors.grey[700]),
+                                ),
+                              ],
+                              const SizedBox(height: 14),
+                              SizedBox(
+                                width: double.infinity,
+                                child: ElevatedButton.icon(
+                                  onPressed: selectedPin == null
+                                      ? null
+                                      : () => Navigator.of(dialogCtx)
+                                          .pop(selectedPin),
+                                  icon: const Icon(Icons.location_pin),
+                                  label: const Text('Use This Pin'),
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: const Color(0xFF567D46),
+                                    foregroundColor: Colors.white,
+                                    padding: const EdgeInsets.symmetric(
+                                        vertical: 14),
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(14),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            },
+          ),
+        ),
+      );
+    },
+  );
+}
+
 class GroupsTab extends StatefulWidget {
   const GroupsTab({Key? key}) : super(key: key);
 
@@ -51,12 +177,19 @@ class GroupsTab extends StatefulWidget {
 
 class _GroupsTabState extends State<GroupsTab>
     with AutomaticKeepAliveClientMixin<GroupsTab> {
+  static const double _kLocalGroupsRadiusKm = 2.0;
+
   final String? _currentUserId = FirebaseAuth.instance.currentUser?.uid;
   final FirebaseFirestore _fs = FirebaseFirestore.instance;
+  final TextEditingController _groupSearchController = TextEditingController();
 
   List<Group> _myGroups = [];
   List<Group> _localPublicGroups = [];
+  List<Group> _searchedGroups = [];
   Map<String, DateTime> _groupLastReadAt = {};
+  String _groupSearchQuery = '';
+  Timer? _groupSearchDebounce;
+  bool _isSearchingGroups = false;
 
   bool _isLoading = true;
   bool _showingLocalGroups = false;
@@ -76,6 +209,8 @@ class _GroupsTabState extends State<GroupsTab>
   @override
   void dispose() {
     _groupReadsSub?.cancel();
+    _groupSearchDebounce?.cancel();
+    _groupSearchController.dispose();
     super.dispose();
   }
 
@@ -95,7 +230,97 @@ class _GroupsTabState extends State<GroupsTab>
     if (_showingLocalGroups) {
       await _fetchLocalPublicGroups(showSnackOnNoLocation: false);
     }
+    if (_groupSearchQuery.trim().isNotEmpty) {
+      await _searchGroupsByName(_groupSearchQuery);
+    }
     if (mounted) setState(() {});
+  }
+
+  void _onGroupSearchChanged(String value) {
+    setState(() => _groupSearchQuery = value);
+    _groupSearchDebounce?.cancel();
+
+    final trimmed = value.trim();
+    if (trimmed.isEmpty) {
+      setState(() {
+        _searchedGroups = [];
+        _isSearchingGroups = false;
+      });
+      return;
+    }
+
+    _groupSearchDebounce = Timer(
+      const Duration(milliseconds: 250),
+      () => _searchGroupsByName(trimmed),
+    );
+  }
+
+  Future<void> _searchGroupsByName(String rawQuery) async {
+    final query = rawQuery.trim().toLowerCase();
+    if (query.isEmpty) return;
+
+    if (mounted) {
+      setState(() => _isSearchingGroups = true);
+    }
+
+    try {
+      final myMatches = _myGroups
+          .where((group) => group.name.toLowerCase().contains(query))
+          .toList();
+      final existingIds = myMatches.map((group) => group.id).toSet();
+
+      final publicSnap = await _fs
+          .collection('groups')
+          .where('isPublic', isEqualTo: true)
+          .get();
+
+      final publicMatches = publicSnap.docs
+          .map((doc) => Group.fromFirestore(doc))
+          .where(
+            (group) =>
+                group.name.toLowerCase().contains(query) &&
+                !existingIds.contains(group.id),
+          )
+          .toList();
+
+      publicMatches.sort((a, b) {
+        if (_userLocation != null &&
+            a.latitude != null &&
+            a.longitude != null &&
+            b.latitude != null &&
+            b.longitude != null) {
+          final distA =
+              _distance(_userLocation!, LatLng(a.latitude!, a.longitude!));
+          final distB =
+              _distance(_userLocation!, LatLng(b.latitude!, b.longitude!));
+          return distA.compareTo(distB);
+        }
+        if (a.latitude != null &&
+            a.longitude != null &&
+            (b.latitude == null || b.longitude == null)) {
+          return -1;
+        }
+        if (b.latitude != null &&
+            b.longitude != null &&
+            (a.latitude == null || a.longitude == null)) {
+          return 1;
+        }
+        return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+      });
+
+      if (!mounted || _groupSearchQuery.trim().toLowerCase() != query) return;
+      setState(() {
+        _searchedGroups = [...myMatches, ...publicMatches];
+        _isSearchingGroups = false;
+      });
+    } catch (e) {
+      debugPrint('Error searching public groups: $e');
+      if (!mounted || _groupSearchQuery.trim().toLowerCase() != query) return;
+      setState(() => _isSearchingGroups = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error searching groups: $e')),
+      );
+    }
   }
 
   void _listenToGroupReads() {
@@ -181,6 +406,8 @@ class _GroupsTabState extends State<GroupsTab>
   Future<void> _fetchLocalPublicGroups({
     bool showSnackOnNoLocation = true,
   }) async {
+    await _fetchUserLocation();
+
     if (_userLocation == null) {
       if (showSnackOnNoLocation && mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -196,10 +423,15 @@ class _GroupsTabState extends State<GroupsTab>
           .where('isPublic', isEqualTo: true)
           .get();
 
-      final groups = query.docs
-          .map((doc) => Group.fromFirestore(doc))
-          .where((g) => g.latitude != null && g.longitude != null)
-          .toList();
+      final groups =
+          query.docs.map((doc) => Group.fromFirestore(doc)).where((g) {
+        if (g.latitude == null || g.longitude == null) return false;
+        final distanceKm = _distance(
+          _userLocation!,
+          LatLng(g.latitude!, g.longitude!),
+        );
+        return distanceKm <= _kLocalGroupsRadiusKm;
+      }).toList();
 
       groups.sort((a, b) {
         final distA =
@@ -433,6 +665,9 @@ class _GroupsTabState extends State<GroupsTab>
 
     bool isPublic = false;
     bool isSaving = false;
+    double? selectedLatitude;
+    double? selectedLongitude;
+    String selectedPlaceId = '';
 
     final Map<String, TimeOfDay?> meetingTimes = {
       'Monday': null,
@@ -498,6 +733,55 @@ class _GroupsTabState extends State<GroupsTab>
                             hint: 'e.g., Ellerslie Park',
                             icon: Icons.location_on,
                           ),
+                        ),
+                        const SizedBox(height: 10),
+                        Row(
+                          children: [
+                            OutlinedButton.icon(
+                              onPressed: () async {
+                                final picked = await _showGroupPinPicker(
+                                  context,
+                                  initialLocation: selectedLatitude != null &&
+                                          selectedLongitude != null
+                                      ? LatLng(
+                                          selectedLatitude!,
+                                          selectedLongitude!,
+                                        )
+                                      : _userLocation,
+                                );
+                                if (picked == null) return;
+                                setLocalState(() {
+                                  selectedLatitude = picked.latitude;
+                                  selectedLongitude = picked.longitude;
+                                  selectedPlaceId = '';
+                                  if (spotCtrl.text.trim().isEmpty) {
+                                    spotCtrl.text = 'Pinned meeting spot';
+                                  }
+                                });
+                              },
+                              icon: const Icon(Icons.add_location_alt_outlined),
+                              label: const Text('Drop Pin On Map'),
+                              style: OutlinedButton.styleFrom(
+                                foregroundColor: const Color(0xFF567D46),
+                                side: const BorderSide(
+                                  color: Color(0xFF567D46),
+                                ),
+                              ),
+                            ),
+                            if (selectedLatitude != null &&
+                                selectedLongitude != null) ...[
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Text(
+                                  'Pinned: ${selectedLatitude!.toStringAsFixed(4)}, ${selectedLongitude!.toStringAsFixed(4)}',
+                                  style: TextStyle(
+                                    fontSize: 12.5,
+                                    color: Colors.grey[700],
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ],
                         ),
                         const SizedBox(height: 24),
                         _sectionTitle('Meeting Schedule'),
@@ -565,39 +849,11 @@ class _GroupsTabState extends State<GroupsTab>
                         const SizedBox(height: 24),
                         _sectionTitle('Privacy'),
                         const SizedBox(height: 8),
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 16,
-                            vertical: 12,
-                          ),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFFF6F7F5),
-                            borderRadius: BorderRadius.circular(14),
-                          ),
-                          child: Row(
-                            children: [
-                              Icon(
-                                isPublic ? Icons.public : Icons.lock,
-                                color: const Color(0xFF567D46),
-                              ),
-                              const SizedBox(width: 12),
-                              Expanded(
-                                child: Text(
-                                  isPublic ? 'Public Group' : 'Private Group',
-                                  style: const TextStyle(
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
-                              ),
-                              Switch(
-                                value: isPublic,
-                                activeThumbColor: const Color(0xFF567D46),
-                                onChanged: (v) {
-                                  setLocalState(() => isPublic = v);
-                                },
-                              ),
-                            ],
-                          ),
+                        _buildPrivacyToggleCard(
+                          isPublic: isPublic,
+                          onChanged: (value) {
+                            setLocalState(() => isPublic = value);
+                          },
                         ),
                         const SizedBox(height: 30),
                         SizedBox(
@@ -632,8 +888,10 @@ class _GroupsTabState extends State<GroupsTab>
                                       description: descCtrl.text.trim(),
                                       isPublic: isPublic,
                                       frequentTime: frequentTime,
+                                      frequentPlaceId: selectedPlaceId,
                                       frequentPlaceName: spotCtrl.text.trim(),
-                                      selectedPlace: null,
+                                      latitude: selectedLatitude,
+                                      longitude: selectedLongitude,
                                     );
 
                                     if (!mounted) return;
@@ -735,8 +993,10 @@ class _GroupsTabState extends State<GroupsTab>
     String? description,
     required bool isPublic,
     TimeOfDay? frequentTime,
+    String? frequentPlaceId,
     String? frequentPlaceName,
-    PlaceResult? selectedPlace,
+    double? latitude,
+    double? longitude,
   }) async {
     if (_currentUserId == null) return;
 
@@ -750,13 +1010,13 @@ class _GroupsTabState extends State<GroupsTab>
         'createdBy': _currentUserId,
         'admins': [_currentUserId],
         'members': [_currentUserId],
-        'frequentPlace': selectedPlace?.id ?? '',
-        'frequentPlaceName': selectedPlace?.name ?? (frequentPlaceName ?? ''),
+        'frequentPlace': frequentPlaceId ?? '',
+        'frequentPlaceName': (frequentPlaceName ?? '').trim(),
         'frequentTime':
             frequentTime != null ? Group.timeOfDayToString(frequentTime) : null,
         'isPublic': isPublic,
-        'latitude': selectedPlace?.latitude,
-        'longitude': selectedPlace?.longitude,
+        'latitude': latitude,
+        'longitude': longitude,
         'createdAt': now,
         'updatedAt': now,
       });
@@ -940,6 +1200,106 @@ class _GroupsTabState extends State<GroupsTab>
     );
   }
 
+  bool _groupMatchesSearch(Group group) {
+    final query = _groupSearchQuery.trim().toLowerCase();
+    if (query.isEmpty) return true;
+    return group.name.toLowerCase().contains(query);
+  }
+
+  Widget _buildGroupSearchBar() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 14, 16, 8),
+      child: TextField(
+        controller: _groupSearchController,
+        onChanged: _onGroupSearchChanged,
+        onTapOutside: (_) => FocusScope.of(context).unfocus(),
+        decoration: InputDecoration(
+          hintText: 'Search groups by name',
+          prefixIcon: const Icon(Icons.search),
+          suffixIcon: _groupSearchQuery.trim().isEmpty
+              ? null
+              : IconButton(
+                  tooltip: 'Clear search',
+                  icon: const Icon(Icons.close),
+                  onPressed: () {
+                    _groupSearchController.clear();
+                    setState(() {
+                      _groupSearchQuery = '';
+                      _searchedGroups = [];
+                      _isSearchingGroups = false;
+                    });
+                  },
+                ),
+          filled: true,
+          fillColor: Colors.white,
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(14),
+            borderSide: BorderSide.none,
+          ),
+          enabledBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(14),
+            borderSide: const BorderSide(color: Color(0xFFDCE7D6)),
+          ),
+          focusedBorder: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(14),
+            borderSide: const BorderSide(color: Color(0xFF567D46)),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPrivacyToggleCard({
+    required bool isPublic,
+    required ValueChanged<bool> onChanged,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF6F7F5),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(
+            isPublic ? Icons.public : Icons.lock,
+            color: const Color(0xFF567D46),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  isPublic ? 'Public Group' : 'Private Group',
+                  style: const TextStyle(fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  isPublic
+                      ? 'Public group can be found in search.'
+                      : 'Private group is not visible in search unless invited.',
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    color: Colors.grey[700],
+                    height: 1.35,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 12),
+          Switch(
+            value: isPublic,
+            activeThumbColor: const Color(0xFF567D46),
+            onChanged: onChanged,
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     super.build(context);
@@ -954,10 +1314,13 @@ class _GroupsTabState extends State<GroupsTab>
       body: SafeArea(
         child: Column(
           children: [
+            _buildGroupSearchBar(),
             Expanded(
-              child: _showingLocalGroups
-                  ? _buildLocalGroupsList()
-                  : _buildMyGroupsList(),
+              child: _groupSearchQuery.trim().isNotEmpty
+                  ? _buildSearchResultsList()
+                  : _showingLocalGroups
+                      ? _buildLocalGroupsList()
+                      : _buildMyGroupsList(),
             ),
             _buildBottomActionBar(),
             const AdBanner(),
@@ -1027,6 +1390,8 @@ class _GroupsTabState extends State<GroupsTab>
   }
 
   Widget _buildMyGroupsList() {
+    final visibleGroups = _myGroups.where(_groupMatchesSearch).toList();
+
     if (_myGroups.isEmpty) {
       return RefreshIndicator(
         onRefresh: _refreshCurrentView,
@@ -1049,31 +1414,19 @@ class _GroupsTabState extends State<GroupsTab>
       );
     }
 
-    return RefreshIndicator(
-      onRefresh: _refreshCurrentView,
-      child: ListView.builder(
-        padding: const EdgeInsets.only(top: 12, bottom: 12),
-        itemCount: _myGroups.length,
-        itemBuilder: (ctx, idx) =>
-            _buildGroupCard(_myGroups[idx], isMyGroup: true),
-      ),
-    );
-  }
-
-  Widget _buildLocalGroupsList() {
-    if (_localPublicGroups.isEmpty) {
+    if (visibleGroups.isEmpty) {
       return RefreshIndicator(
         onRefresh: _refreshCurrentView,
         child: ListView(
           physics: const AlwaysScrollableScrollPhysics(),
           children: const [
             SizedBox(height: 130),
-            Icon(Icons.location_searching, size: 64, color: Colors.grey),
+            Icon(Icons.search_off_rounded, size: 64, color: Colors.grey),
             SizedBox(height: 16),
             Padding(
               padding: EdgeInsets.symmetric(horizontal: 30),
               child: Text(
-                'No public groups nearby',
+                'No groups match that name.',
                 textAlign: TextAlign.center,
                 style: TextStyle(fontSize: 15),
               ),
@@ -1087,9 +1440,111 @@ class _GroupsTabState extends State<GroupsTab>
       onRefresh: _refreshCurrentView,
       child: ListView.builder(
         padding: const EdgeInsets.only(top: 12, bottom: 12),
-        itemCount: _localPublicGroups.length,
+        itemCount: visibleGroups.length,
         itemBuilder: (ctx, idx) =>
-            _buildGroupCard(_localPublicGroups[idx], isMyGroup: false),
+            _buildGroupCard(visibleGroups[idx], isMyGroup: true),
+      ),
+    );
+  }
+
+  Widget _buildSearchResultsList() {
+    if (_isSearchingGroups && _searchedGroups.isEmpty) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    if (_searchedGroups.isEmpty) {
+      return RefreshIndicator(
+        onRefresh: _refreshCurrentView,
+        child: ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          children: const [
+            SizedBox(height: 130),
+            Icon(Icons.search_off_rounded, size: 64, color: Colors.grey),
+            SizedBox(height: 16),
+            Padding(
+              padding: EdgeInsets.symmetric(horizontal: 30),
+              child: Text(
+                'No public groups match that name.',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 15),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return RefreshIndicator(
+      onRefresh: _refreshCurrentView,
+      child: ListView.builder(
+        padding: const EdgeInsets.only(top: 12, bottom: 12),
+        itemCount: _searchedGroups.length,
+        itemBuilder: (ctx, idx) {
+          final group = _searchedGroups[idx];
+          return _buildGroupCard(
+            group,
+            isMyGroup: group.members.contains(_currentUserId),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildLocalGroupsList() {
+    final visibleGroups =
+        _localPublicGroups.where(_groupMatchesSearch).toList();
+
+    if (_localPublicGroups.isEmpty) {
+      return RefreshIndicator(
+        onRefresh: _refreshCurrentView,
+        child: ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          children: const [
+            SizedBox(height: 130),
+            Icon(Icons.location_searching, size: 64, color: Colors.grey),
+            SizedBox(height: 16),
+            Padding(
+              padding: EdgeInsets.symmetric(horizontal: 30),
+              child: Text(
+                'No public groups within 2 km right now',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 15),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    if (visibleGroups.isEmpty) {
+      return RefreshIndicator(
+        onRefresh: _refreshCurrentView,
+        child: ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          children: const [
+            SizedBox(height: 130),
+            Icon(Icons.search_off_rounded, size: 64, color: Colors.grey),
+            SizedBox(height: 16),
+            Padding(
+              padding: EdgeInsets.symmetric(horizontal: 30),
+              child: Text(
+                'No groups match that name.',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 15),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return RefreshIndicator(
+      onRefresh: _refreshCurrentView,
+      child: ListView.builder(
+        padding: const EdgeInsets.only(top: 12, bottom: 12),
+        itemCount: visibleGroups.length,
+        itemBuilder: (ctx, idx) =>
+            _buildGroupCard(visibleGroups[idx], isMyGroup: false),
       ),
     );
   }
@@ -1148,6 +1603,24 @@ class _GroupsTabState extends State<GroupsTab>
                             ),
                           ),
                           if (hasUnread) _buildUnreadChip(),
+                          if (isAdmin) ...[
+                            const SizedBox(width: 6),
+                            IconButton(
+                              tooltip: 'Delete group',
+                              onPressed: () => _confirmDeleteGroup(group.id),
+                              icon: const Icon(
+                                Icons.delete_outline,
+                                color: Colors.red,
+                                size: 20,
+                              ),
+                              visualDensity: VisualDensity.compact,
+                              constraints: const BoxConstraints(
+                                minWidth: 36,
+                                minHeight: 36,
+                              ),
+                              padding: EdgeInsets.zero,
+                            ),
+                          ],
                         ],
                       ),
                       if ((group.lastMessage ?? '').trim().isNotEmpty) ...[
@@ -1267,36 +1740,24 @@ class _GroupsTabState extends State<GroupsTab>
                   ),
                 ],
               ),
-              const SizedBox(height: 10),
-              SizedBox(
-                width: double.infinity,
-                child: isAdmin
-                    ? ElevatedButton.icon(
-                        onPressed: () => _confirmDeleteGroup(group.id),
-                        icon: const Icon(Icons.delete, size: 18),
-                        label: const Text('Delete'),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.red,
-                          foregroundColor: Colors.white,
-                          elevation: 0,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                        ),
-                      )
-                    : ElevatedButton(
-                        onPressed: () => _leaveGroup(group.id),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.orange,
-                          foregroundColor: Colors.white,
-                          elevation: 0,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                        ),
-                        child: const Text('Leave'),
+              if (!isAdmin) ...[
+                const SizedBox(height: 10),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton(
+                    onPressed: () => _leaveGroup(group.id),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.orange,
+                      foregroundColor: Colors.white,
+                      elevation: 0,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
                       ),
-              ),
+                    ),
+                    child: const Text('Leave'),
+                  ),
+                ),
+              ],
             ],
           ],
         ),
@@ -1466,6 +1927,57 @@ class _GroupDetailsPageState extends State<GroupDetailsPage> {
       style: Theme.of(context).textTheme.titleMedium?.copyWith(
             fontWeight: FontWeight.w700,
           ),
+    );
+  }
+
+  Widget _buildPrivacyToggleCard({
+    required bool isPublic,
+    required ValueChanged<bool> onChanged,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      decoration: BoxDecoration(
+        color: const Color(0xFFF6F7F5),
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(
+            isPublic ? Icons.public : Icons.lock,
+            color: const Color(0xFF567D46),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  isPublic ? 'Public Group' : 'Private Group',
+                  style: const TextStyle(fontWeight: FontWeight.w700),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  isPublic
+                      ? 'Public group can be found in search.'
+                      : 'Private group is not visible in search unless invited.',
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    color: Colors.grey[700],
+                    height: 1.35,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 12),
+          Switch(
+            value: isPublic,
+            activeThumbColor: const Color(0xFF567D46),
+            onChanged: onChanged,
+          ),
+        ],
+      ),
     );
   }
 
@@ -1998,14 +2510,61 @@ class _GroupDetailsPageState extends State<GroupDetailsPage> {
                           onChanged: (_) {
                             setLocalState(() {
                               selectedPlaceId = '';
-                              selectedLatitude = null;
-                              selectedLongitude = null;
                             });
                           },
                           decoration: _inputDecoration(
                             hint: 'e.g., Ellerslie Park',
                             icon: Icons.location_on,
                           ),
+                        ),
+                        const SizedBox(height: 10),
+                        Row(
+                          children: [
+                            OutlinedButton.icon(
+                              onPressed: () async {
+                                final picked = await _showGroupPinPicker(
+                                  context,
+                                  initialLocation: selectedLatitude != null &&
+                                          selectedLongitude != null
+                                      ? LatLng(
+                                          selectedLatitude!,
+                                          selectedLongitude!,
+                                        )
+                                      : _userLocation,
+                                );
+                                if (picked == null) return;
+                                setLocalState(() {
+                                  selectedLatitude = picked.latitude;
+                                  selectedLongitude = picked.longitude;
+                                  selectedPlaceId = '';
+                                  if (spotCtrl.text.trim().isEmpty) {
+                                    spotCtrl.text = 'Pinned meeting spot';
+                                  }
+                                });
+                              },
+                              icon: const Icon(Icons.add_location_alt_outlined),
+                              label: const Text('Drop Pin On Map'),
+                              style: OutlinedButton.styleFrom(
+                                foregroundColor: const Color(0xFF567D46),
+                                side: const BorderSide(
+                                  color: Color(0xFF567D46),
+                                ),
+                              ),
+                            ),
+                            if (selectedLatitude != null &&
+                                selectedLongitude != null) ...[
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Text(
+                                  'Pinned: ${selectedLatitude!.toStringAsFixed(4)}, ${selectedLongitude!.toStringAsFixed(4)}',
+                                  style: TextStyle(
+                                    fontSize: 12.5,
+                                    color: Colors.grey[700],
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ],
                         ),
                         const SizedBox(height: 24),
                         _sectionTitle('Meet Up Time'),
@@ -2067,39 +2626,11 @@ class _GroupDetailsPageState extends State<GroupDetailsPage> {
                         const SizedBox(height: 24),
                         _sectionTitle('Privacy'),
                         const SizedBox(height: 8),
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 16,
-                            vertical: 12,
-                          ),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFFF6F7F5),
-                            borderRadius: BorderRadius.circular(14),
-                          ),
-                          child: Row(
-                            children: [
-                              Icon(
-                                isPublic ? Icons.public : Icons.lock,
-                                color: const Color(0xFF567D46),
-                              ),
-                              const SizedBox(width: 12),
-                              Expanded(
-                                child: Text(
-                                  isPublic ? 'Public Group' : 'Private Group',
-                                  style: const TextStyle(
-                                    fontWeight: FontWeight.w600,
-                                  ),
-                                ),
-                              ),
-                              Switch(
-                                value: isPublic,
-                                activeThumbColor: const Color(0xFF567D46),
-                                onChanged: (v) {
-                                  setLocalState(() => isPublic = v);
-                                },
-                              ),
-                            ],
-                          ),
+                        _buildPrivacyToggleCard(
+                          isPublic: isPublic,
+                          onChanged: (value) {
+                            setLocalState(() => isPublic = value);
+                          },
                         ),
                         const SizedBox(height: 30),
                         SizedBox(
