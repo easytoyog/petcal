@@ -30,6 +30,9 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
 
   bool _sending = false;
   StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _groupSub;
+  String? _resolvedSenderName;
+  final Map<String, String> _senderNamesByUid = {};
+  final Set<String> _resolvingSenderUids = <String>{};
 
   DocumentReference<Map<String, dynamic>> get _groupRef =>
       _firestore.collection('groups').doc(widget.groupId);
@@ -53,6 +56,131 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         .snapshots();
   }
 
+  bool _isMissingSenderName(String name) {
+    final normalized = name.trim().toLowerCase();
+    return normalized.isEmpty ||
+        normalized == 'unknown' ||
+        normalized == 'unknown user';
+  }
+
+  String _ownerNameFromData(Map<String, dynamic>? data) {
+    final firstName = (data?['firstName'] ?? '').toString().trim();
+    final lastName = (data?['lastName'] ?? '').toString().trim();
+    final fullName = '$firstName $lastName'.trim();
+    final ownerName = (fullName.isNotEmpty
+            ? fullName
+            : (data?['displayName'] ?? data?['name'] ?? data?['username'] ?? '')
+                .toString())
+        .trim();
+
+    if (ownerName.isNotEmpty) return ownerName;
+
+    final authName = _auth.currentUser?.displayName?.trim() ?? '';
+    if (authName.isNotEmpty) return authName;
+
+    final passedName = widget.currentUserName.trim();
+    if (passedName.isNotEmpty && passedName.toLowerCase() != 'unknown') {
+      return passedName;
+    }
+
+    return 'Unknown User';
+  }
+
+  Future<String> _resolveDisplayNameForUid(
+    String uid, {
+    bool preferOwnerDoc = false,
+  }) async {
+    String ownerName = '';
+
+    if (preferOwnerDoc) {
+      try {
+        final ownerSnap = await _firestore.collection('owners').doc(uid).get();
+        if (ownerSnap.exists) {
+          ownerName = _ownerNameFromData(ownerSnap.data());
+        }
+      } catch (_) {}
+    }
+
+    if (ownerName.isEmpty) {
+      try {
+        final publicSnap =
+            await _firestore.collection('public_profiles').doc(uid).get();
+        if (publicSnap.exists) {
+          ownerName = _ownerNameFromData(publicSnap.data());
+        }
+      } catch (_) {}
+    }
+
+    if (ownerName.isEmpty && uid == _auth.currentUser?.uid) {
+      ownerName = _ownerNameFromData(null);
+    }
+
+    String petName = '';
+    try {
+      final petsSnap = await _firestore
+          .collection('pets')
+          .where('ownerId', isEqualTo: uid)
+          .get();
+
+      if (petsSnap.docs.isNotEmpty) {
+        var chosen = petsSnap.docs.first;
+        for (final doc in petsSnap.docs) {
+          if (doc.data()['isMain'] == true) {
+            chosen = doc;
+            break;
+          }
+        }
+        petName = (chosen.data()['name'] ?? '').toString().trim();
+      }
+    } catch (_) {}
+
+    if (ownerName.isEmpty) {
+      ownerName = uid == _auth.currentUser?.uid
+          ? _ownerNameFromData(null)
+          : 'Unknown User';
+    }
+
+    if (petName.isEmpty) return ownerName;
+    return '$ownerName [$petName]';
+  }
+
+  Future<void> _primeSenderDisplayName() async {
+    final uid = _auth.currentUser?.uid;
+    if (uid == null) return;
+
+    final senderName = await _resolveDisplayNameForUid(
+      uid,
+      preferOwnerDoc: true,
+    );
+    if (!mounted) return;
+    setState(() {
+      _resolvedSenderName = senderName;
+      _senderNamesByUid[uid] = senderName;
+    });
+  }
+
+  Future<void> _ensureSenderDisplayName(String uid) async {
+    if (uid.isEmpty ||
+        _senderNamesByUid.containsKey(uid) ||
+        _resolvingSenderUids.contains(uid)) {
+      return;
+    }
+
+    _resolvingSenderUids.add(uid);
+    try {
+      final resolved = await _resolveDisplayNameForUid(
+        uid,
+        preferOwnerDoc: uid == _auth.currentUser?.uid,
+      );
+      if (!mounted) return;
+      setState(() {
+        _senderNamesByUid[uid] = resolved;
+      });
+    } finally {
+      _resolvingSenderUids.remove(uid);
+    }
+  }
+
   Future<void> _sendMessage() async {
     final user = _auth.currentUser;
     final text = _messageController.text.trim();
@@ -69,8 +197,14 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
           .collection('messages')
           .doc();
 
-      final senderName =
-          widget.currentUserName.isEmpty ? 'Unknown' : widget.currentUserName;
+      final senderName = _resolvedSenderName ??
+          await _resolveDisplayNameForUid(user.uid, preferOwnerDoc: true);
+      if (_resolvedSenderName != senderName && mounted) {
+        setState(() {
+          _resolvedSenderName = senderName;
+          _senderNamesByUid[user.uid] = senderName;
+        });
+      }
       final batch = _firestore.batch();
 
       batch.set(msgRef, {
@@ -166,6 +300,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   void initState() {
     super.initState();
     _listenForReadUpdates();
+    unawaited(_primeSenderDisplayName());
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _markAsRead();
     });
@@ -346,10 +481,18 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                     final data = docs[index].data();
                     final text = (data['text'] ?? '') as String;
                     final senderId = (data['senderId'] ?? '') as String;
-                    final senderName =
+                    final storedSenderName =
                         (data['senderName'] ?? 'Unknown') as String;
+                    final senderName = _senderNamesByUid[senderId] ??
+                        (_isMissingSenderName(storedSenderName)
+                            ? 'Unknown User'
+                            : storedSenderName);
                     final createdAt = data['createdAt'] as Timestamp?;
                     final isMe = senderId == currentUid;
+
+                    if (_isMissingSenderName(storedSenderName)) {
+                      unawaited(_ensureSenderDisplayName(senderId));
+                    }
 
                     final children = <Widget>[];
 
