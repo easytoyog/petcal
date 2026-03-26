@@ -77,6 +77,12 @@ class _CelebrationDialogState extends State<CelebrationDialog> {
     return u.isEmpty ? '' : u;
   }
 
+  Rect? _shareOrigin() {
+    final box = context.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize) return null;
+    return box.localToGlobal(Offset.zero) & box.size;
+  }
+
   /// Draw a square PNG with the neutral caption *inside* the card.
   Future<File> _generateStatCardPng({
     required int steps,
@@ -155,6 +161,14 @@ class _CelebrationDialogState extends State<CelebrationDialog> {
   }
 
   Future<void> _shareSystem() async {
+    final shareOrigin = _shareOrigin();
+    final fallbackText = [
+      'My dog and I just finished a walk on InThePark.',
+      'Distance: ${widget.kmText} km',
+      'Steps: ${widget.steps}',
+      if (_walkUrl.isNotEmpty) _walkUrl,
+    ].join('\n');
+
     try {
       final file = await _generateStatCardPng(
         steps: widget.steps,
@@ -170,20 +184,32 @@ class _CelebrationDialogState extends State<CelebrationDialog> {
       // No separate message; the caption is in the image.
       // Optionally include a link if provided.
       if (_walkUrl.isNotEmpty) {
-        await Share.shareXFiles(
-          [xfile],
-          text: _walkUrl,
-          subject: "InThePark Walk",
+        await SharePlus.instance.share(
+          ShareParams(
+            files: [xfile],
+            text: _walkUrl,
+            subject: "InThePark Walk",
+            sharePositionOrigin: shareOrigin,
+          ),
         );
       } else {
-        await Share.shareXFiles(
-          [xfile],
-          subject: "InThePark Walk",
+        await SharePlus.instance.share(
+          ShareParams(
+            files: [xfile],
+            subject: "InThePark Walk",
+            sharePositionOrigin: shareOrigin,
+          ),
         );
       }
-    } catch (_) {
-      // Fallback share without text message.
-      await Share.shareXFiles(const [], subject: "InThePark Walk");
+    } catch (e) {
+      debugPrint('Walk share failed, falling back to text share: $e');
+      await SharePlus.instance.share(
+        ShareParams(
+          text: fallbackText,
+          subject: "InThePark Walk",
+          sharePositionOrigin: shareOrigin,
+        ),
+      );
     }
   }
 

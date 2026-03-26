@@ -185,6 +185,7 @@ class _GroupsTabState extends State<GroupsTab>
 
   List<Group> _myGroups = [];
   List<Group> _localPublicGroups = [];
+  List<Group> _publicGroups = [];
   List<Group> _searchedGroups = [];
   Map<String, DateTime> _groupLastReadAt = {};
   String _groupSearchQuery = '';
@@ -192,9 +193,12 @@ class _GroupsTabState extends State<GroupsTab>
   bool _isSearchingGroups = false;
 
   bool _isLoading = true;
+  bool _isLoadingLocalGroups = false;
   bool _showingLocalGroups = false;
+  bool _hasLoadedPublicGroups = false;
   LatLng? _userLocation;
   StreamSubscription<QuerySnapshot<Map<String, dynamic>>>? _groupReadsSub;
+  Future<void>? _publicGroupsLoadTask;
 
   @override
   void initState() {
@@ -215,18 +219,22 @@ class _GroupsTabState extends State<GroupsTab>
   }
 
   Future<void> _init() async {
-    await Future.wait([
-      _fetchUserLocation(),
-      _fetchMyGroups(),
-    ]);
+    await _fetchMyGroups();
 
     if (mounted) {
       setState(() => _isLoading = false);
     }
+
+    unawaited(_fetchUserLocation());
+    unawaited(_ensurePublicGroupsLoaded());
   }
 
   Future<void> _refreshCurrentView() async {
-    await _fetchMyGroups();
+    await Future.wait([
+      _fetchMyGroups(),
+      _fetchUserLocation(),
+      _ensurePublicGroupsLoaded(forceRefresh: true),
+    ]);
     if (_showingLocalGroups) {
       await _fetchLocalPublicGroups(showSnackOnNoLocation: false);
     }
@@ -269,13 +277,9 @@ class _GroupsTabState extends State<GroupsTab>
           .toList();
       final existingIds = myMatches.map((group) => group.id).toSet();
 
-      final publicSnap = await _fs
-          .collection('groups')
-          .where('isPublic', isEqualTo: true)
-          .get();
+      await _ensurePublicGroupsLoaded();
 
-      final publicMatches = publicSnap.docs
-          .map((doc) => Group.fromFirestore(doc))
+      final publicMatches = _publicGroups
           .where(
             (group) =>
                 group.name.toLowerCase().contains(query) &&
@@ -374,6 +378,40 @@ class _GroupsTabState extends State<GroupsTab>
     }
   }
 
+  Future<void> _ensurePublicGroupsLoaded({bool forceRefresh = false}) async {
+    if (_hasLoadedPublicGroups && !forceRefresh) return;
+    if (_publicGroupsLoadTask != null && !forceRefresh) {
+      await _publicGroupsLoadTask;
+      return;
+    }
+
+    final task = _loadPublicGroups(forceRefresh: forceRefresh);
+    _publicGroupsLoadTask = task;
+    try {
+      await task;
+    } finally {
+      if (identical(_publicGroupsLoadTask, task)) {
+        _publicGroupsLoadTask = null;
+      }
+    }
+  }
+
+  Future<void> _loadPublicGroups({bool forceRefresh = false}) async {
+    try {
+      final query = await _fs
+          .collection('groups')
+          .where('isPublic', isEqualTo: true)
+          .get();
+
+      _publicGroups =
+          query.docs.map((doc) => Group.fromFirestore(doc)).toList();
+      _hasLoadedPublicGroups = true;
+    } catch (e) {
+      debugPrint('Error fetching public groups: $e');
+      if (forceRefresh) rethrow;
+    }
+  }
+
   Future<void> _fetchMyGroups() async {
     if (_currentUserId == null) return;
 
@@ -406,9 +444,19 @@ class _GroupsTabState extends State<GroupsTab>
   Future<void> _fetchLocalPublicGroups({
     bool showSnackOnNoLocation = true,
   }) async {
+    if (mounted) {
+      setState(() {
+        _showingLocalGroups = true;
+        _isLoadingLocalGroups = true;
+      });
+    }
+
     await _fetchUserLocation();
 
     if (_userLocation == null) {
+      if (mounted) {
+        setState(() => _isLoadingLocalGroups = false);
+      }
       if (showSnackOnNoLocation && mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Location not available')),
@@ -418,13 +466,9 @@ class _GroupsTabState extends State<GroupsTab>
     }
 
     try {
-      final query = await _fs
-          .collection('groups')
-          .where('isPublic', isEqualTo: true)
-          .get();
+      await _ensurePublicGroupsLoaded();
 
-      final groups =
-          query.docs.map((doc) => Group.fromFirestore(doc)).where((g) {
+      final groups = _publicGroups.where((g) {
         if (g.latitude == null || g.longitude == null) return false;
         final distanceKm = _distance(
           _userLocation!,
@@ -444,11 +488,15 @@ class _GroupsTabState extends State<GroupsTab>
       _localPublicGroups = groups;
 
       if (mounted) {
-        setState(() => _showingLocalGroups = true);
+        setState(() {
+          _showingLocalGroups = true;
+          _isLoadingLocalGroups = false;
+        });
       }
     } catch (e) {
       debugPrint('Error fetching local groups: $e');
       if (mounted) {
+        setState(() => _isLoadingLocalGroups = false);
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Error loading local groups: $e')),
         );
@@ -1022,6 +1070,7 @@ class _GroupsTabState extends State<GroupsTab>
       });
 
       await _fetchMyGroups();
+      await _ensurePublicGroupsLoaded(forceRefresh: true);
       if (_showingLocalGroups) {
         await _fetchLocalPublicGroups(showSnackOnNoLocation: false);
       }
@@ -1052,6 +1101,7 @@ class _GroupsTabState extends State<GroupsTab>
       });
 
       await _fetchMyGroups();
+      await _ensurePublicGroupsLoaded(forceRefresh: true);
       await _fetchLocalPublicGroups(showSnackOnNoLocation: false);
 
       if (mounted) {
@@ -1081,6 +1131,7 @@ class _GroupsTabState extends State<GroupsTab>
       });
 
       await _fetchMyGroups();
+      await _ensurePublicGroupsLoaded(forceRefresh: true);
       if (_showingLocalGroups) {
         await _fetchLocalPublicGroups(showSnackOnNoLocation: false);
       }
@@ -1106,6 +1157,7 @@ class _GroupsTabState extends State<GroupsTab>
       await _fs.collection('groups').doc(groupId).delete();
 
       await _fetchMyGroups();
+      await _ensurePublicGroupsLoaded(forceRefresh: true);
       if (_showingLocalGroups) {
         await _fetchLocalPublicGroups(showSnackOnNoLocation: false);
       }
@@ -1493,6 +1545,10 @@ class _GroupsTabState extends State<GroupsTab>
   Widget _buildLocalGroupsList() {
     final visibleGroups =
         _localPublicGroups.where(_groupMatchesSearch).toList();
+
+    if (_isLoadingLocalGroups) {
+      return const Center(child: CircularProgressIndicator());
+    }
 
     if (_localPublicGroups.isEmpty) {
       return RefreshIndicator(

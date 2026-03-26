@@ -19,7 +19,7 @@ import 'package:intl/intl.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:flutter/services.dart'
-    show Clipboard, ClipboardData, FilteringTextInputFormatter, rootBundle;
+    show Clipboard, ClipboardData, rootBundle;
 import 'dart:ui' as ui;
 import 'dart:async';
 import 'package:inthepark/widgets/ad_banner.dart';
@@ -167,12 +167,21 @@ class ProfileTab extends StatefulWidget {
 }
 
 class _ProfileTabState extends State<ProfileTab> {
-  static const List<String> _petSexOptions = ['Male', 'Female'];
   static const List<String> _petSizeOptions = [
     'Small',
     'Medium',
     'Large',
     'Extra Large',
+  ];
+  static const List<String> _petEnergyLevelOptions = [
+    'Low',
+    'Medium',
+    'High',
+  ];
+  static const List<String> _petFriendlyWithDogsOptions = [
+    'Yes',
+    'Sometimes',
+    'No',
   ];
 
   static const Map<String, String> _documentTypeLabels = {
@@ -469,14 +478,29 @@ class _ProfileTabState extends State<ProfileTab> {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Text('Current Streak: ${days(current)}',
-                                style: const TextStyle(
-                                    fontSize: 16, fontWeight: FontWeight.w800)),
+                            const Text(
+                              'Current Streak:',
+                              style: TextStyle(
+                                fontSize: 14,
+                                fontWeight: FontWeight.w800,
+                              ),
+                            ),
                             const SizedBox(height: 2),
-                            Text('Best: ${days(longest)}',
-                                style: TextStyle(
-                                    color: Colors.black.withOpacity(0.7),
-                                    fontWeight: FontWeight.w600)),
+                            Text(
+                              days(current),
+                              style: const TextStyle(
+                                fontSize: 18,
+                                fontWeight: FontWeight.w900,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              'Best: ${days(longest)}',
+                              style: TextStyle(
+                                color: Colors.black.withOpacity(0.7),
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
                           ],
                         ),
                       ),
@@ -610,6 +634,16 @@ class _ProfileTabState extends State<ProfileTab> {
         borderRadius: BorderRadius.all(Radius.circular(14)),
         borderSide: BorderSide(color: Colors.teal, width: 2),
       ),
+    );
+  }
+
+  InputDecoration _petFieldDecoration(
+    String label, {
+    String? hint,
+  }) {
+    return _outlinedDecoration(hint ?? label).copyWith(
+      labelText: label,
+      floatingLabelBehavior: FloatingLabelBehavior.always,
     );
   }
 
@@ -861,10 +895,10 @@ class _ProfileTabState extends State<ProfileTab> {
     final newPetId = FirebaseFirestore.instance.collection('pets').doc().id;
     final nameController = TextEditingController();
     final breedController = TextEditingController();
-    final temperamentController = TextEditingController();
-    final weightController = TextEditingController();
-    String? selectedSex;
     String? selectedSize;
+    String? selectedEnergyLevel;
+    bool? selectedSpayedOrNeutered;
+    String? selectedFriendlyWithDogs;
     DateTime? birthday;
     String? photoUrl; // stays null until user uploads
     _sheetUploading = false;
@@ -904,7 +938,10 @@ class _ProfileTabState extends State<ProfileTab> {
                   const SizedBox(height: 16),
                   TextField(
                     controller: nameController,
-                    decoration: _outlinedDecoration("Pet name").copyWith(
+                    decoration: _petFieldDecoration(
+                      "Pet name",
+                      hint: "Enter pet name",
+                    ).copyWith(
                       errorText: (triedSave && nameEmpty)
                           ? "Pet name is required"
                           : null,
@@ -914,92 +951,127 @@ class _ProfileTabState extends State<ProfileTab> {
                   const SizedBox(height: 12),
                   TextField(
                     controller: breedController,
-                    decoration: _outlinedDecoration("Pet breed (optional)"),
+                    decoration: _petFieldDecoration(
+                      "Breed",
+                      hint: "Enter breed",
+                    ),
                   ),
                   const SizedBox(height: 12),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: DropdownButtonFormField<String?>(
-                          initialValue: selectedSex,
-                          decoration: _outlinedDecoration("Sex"),
-                          items: [
-                            const DropdownMenuItem<String?>(
-                              value: null,
-                              child: Text("Not specified"),
-                            ),
-                            ..._petSexOptions.map(
-                              (option) => DropdownMenuItem<String?>(
-                                value: option,
-                                child: Text(option),
-                              ),
-                            ),
-                          ],
-                          onChanged: (value) {
-                            setSheetState(() => selectedSex = value);
-                          },
-                        ),
+                  DropdownButtonFormField<String?>(
+                    initialValue: selectedSize,
+                    decoration: _petFieldDecoration("Size"),
+                    items: [
+                      const DropdownMenuItem<String?>(
+                        value: null,
+                        child: Text("Not specified"),
                       ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: DropdownButtonFormField<String?>(
-                          initialValue: selectedSize,
-                          decoration: _outlinedDecoration("Size"),
-                          items: [
-                            const DropdownMenuItem<String?>(
-                              value: null,
-                              child: Text("Not specified"),
-                            ),
-                            ..._petSizeOptions.map(
-                              (option) => DropdownMenuItem<String?>(
-                                value: option,
-                                child: Text(option),
-                              ),
-                            ),
-                          ],
-                          onChanged: (value) {
-                            setSheetState(() => selectedSize = value);
-                          },
+                      ..._petSizeOptions.map(
+                        (option) => DropdownMenuItem<String?>(
+                          value: option,
+                          child: Text(option),
                         ),
                       ),
                     ],
+                    onChanged: (value) {
+                      setSheetState(() => selectedSize = value);
+                    },
                   ),
                   const SizedBox(height: 12),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: TextField(
-                          controller: weightController,
-                          keyboardType: const TextInputType.numberWithOptions(
-                            decimal: true,
-                          ),
-                          inputFormatters: [
-                            FilteringTextInputFormatter.allow(
-                              RegExp(r'[0-9.]'),
-                            ),
-                          ],
-                          decoration: _outlinedDecoration("Weight (lb)"),
-                        ),
+                  DropdownButtonFormField<String?>(
+                    initialValue: selectedEnergyLevel,
+                    decoration: _petFieldDecoration("Energy level"),
+                    items: [
+                      const DropdownMenuItem<String?>(
+                        value: null,
+                        child: Text("Not specified"),
                       ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: OutlinedButton.icon(
-                          onPressed: () async {
-                            final picked = await _pickPetBirthday(
-                              initialDate: birthday,
-                            );
-                            if (picked == null) return;
-                            setSheetState(() => birthday = picked);
-                          },
-                          icon: const Icon(Icons.cake_outlined),
-                          label: Text(
-                            birthday == null
-                                ? 'Birthday'
-                                : DateFormat('MMM d, yyyy').format(birthday!),
-                          ),
+                      ..._petEnergyLevelOptions.map(
+                        (option) => DropdownMenuItem<String?>(
+                          value: option,
+                          child: Text(option),
                         ),
                       ),
                     ],
+                    onChanged: (value) {
+                      setSheetState(() => selectedEnergyLevel = value);
+                    },
+                  ),
+                  const SizedBox(height: 12),
+                  DropdownButtonFormField<bool?>(
+                    initialValue: selectedSpayedOrNeutered,
+                    decoration: _petFieldDecoration("Spayed / neutered"),
+                    items: [
+                      const DropdownMenuItem<bool?>(
+                        value: null,
+                        child: Text("Not specified"),
+                      ),
+                      const DropdownMenuItem<bool?>(
+                        value: true,
+                        child: Text("Yes"),
+                      ),
+                      const DropdownMenuItem<bool?>(
+                        value: false,
+                        child: Text("No"),
+                      ),
+                    ],
+                    onChanged: (value) {
+                      setSheetState(
+                        () => selectedSpayedOrNeutered = value,
+                      );
+                    },
+                  ),
+                  const SizedBox(height: 12),
+                  const Align(
+                    alignment: Alignment.centerLeft,
+                    child: Padding(
+                      padding: EdgeInsets.only(left: 4, bottom: 6),
+                      child: Text(
+                        'Birthday',
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w700,
+                          color: Colors.black87,
+                        ),
+                      ),
+                    ),
+                  ),
+                  SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton.icon(
+                      onPressed: () async {
+                        final picked = await _pickPetBirthday(
+                          initialDate: birthday,
+                        );
+                        if (picked == null) return;
+                        setSheetState(() => birthday = picked);
+                      },
+                      icon: const Icon(Icons.cake_outlined),
+                      label: Text(
+                        birthday == null
+                            ? 'Birthday'
+                            : DateFormat('MMM d, yyyy').format(birthday!),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  DropdownButtonFormField<String?>(
+                    initialValue: selectedFriendlyWithDogs,
+                    decoration: _petFieldDecoration("Friendly with dogs"),
+                    items: [
+                      const DropdownMenuItem<String?>(
+                        value: null,
+                        child: Text("Not specified"),
+                      ),
+                      ..._petFriendlyWithDogsOptions.map(
+                        (option) => DropdownMenuItem<String?>(
+                          value: option,
+                          child: Text(option),
+                        ),
+                      ),
+                    ],
+                    onChanged: (value) {
+                      setSheetState(() => selectedFriendlyWithDogs = value);
+                    },
                   ),
                   if (birthday != null) ...[
                     const SizedBox(height: 8),
@@ -1011,12 +1083,6 @@ class _ProfileTabState extends State<ProfileTab> {
                       ),
                     ),
                   ],
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: temperamentController,
-                    maxLines: 2,
-                    decoration: _outlinedDecoration("Temperament / notes"),
-                  ),
                   const SizedBox(height: 18),
                   Row(
                     children: [
@@ -1045,11 +1111,11 @@ class _ProfileTabState extends State<ProfileTab> {
                                     petId: newPetId,
                                     name: name,
                                     breed: breedController.text.trim(),
-                                    sex: selectedSex,
                                     size: selectedSize,
-                                    temperament:
-                                        temperamentController.text.trim(),
-                                    weightText: weightController.text.trim(),
+                                    energyLevel: selectedEnergyLevel,
+                                    isSpayedOrNeutered:
+                                        selectedSpayedOrNeutered,
+                                    friendlyWithDogs: selectedFriendlyWithDogs,
                                     birthday: birthday,
                                     photoUrl:
                                         photoUrl, // nullable; defaulted inside
@@ -1099,24 +1165,19 @@ class _ProfileTabState extends State<ProfileTab> {
   Future<void> _showEditPetSheet(Pet pet) async {
     final nameController = TextEditingController(text: pet.name);
     final breedController = TextEditingController(text: pet.breed ?? "");
-    final temperamentController =
-        TextEditingController(text: pet.temperament ?? "");
-    final weightController = TextEditingController(
-      text: pet.weight == null ? "" : _formatWeightInput(pet.weight!),
-    );
-    String? selectedSex = pet.sex;
     String? selectedSize = pet.size;
+    String? selectedEnergyLevel = pet.energyLevel;
+    bool? selectedSpayedOrNeutered = pet.isSpayedOrNeutered;
+    String? selectedFriendlyWithDogs = pet.friendlyWithDogs;
     DateTime? birthday = pet.birthday;
     String? photoUrl = pet.photoUrl; // start with current
     _sheetUploading = false;
     bool triedSave = false;
 
-    await showModalBottomSheet(
+    await showDialog<void>(
       context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
       builder: (_) {
-        return _ModernSheet(
+        return Dialog.fullscreen(
           child: StatefulBuilder(
             builder: (context, setSheetState) {
               Future<void> pickImage() async {
@@ -1132,60 +1193,80 @@ class _ProfileTabState extends State<ProfileTab> {
               final name = nameController.text.trim();
               final nameEmpty = name.isEmpty;
 
-              return Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const _SheetHeader(title: "Edit Pet"),
-                  const SizedBox(height: 12),
-                  _AvatarPicker(
-                    imageUrl: photoUrl,
-                    isUploading: _sheetUploading,
-                    onTap: pickImage,
+              return Scaffold(
+                appBar: AppBar(
+                  title: const Text('Edit Pet'),
+                  leading: IconButton(
+                    icon: const Icon(Icons.close),
+                    onPressed: () => Navigator.pop(context),
                   ),
-                  const SizedBox(height: 16),
-                  TextField(
-                    controller: nameController,
-                    decoration: _outlinedDecoration("Pet name").copyWith(
-                      errorText: (triedSave && nameEmpty)
-                          ? "Pet name is required"
-                          : null,
-                    ),
-                    onChanged: (_) => setSheetState(() {}),
-                  ),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: breedController,
-                    decoration: _outlinedDecoration("Pet breed (optional)"),
-                  ),
-                  const SizedBox(height: 12),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: DropdownButtonFormField<String?>(
-                          initialValue: selectedSex,
-                          decoration: _outlinedDecoration("Sex"),
-                          items: [
-                            const DropdownMenuItem<String?>(
-                              value: null,
-                              child: Text("Not specified"),
-                            ),
-                            ..._petSexOptions.map(
-                              (option) => DropdownMenuItem<String?>(
-                                value: option,
-                                child: Text(option),
-                              ),
-                            ),
-                          ],
-                          onChanged: (value) {
-                            setSheetState(() => selectedSex = value);
-                          },
-                        ),
+                  actions: [
+                    TextButton(
+                      onPressed: (_sheetUploading || nameEmpty)
+                          ? null
+                          : () async {
+                              Navigator.of(context).pop();
+                              await _editPet(
+                                oldPet: pet,
+                                newName: name,
+                                newBreed: breedController.text.trim(),
+                                newSize: selectedSize,
+                                newEnergyLevel: selectedEnergyLevel,
+                                newIsSpayedOrNeutered: selectedSpayedOrNeutered,
+                                newFriendlyWithDogs: selectedFriendlyWithDogs,
+                                newBirthday: birthday,
+                                newPhotoUrl:
+                                    photoUrl, // nullable; handled inside
+                              );
+                            },
+                      child: const Text(
+                        'Save',
+                        style: TextStyle(fontWeight: FontWeight.w800),
                       ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: DropdownButtonFormField<String?>(
+                    ),
+                  ],
+                ),
+                body: SafeArea(
+                  child: SingleChildScrollView(
+                    padding: EdgeInsets.fromLTRB(
+                      20,
+                      20,
+                      20,
+                      MediaQuery.of(context).viewInsets.bottom + 24,
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _AvatarPicker(
+                          imageUrl: photoUrl,
+                          isUploading: _sheetUploading,
+                          onTap: pickImage,
+                        ),
+                        const SizedBox(height: 20),
+                        TextField(
+                          controller: nameController,
+                          decoration: _petFieldDecoration(
+                            "Pet name",
+                            hint: "Enter pet name",
+                          ).copyWith(
+                            errorText: (triedSave && nameEmpty)
+                                ? "Pet name is required"
+                                : null,
+                          ),
+                          onChanged: (_) => setSheetState(() {}),
+                        ),
+                        const SizedBox(height: 12),
+                        TextField(
+                          controller: breedController,
+                          decoration: _petFieldDecoration(
+                            "Breed",
+                            hint: "Enter breed",
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        DropdownButtonFormField<String?>(
                           initialValue: selectedSize,
-                          decoration: _outlinedDecoration("Size"),
+                          decoration: _petFieldDecoration("Size"),
                           items: [
                             const DropdownMenuItem<String?>(
                               value: null,
@@ -1202,133 +1283,136 @@ class _ProfileTabState extends State<ProfileTab> {
                             setSheetState(() => selectedSize = value);
                           },
                         ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: TextField(
-                          controller: weightController,
-                          keyboardType: const TextInputType.numberWithOptions(
-                            decimal: true,
-                          ),
-                          inputFormatters: [
-                            FilteringTextInputFormatter.allow(
-                              RegExp(r'[0-9.]'),
+                        const SizedBox(height: 12),
+                        DropdownButtonFormField<String?>(
+                          initialValue: selectedEnergyLevel,
+                          decoration: _petFieldDecoration("Energy level"),
+                          items: [
+                            const DropdownMenuItem<String?>(
+                              value: null,
+                              child: Text("Not specified"),
+                            ),
+                            ..._petEnergyLevelOptions.map(
+                              (option) => DropdownMenuItem<String?>(
+                                value: option,
+                                child: Text(option),
+                              ),
                             ),
                           ],
-                          decoration: _outlinedDecoration("Weight (lb)"),
+                          onChanged: (value) {
+                            setSheetState(() => selectedEnergyLevel = value);
+                          },
                         ),
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: OutlinedButton.icon(
-                          onPressed: () async {
-                            final picked = await _pickPetBirthday(
-                              initialDate: birthday,
+                        const SizedBox(height: 12),
+                        DropdownButtonFormField<bool?>(
+                          initialValue: selectedSpayedOrNeutered,
+                          decoration: _petFieldDecoration("Spayed / neutered"),
+                          items: [
+                            const DropdownMenuItem<bool?>(
+                              value: null,
+                              child: Text("Not specified"),
+                            ),
+                            const DropdownMenuItem<bool?>(
+                              value: true,
+                              child: Text("Yes"),
+                            ),
+                            const DropdownMenuItem<bool?>(
+                              value: false,
+                              child: Text("No"),
+                            ),
+                          ],
+                          onChanged: (value) {
+                            setSheetState(
+                              () => selectedSpayedOrNeutered = value,
                             );
-                            if (picked == null) return;
-                            setSheetState(() => birthday = picked);
                           },
-                          icon: const Icon(Icons.cake_outlined),
-                          label: Text(
-                            birthday == null
-                                ? 'Birthday'
-                                : DateFormat('MMM d, yyyy').format(birthday!),
-                          ),
                         ),
-                      ),
-                    ],
-                  ),
-                  if (birthday != null) ...[
-                    const SizedBox(height: 8),
-                    Align(
-                      alignment: Alignment.centerRight,
-                      child: TextButton(
-                        onPressed: () => setSheetState(() => birthday = null),
-                        child: const Text('Clear birthday'),
-                      ),
-                    ),
-                  ],
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: temperamentController,
-                    maxLines: 2,
-                    decoration: _outlinedDecoration("Temperament / notes"),
-                  ),
-                  const SizedBox(height: 18),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: OutlinedButton(
-                          onPressed: () => Navigator.pop(context),
-                          style: OutlinedButton.styleFrom(
-                            foregroundColor: Colors.black87,
-                            side: const BorderSide(color: Colors.black26),
-                            padding: const EdgeInsets.symmetric(vertical: 14),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(12),
+                        const SizedBox(height: 12),
+                        const Padding(
+                          padding: EdgeInsets.only(left: 4, bottom: 6),
+                          child: Text(
+                            'Birthday',
+                            style: TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w700,
+                              color: Colors.black87,
                             ),
                           ),
-                          child: const Text("Cancel"),
                         ),
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: ElevatedButton(
-                          onPressed: (_sheetUploading || nameEmpty)
-                              ? null
-                              : () async {
-                                  Navigator.of(context).pop();
-                                  await _editPet(
-                                    oldPet: pet,
-                                    newName: name,
-                                    newBreed: breedController.text.trim(),
-                                    newSex: selectedSex,
-                                    newSize: selectedSize,
-                                    newTemperament:
-                                        temperamentController.text.trim(),
-                                    newWeightText: weightController.text.trim(),
-                                    newBirthday: birthday,
-                                    newPhotoUrl:
-                                        photoUrl, // nullable; handled inside
-                                  );
+                        SizedBox(
+                          width: double.infinity,
+                          child: OutlinedButton.icon(
+                            onPressed: () async {
+                              final picked = await _pickPetBirthday(
+                                initialDate: birthday,
+                              );
+                              if (picked == null) return;
+                              setSheetState(() => birthday = picked);
+                            },
+                            icon: const Icon(Icons.cake_outlined),
+                            label: Text(
+                              birthday == null
+                                  ? 'Select birthday'
+                                  : DateFormat('MMM d, yyyy').format(birthday!),
+                            ),
+                          ),
+                        ),
+                        if (birthday != null) ...[
+                          const SizedBox(height: 8),
+                          Align(
+                            alignment: Alignment.centerRight,
+                            child: TextButton(
+                              onPressed: () =>
+                                  setSheetState(() => birthday = null),
+                              child: const Text('Clear birthday'),
+                            ),
+                          ),
+                        ],
+                        const SizedBox(height: 12),
+                        DropdownButtonFormField<String?>(
+                          initialValue: selectedFriendlyWithDogs,
+                          decoration: _petFieldDecoration(
+                            "Friendly with dogs",
+                          ),
+                          items: [
+                            const DropdownMenuItem<String?>(
+                              value: null,
+                              child: Text("Not specified"),
+                            ),
+                            ..._petFriendlyWithDogsOptions.map(
+                              (option) => DropdownMenuItem<String?>(
+                                value: option,
+                                child: Text(option),
+                              ),
+                            ),
+                          ],
+                          onChanged: (value) {
+                            setSheetState(
+                              () => selectedFriendlyWithDogs = value,
+                            );
+                          },
+                        ),
+                        if (!_sheetUploading && nameEmpty)
+                          Align(
+                            alignment: Alignment.centerLeft,
+                            child: Padding(
+                              padding: const EdgeInsets.only(top: 6),
+                              child: Builder(
+                                builder: (ctx) {
+                                  if (!triedSave) {
+                                    Future.microtask(() {
+                                      setSheetState(() => triedSave = true);
+                                    });
+                                  }
+                                  return const SizedBox.shrink();
                                 },
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: Colors.tealAccent,
-                            foregroundColor: Colors.black,
-                            padding: const EdgeInsets.symmetric(vertical: 14),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(12),
+                              ),
                             ),
                           ),
-                          child: const Text("Save Changes"),
-                        ),
-                      ),
-                    ],
-                  ),
-                  if (!_sheetUploading && nameEmpty)
-                    Align(
-                      alignment: Alignment.centerLeft,
-                      child: Padding(
-                        padding: const EdgeInsets.only(top: 6),
-                        child: Builder(
-                          builder: (ctx) {
-                            if (!triedSave) {
-                              Future.microtask(() {
-                                setSheetState(() => triedSave = true);
-                              });
-                            }
-                            return const SizedBox.shrink();
-                          },
-                        ),
-                      ),
+                      ],
                     ),
-                  SizedBox(
-                      height: MediaQuery.of(context).viewInsets.bottom + 6),
-                ],
+                  ),
+                ),
               );
             },
           ),
@@ -1343,10 +1427,10 @@ class _ProfileTabState extends State<ProfileTab> {
     required String petId,
     required String name,
     required String breed,
-    String? sex,
     String? size,
-    required String temperament,
-    required String weightText,
+    String? energyLevel,
+    bool? isSpayedOrNeutered,
+    String? friendlyWithDogs,
     DateTime? birthday,
     String? photoUrl, // nullable incoming
   }) async {
@@ -1358,11 +1442,11 @@ class _ProfileTabState extends State<ProfileTab> {
       name: name.isEmpty ? "Unnamed Pet" : name,
       photoUrl: (photoUrl == null || photoUrl.isEmpty) ? null : photoUrl,
       breed: breed.isEmpty ? null : breed,
-      sex: _normalizeOptionalText(sex),
       size: _normalizeOptionalText(size),
-      temperament: _normalizeOptionalText(temperament),
-      weight: _parsePetWeight(weightText),
       birthday: birthday,
+      energyLevel: _normalizeOptionalText(energyLevel),
+      isSpayedOrNeutered: isSpayedOrNeutered,
+      friendlyWithDogs: _normalizeOptionalText(friendlyWithDogs),
     );
 
     try {
@@ -1382,10 +1466,10 @@ class _ProfileTabState extends State<ProfileTab> {
     required Pet oldPet,
     required String newName,
     required String newBreed,
-    String? newSex,
     String? newSize,
-    required String newTemperament,
-    required String newWeightText,
+    String? newEnergyLevel,
+    bool? newIsSpayedOrNeutered,
+    String? newFriendlyWithDogs,
     DateTime? newBirthday,
     String? newPhotoUrl, // nullable – keep old if null
   }) async {
@@ -1397,11 +1481,14 @@ class _ProfileTabState extends State<ProfileTab> {
           ? oldPet.photoUrl
           : newPhotoUrl,
       breed: newBreed.isEmpty ? null : newBreed,
-      sex: _normalizeOptionalText(newSex),
+      sex: oldPet.sex,
       size: _normalizeOptionalText(newSize),
-      temperament: _normalizeOptionalText(newTemperament),
-      weight: _parsePetWeight(newWeightText),
+      temperament: oldPet.temperament,
+      weight: oldPet.weight,
       birthday: newBirthday,
+      energyLevel: _normalizeOptionalText(newEnergyLevel),
+      isSpayedOrNeutered: newIsSpayedOrNeutered,
+      friendlyWithDogs: _normalizeOptionalText(newFriendlyWithDogs),
     );
     try {
       await _firestoreService.updatePet(updatedPet);
@@ -1532,19 +1619,6 @@ class _ProfileTabState extends State<ProfileTab> {
     return trimmed.isEmpty ? null : trimmed;
   }
 
-  double? _parsePetWeight(String value) {
-    final trimmed = value.trim();
-    if (trimmed.isEmpty) return null;
-    return double.tryParse(trimmed);
-  }
-
-  String _formatWeightInput(double value) {
-    if (value == value.roundToDouble()) {
-      return value.toStringAsFixed(0);
-    }
-    return value.toStringAsFixed(1);
-  }
-
   Future<DateTime?> _pickPetBirthday({
     DateTime? initialDate,
   }) async {
@@ -1557,64 +1631,6 @@ class _ProfileTabState extends State<ProfileTab> {
     );
     if (selected == null) return null;
     return DateTime(selected.year, selected.month, selected.day);
-  }
-
-  String _petAgeLabel(DateTime birthday) {
-    final now = DateTime.now();
-    int years = now.year - birthday.year;
-    int months = now.month - birthday.month;
-    if (now.day < birthday.day) {
-      months -= 1;
-    }
-    if (months < 0) {
-      years -= 1;
-      months += 12;
-    }
-
-    if (years > 0 && months > 0) return '$years yr $months mo';
-    if (years > 0) return '$years yr';
-    if (months > 0) return '$months mo';
-    return '<1 mo';
-  }
-
-  List<Widget> _buildPetDetailPills(Pet pet) {
-    final widgets = <Widget>[];
-    final breed = _normalizeOptionalText(pet.breed);
-    final sex = _normalizeOptionalText(pet.sex);
-    final size = _normalizeOptionalText(pet.size);
-    final temperament = _normalizeOptionalText(pet.temperament);
-
-    if (breed != null) {
-      widgets.add(_TinyInfoPill(icon: Icons.pets, text: breed));
-    }
-    if (sex != null) {
-      widgets.add(_TinyInfoPill(icon: Icons.badge_outlined, text: sex));
-    }
-    if (size != null) {
-      widgets.add(_TinyInfoPill(icon: Icons.straighten, text: size));
-    }
-    if (pet.birthday != null) {
-      widgets.add(
-        _TinyInfoPill(
-          icon: Icons.cake_outlined,
-          text: _petAgeLabel(pet.birthday!),
-        ),
-      );
-    }
-    if (pet.weight != null) {
-      widgets.add(
-        _TinyInfoPill(
-          icon: Icons.monitor_weight_outlined,
-          text: '${_formatWeightInput(pet.weight!)} lb',
-        ),
-      );
-    }
-    if (temperament != null) {
-      widgets
-          .add(_TinyInfoPill(icon: Icons.favorite_outline, text: temperament));
-    }
-
-    return widgets;
   }
 
   Future<DateTime?> _pickExpiryDate({
@@ -2149,7 +2165,6 @@ class _ProfileTabState extends State<ProfileTab> {
     final hasPhoto = photo.trim().isNotEmpty;
     final ImageProvider? petImage = hasPhoto ? NetworkImage(photo) : null;
     final docs = _petDocumentsByPetId[pet.id] ?? const [];
-    final detailPills = _buildPetDetailPills(pet);
     final breedText = _normalizeOptionalText(pet.breed);
 
     return Container(
@@ -2184,14 +2199,6 @@ class _ProfileTabState extends State<ProfileTab> {
                     ),
                     const SizedBox(height: 4),
                     Text(breedText ?? 'Add a few more details for this dog'),
-                    if (detailPills.isNotEmpty) ...[
-                      const SizedBox(height: 10),
-                      Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
-                        children: detailPills,
-                      ),
-                    ],
                   ],
                 ),
               ),
@@ -2205,9 +2212,9 @@ class _ProfileTabState extends State<ProfileTab> {
               ),
             ],
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 2),
           Divider(color: Colors.black.withOpacity(0.08), height: 1),
-          const SizedBox(height: 12),
+          const SizedBox(height: 2),
           Row(
             children: [
               const Expanded(
@@ -2226,7 +2233,7 @@ class _ProfileTabState extends State<ProfileTab> {
               ),
             ],
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: 2),
           if (docs.isEmpty)
             Text(
               'No documents uploaded yet.',

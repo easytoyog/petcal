@@ -11,6 +11,9 @@ class Pet {
   final String? temperament; // optional
   final double? weight; // optional
   final DateTime? birthday; // optional
+  final String? energyLevel; // optional
+  final bool? isSpayedOrNeutered; // optional
+  final String? friendlyWithDogs; // optional
 
   Pet({
     required this.id,
@@ -23,6 +26,9 @@ class Pet {
     this.temperament,
     this.weight,
     this.birthday,
+    this.energyLevel,
+    this.isSpayedOrNeutered,
+    this.friendlyWithDogs,
   });
 
   /// Robust factory from Firestore
@@ -42,6 +48,11 @@ class Pet {
       birthday: (data['birthday'] is Timestamp)
           ? (data['birthday'] as Timestamp).toDate()
           : null,
+      energyLevel: data['energyLevel'] as String?,
+      isSpayedOrNeutered: data['isSpayedOrNeutered'] is bool
+          ? data['isSpayedOrNeutered'] as bool
+          : null,
+      friendlyWithDogs: data['friendlyWithDogs'] as String?,
     );
   }
 
@@ -58,6 +69,13 @@ class Pet {
     if (temperament != null) map['temperament'] = temperament;
     if (weight != null) map['weight'] = weight;
     if (birthday != null) map['birthday'] = Timestamp.fromDate(birthday!);
+    if (energyLevel != null) map['energyLevel'] = energyLevel;
+    if (isSpayedOrNeutered != null) {
+      map['isSpayedOrNeutered'] = isSpayedOrNeutered;
+    }
+    if (friendlyWithDogs != null) {
+      map['friendlyWithDogs'] = friendlyWithDogs;
+    }
     return map;
   }
 
@@ -72,6 +90,9 @@ class Pet {
     String? temperament,
     double? weight,
     DateTime? birthday,
+    String? energyLevel,
+    bool? isSpayedOrNeutered,
+    String? friendlyWithDogs,
   }) {
     return Pet(
       id: id ?? this.id,
@@ -84,6 +105,9 @@ class Pet {
       temperament: temperament ?? this.temperament,
       weight: weight ?? this.weight,
       birthday: birthday ?? this.birthday,
+      energyLevel: energyLevel ?? this.energyLevel,
+      isSpayedOrNeutered: isSpayedOrNeutered ?? this.isSpayedOrNeutered,
+      friendlyWithDogs: friendlyWithDogs ?? this.friendlyWithDogs,
     );
   }
 }

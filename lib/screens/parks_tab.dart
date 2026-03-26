@@ -39,6 +39,7 @@ class ParksTab extends StatefulWidget {
 
 class _ParksTabState extends State<ParksTab>
     with AutomaticKeepAliveClientMixin<ParksTab>, WidgetsBindingObserver {
+  static const Duration _activeUserStaleAfter = Duration(hours: 3);
   final _locationService =
       LocationService(dotenv.env['GOOGLE_MAPS_API_KEY'] ?? '');
   final ScrollController _scrollController = ScrollController();
@@ -123,6 +124,29 @@ class _ParksTabState extends State<ParksTab>
       ..dispose();
     _metaInFlight.clear();
     super.dispose();
+  }
+
+  DateTime? _activeUserCheckedInAt(Map<String, dynamic> data) {
+    final checkedInAt = data['checkedInAt'];
+    if (checkedInAt is Timestamp) return checkedInAt.toDate();
+
+    final legacyCheckInAt = data['checkInAt'];
+    if (legacyCheckInAt is Timestamp) return legacyCheckInAt.toDate();
+
+    final createdAt = data['createdAt'];
+    if (createdAt is Timestamp) return createdAt.toDate();
+
+    return null;
+  }
+
+  bool _isStaleActiveUserData(
+    Map<String, dynamic> data, {
+    DateTime? now,
+  }) {
+    final checkedInAt = _activeUserCheckedInAt(data);
+    if (checkedInAt == null) return true;
+    return (now ?? DateTime.now()).difference(checkedInAt) >
+        _activeUserStaleAfter;
   }
 
   void _handleParkSearchFocusChanged() {
@@ -452,6 +476,22 @@ class _ParksTabState extends State<ParksTab>
     });
 
     try {
+      if (!forceRefresh && _newsArticles.isEmpty) {
+        final previewArticles = await _newsFeedService.getPreviewArticles(
+          limit: 3,
+        );
+
+        if (mounted && previewArticles.isNotEmpty) {
+          setState(() {
+            _newsArticles = previewArticles;
+            _visibleNewsCount = math.min(3, previewArticles.length);
+            _isLoadingNews = false;
+            _isRefreshingNews = true;
+            _isAutoExpandingNews = false;
+          });
+        }
+      }
+
       final articles = await _newsFeedService.getArticles(
         forceRefresh: forceRefresh,
         limit: 30,
@@ -578,9 +618,21 @@ class _ParksTabState extends State<ParksTab>
           .timeout(const Duration(seconds: 8));
 
       final newSet = <String>{};
+      final staleRefs = <DocumentReference>[];
       for (final doc in snaps.docs) {
+        final data = doc.data();
+        if (_isStaleActiveUserData(data)) {
+          staleRefs.add(doc.reference);
+          continue;
+        }
         final parkRef = doc.reference.parent.parent; // parks/{parkId}
         if (parkRef != null) newSet.add(parkRef.id);
+      }
+
+      if (staleRefs.isNotEmpty) {
+        await Future.wait(
+          staleRefs.map((ref) => ref.delete().catchError((_) {})),
+        );
       }
 
       if (!mounted) return;
@@ -717,10 +769,14 @@ class _ParksTabState extends State<ParksTab>
         .collection('active_users')
         .get()
         .timeout(const Duration(seconds: 8));
-    final userIds = activeUsersSnapshot.docs.map((d) => d.id).toList();
+    final activeUserDocs = activeUsersSnapshot.docs.where((doc) {
+      final data = doc.data();
+      return !_isStaleActiveUserData(data);
+    }).toList(growable: false);
+    final userIds = activeUserDocs.map((d) => d.id).toList();
 
     final checkedInForByOwner = <String, String>{};
-    for (final u in activeUsersSnapshot.docs) {
+    for (final u in activeUserDocs) {
       final ts = (u.data()['checkedInAt']);
       if (ts != null) {
         final dt = (ts as Timestamp).toDate();
@@ -751,6 +807,12 @@ class _ParksTabState extends State<ParksTab>
           'checkInTime': checkedInForByOwner[ownerId] ?? '',
         });
       }
+    }
+
+    if (mounted) {
+      setState(() {
+        _activeUserCounts[parkId] = activeUserDocs.length;
+      });
     }
 
     if (!mounted) return;

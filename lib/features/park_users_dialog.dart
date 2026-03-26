@@ -17,6 +17,31 @@ typedef ServicesUpdatedCallback = void Function(
 );
 typedef CheckInXpCallback = Future<void> Function();
 
+const Duration _activeUserStaleAfter = Duration(hours: 3);
+
+DateTime? _activeUserCheckedInAt(Map<String, dynamic> data) {
+  final checkedInAt = data['checkedInAt'];
+  if (checkedInAt is Timestamp) return checkedInAt.toDate();
+
+  final legacyCheckInAt = data['checkInAt'];
+  if (legacyCheckInAt is Timestamp) return legacyCheckInAt.toDate();
+
+  final createdAt = data['createdAt'];
+  if (createdAt is Timestamp) return createdAt.toDate();
+
+  return null;
+}
+
+bool _isStaleActiveUserData(
+  Map<String, dynamic> data, {
+  DateTime? now,
+}) {
+  final checkedInAt = _activeUserCheckedInAt(data);
+  if (checkedInAt == null) return true;
+  return (now ?? DateTime.now()).difference(checkedInAt) >
+      _activeUserStaleAfter;
+}
+
 Future<void> showUsersInParkDialog({
   required BuildContext context,
   required String parkId,
@@ -89,23 +114,23 @@ Future<void> showUsersInParkDialog({
 
     if (isCheckedIn) {
       final data = activeDoc.data() as Map<String, dynamic>;
-      if (data.containsKey('checkedInAt')) {
-        final checkedInAt = (data['checkedInAt'] as Timestamp).toDate();
-        if (DateTime.now().difference(checkedInAt) >
-            const Duration(minutes: 30)) {
-          await activeDocRef.delete();
-          isCheckedIn = false;
-        }
+      if (_isStaleActiveUserData(data)) {
+        await activeDocRef.delete();
+        isCheckedIn = false;
       }
     }
 
     // Active users + pets
     final usersSnapshot = await parkRef.collection('active_users').get();
-    final userIds = usersSnapshot.docs.map((d) => d.id).toList();
+    final activeUserDocs = usersSnapshot.docs.where((doc) {
+      final data = doc.data();
+      return !_isStaleActiveUserData(data);
+    }).toList(growable: false);
+    final userIds = activeUserDocs.map((d) => d.id).toList();
     final profiles = await _loadPublicProfiles(userIds.toSet());
     final userList = await _buildPetUserList(
       userIds: userIds,
-      usersSnapshot: usersSnapshot,
+      activeUserDocs: activeUserDocs,
       profiles: profiles,
       checkedInForSince: checkedInForSince,
     );
@@ -178,7 +203,7 @@ Future<Map<String, Map<String, dynamic>>> _loadPublicProfiles(
 
 Future<List<Map<String, dynamic>>> _buildPetUserList({
   required List<String> userIds,
-  required QuerySnapshot usersSnapshot,
+  required List<QueryDocumentSnapshot> activeUserDocs,
   required Map<String, Map<String, dynamic>> profiles,
   required CheckedInFormatter checkedInForSince,
 }) async {
@@ -187,7 +212,7 @@ Future<List<Map<String, dynamic>>> _buildPetUserList({
 
   // Index active_users docs by uid for O(1) lookup
   final userDataById = <String, Map<String, dynamic>>{};
-  for (final doc in usersSnapshot.docs) {
+  for (final doc in activeUserDocs) {
     userDataById[doc.id] = doc.data() as Map<String, dynamic>;
   }
 

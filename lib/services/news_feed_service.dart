@@ -11,7 +11,39 @@ class NewsFeedService {
   static const Duration _redditMaxAge = Duration(days: 2);
   static const String _cacheArticlesKey = 'newsFeed.articles.v4';
   static const String _cacheTimestampKey = 'newsFeed.timestamp.v4';
-  static const int _requestTimeoutSeconds = 12;
+  static const Duration _requestTimeout = Duration(seconds: 6);
+  static const Duration _previewTimeout = Duration(seconds: 3);
+
+  static const List<String> _akcFeedUrls = [
+    'https://www.akc.org/expert-advice/feed/?category=health',
+    'https://www.akc.org/expert-advice/feed/?category=training',
+    'https://www.akc.org/expert-advice/feed/?category=lifestyle',
+    'https://www.akc.org/expert-advice/feed/?category=nutrition',
+    'https://www.akc.org/expert-advice/feed/?category=puppy-information',
+  ];
+
+  static const List<String> _petMdFeedUrls = [
+    'https://www.petmd.com/rss/dog.health',
+    'https://www.petmd.com/rss/dog.wellness',
+    'https://www.petmd.com/rss/dog.emergency',
+    'https://www.petmd.com/rss/dog.breeds',
+    'https://www.petmd.com/blogs/purelypuppy/rss',
+    'https://www.petmd.com/rss/news.rss',
+  ];
+
+  static const List<String> _dogsterFeedUrls = [
+    'https://www.dogster.com/feed',
+  ];
+
+  static const List<String> _roverFeedUrls = [
+    'https://www.rover.com/blog/feed/',
+  ];
+
+  static const List<String> _redditFeedUrls = [
+    'https://www.reddit.com/r/dogs/.rss',
+    'https://www.reddit.com/r/puppy101/.rss',
+    'https://www.reddit.com/r/dogtraining/.rss',
+  ];
 
   Future<List<FeedArticle>> getArticles({
     bool forceRefresh = false,
@@ -54,33 +86,68 @@ class NewsFeedService {
     return _filterEligibleArticles(cached).take(limit).toList(growable: false);
   }
 
+  Future<List<FeedArticle>> getPreviewArticles({int limit = 3}) async {
+    final prefs = await SharedPreferences.getInstance();
+    final cached = _readCachedArticles(prefs);
+    if (cached.isNotEmpty) {
+      return _filterEligibleArticles(cached)
+          .take(limit)
+          .toList(growable: false);
+    }
+
+    try {
+      return await _fetchPreviewArticles(limit: limit);
+    } catch (_) {
+      return const [];
+    }
+  }
+
   Future<List<FeedArticle>> _fetchLatestArticles({required int limit}) async {
     final results = await Future.wait<List<FeedArticle>>([
       _fetchSourceFeeds(
         source: 'AKC',
-        urls: const [
-          'https://www.akc.org/expert-advice/feed/?category=health',
-          'https://www.akc.org/expert-advice/feed/?category=training',
-          'https://www.akc.org/expert-advice/feed/?category=lifestyle',
-        ],
+        urls: _akcFeedUrls,
       ),
       _fetchSourceFeeds(
         source: 'PetMD',
-        urls: const [
-          'https://www.petmd.com/rss/dog.health',
-          'https://www.petmd.com/rss/dog.wellness',
-          'https://www.petmd.com/rss/news.rss',
-        ],
+        urls: _petMdFeedUrls,
       ),
       _fetchSourceFeeds(
         source: 'Dogster',
-        urls: const [
-          'https://www.dogster.com/feed',
-        ],
+        urls: _dogsterFeedUrls,
+      ),
+      _fetchSourceFeeds(
+        source: 'Rover',
+        urls: _roverFeedUrls,
       ),
       _fetchRedditFeed(),
     ]);
 
+    return _mixArticles(results, limit: limit);
+  }
+
+  Future<List<FeedArticle>> _fetchPreviewArticles({required int limit}) async {
+    final results = await Future.wait<List<FeedArticle>>([
+      _fetchSourceFeeds(
+        source: 'PetMD',
+        urls: _petMdFeedUrls.take(3).toList(growable: false),
+        timeout: _previewTimeout,
+      ),
+      _fetchSourceFeeds(
+        source: 'Rover',
+        urls: _roverFeedUrls,
+        timeout: _previewTimeout,
+      ),
+      _fetchRedditFeed(timeout: _previewTimeout),
+    ]);
+
+    return _mixArticles(results, limit: limit);
+  }
+
+  List<FeedArticle> _mixArticles(
+    List<List<FeedArticle>> results, {
+    required int limit,
+  }) {
     final perSourceArticles = <List<FeedArticle>>[];
     for (final sourceArticles in results) {
       final byKey = <String, FeedArticle>{};
@@ -157,6 +224,7 @@ class NewsFeedService {
   Future<List<FeedArticle>> _fetchSourceFeeds({
     required String source,
     required List<String> urls,
+    Duration timeout = _requestTimeout,
   }) async {
     final articles = <FeedArticle>[];
     for (final url in urls) {
@@ -168,7 +236,7 @@ class NewsFeedService {
             'Accept':
                 'application/rss+xml, application/atom+xml, application/xml, text/xml, */*',
           },
-        ).timeout(const Duration(seconds: _requestTimeoutSeconds));
+        ).timeout(timeout);
 
         if (response.statusCode < 200 || response.statusCode >= 300) {
           continue;
@@ -185,13 +253,10 @@ class NewsFeedService {
     return articles;
   }
 
-  Future<List<FeedArticle>> _fetchRedditFeed() async {
-    const urls = [
-      'https://www.reddit.com/r/dogs/.rss',
-      'https://www.reddit.com/r/puppy101/.rss',
-    ];
-
-    for (final url in urls) {
+  Future<List<FeedArticle>> _fetchRedditFeed({
+    Duration timeout = _requestTimeout,
+  }) async {
+    for (final url in _redditFeedUrls) {
       try {
         final response = await http.get(
           Uri.parse(url),
@@ -199,7 +264,7 @@ class NewsFeedService {
             'User-Agent': 'InThePark/1.0 (+https://inthepark.app)',
             'Accept': 'application/atom+xml, application/xml, text/xml',
           },
-        ).timeout(const Duration(seconds: _requestTimeoutSeconds));
+        ).timeout(timeout);
 
         if (response.statusCode < 200 || response.statusCode >= 300) {
           continue;
@@ -216,20 +281,22 @@ class NewsFeedService {
     }
 
     try {
-      return await _fetchRedditJsonFeed();
+      return await _fetchRedditJsonFeed(timeout: timeout);
     } catch (_) {
       return const [];
     }
   }
 
-  Future<List<FeedArticle>> _fetchRedditJsonFeed() async {
+  Future<List<FeedArticle>> _fetchRedditJsonFeed({
+    Duration timeout = _requestTimeout,
+  }) async {
     final response = await http.get(
       Uri.parse('https://www.reddit.com/r/dogs/hot.json?limit=12'),
       headers: const {
         'User-Agent': 'InThePark/1.0 (+https://inthepark.app)',
         'Accept': 'application/json',
       },
-    ).timeout(const Duration(seconds: _requestTimeoutSeconds));
+    ).timeout(timeout);
 
     if (response.statusCode < 200 || response.statusCode >= 300) {
       return const [];

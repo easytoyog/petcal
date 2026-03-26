@@ -300,35 +300,48 @@ class _ActivePetsDialogState extends State<ActivePetsDialog> {
                 },
               ),
       ),
+      actionsPadding: const EdgeInsets.fromLTRB(24, 0, 24, 20),
       actions: [
-        TextButton(
-          onPressed: (_busy || _checkInBusy) ? null : _handleOpenParkChat,
-          child: const Text("Park Chat"),
-        ),
-        ElevatedButton(
-          style: ElevatedButton.styleFrom(
-            backgroundColor: widget.isCheckedIn ? Colors.red : Colors.green,
-          ),
-          onPressed: (_busy || _checkInBusy) ? null : _handleCheckInToggle,
-          child: _checkInBusy
-              ? const SizedBox(
-                  width: 18,
-                  height: 18,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
-                  ),
-                )
-              : Text(
-                  widget.isCheckedIn ? "Check Out" : "Check In",
-                  style: const TextStyle(color: Colors.white),
+        SizedBox(
+          width: double.infinity,
+          child: Row(
+            children: [
+              TextButton(
+                onPressed: (_busy || _checkInBusy) ? null : _handleOpenParkChat,
+                child: const Text("Park Chat"),
+              ),
+              const SizedBox(width: 8),
+              ElevatedButton(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor:
+                      widget.isCheckedIn ? Colors.red : Colors.green,
                 ),
-        ),
-        TextButton(
-          onPressed: (_busy || _checkInBusy)
-              ? null
-              : () => Navigator.of(context).pop(),
-          child: const Text("Close"),
+                onPressed:
+                    (_busy || _checkInBusy) ? null : _handleCheckInToggle,
+                child: _checkInBusy
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          valueColor:
+                              AlwaysStoppedAnimation<Color>(Colors.white),
+                        ),
+                      )
+                    : Text(
+                        widget.isCheckedIn ? "Check Out" : "Check In",
+                        style: const TextStyle(color: Colors.white),
+                      ),
+              ),
+              const Spacer(),
+              TextButton(
+                onPressed: (_busy || _checkInBusy)
+                    ? null
+                    : () => Navigator.of(context).pop(),
+                child: const Text("Close"),
+              ),
+            ],
+          ),
         ),
       ],
     );

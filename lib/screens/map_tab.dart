@@ -1,7 +1,7 @@
 // lib/screens/map_tab.dart
 import 'dart:async';
 import 'dart:ui' as ui;
-import 'dart:io' show Platform;
+import 'dart:io' show File, Platform;
 import 'dart:math' as math;
 import 'dart:convert';
 
@@ -15,6 +15,7 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:inthepark/widgets/level_system.dart';
 import 'package:intl/intl.dart';
 import 'package:location/location.dart' as loc;
+import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:share_plus/share_plus.dart';
@@ -902,24 +903,307 @@ class _MapTabState extends State<MapTab>
     return '$hours hr $minutes min';
   }
 
+  Rect? _shareOrigin() {
+    final box = context.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize) return null;
+    return box.localToGlobal(Offset.zero) & box.size;
+  }
+
+  Future<ui.Image> _loadUiAssetImage(
+    String assetPath, {
+    int? targetWidth,
+  }) async {
+    final data = await rootBundle.load(assetPath);
+    final codec = await ui.instantiateImageCodec(
+      data.buffer.asUint8List(),
+      targetWidth: targetWidth,
+    );
+    final frame = await codec.getNextFrame();
+    return frame.image;
+  }
+
+  Future<File> _generateWalkShareCardPng({
+    required int steps,
+    required double meters,
+    required Duration elapsed,
+    required int? streakCurrent,
+    required _MonthWalkStats monthStats,
+  }) async {
+    const width = 1080;
+    const height = 1350;
+    final km = (meters / 1000).toStringAsFixed(meters >= 100 ? 1 : 2);
+    final monthKm = (monthStats.totalMeters / 1000)
+        .toStringAsFixed(monthStats.totalMeters >= 100 ? 1 : 2);
+
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+    final rect = Rect.fromLTWH(0, 0, width.toDouble(), height.toDouble());
+
+    final bg = Paint()
+      ..shader = ui.Gradient.linear(
+        const Offset(0, 0),
+        Offset(width.toDouble(), height.toDouble()),
+        const [
+          Color(0xFF567D46),
+          Color(0xFF365A38),
+          Color(0xFF1E3D24),
+        ],
+      );
+    canvas.drawRect(rect, bg);
+
+    final glow = Paint()
+      ..color = const Color(0x4DFFFFFF)
+      ..maskFilter = const ui.MaskFilter.blur(ui.BlurStyle.normal, 80);
+    canvas.drawCircle(const Offset(140, 160), 130, glow);
+    canvas.drawCircle(const Offset(910, 270), 120, glow);
+
+    final cardRect = RRect.fromRectAndRadius(
+      const Rect.fromLTWH(64, 74, 952, 1202),
+      const Radius.circular(44),
+    );
+    canvas.drawRRect(cardRect, Paint()..color = const Color(0xFFF8FBF5));
+
+    TextPainter textPainter(
+      String text, {
+      double fontSize = 44,
+      FontWeight fontWeight = FontWeight.w800,
+      Color color = const Color(0xFF18311A),
+      TextAlign textAlign = TextAlign.left,
+      int maxLines = 2,
+    }) {
+      final tp = TextPainter(
+        textDirection: ui.TextDirection.ltr,
+        textAlign: textAlign,
+        maxLines: maxLines,
+        ellipsis: '…',
+        text: TextSpan(
+          text: text,
+          style: TextStyle(
+            fontSize: fontSize,
+            fontWeight: fontWeight,
+            color: color,
+            height: 1.15,
+          ),
+        ),
+      );
+      tp.layout(maxWidth: 824);
+      return tp;
+    }
+
+    final logo =
+        await _loadUiAssetImage('assets/icon/icon.png', targetWidth: 160);
+    final logoRect = RRect.fromRectAndRadius(
+      const Rect.fromLTWH(120, 118, 120, 120),
+      const Radius.circular(28),
+    );
+    canvas.drawRRect(logoRect, Paint()..color = Colors.white);
+    canvas.save();
+    canvas.clipRRect(logoRect);
+    paintImage(
+      canvas: canvas,
+      rect: const Rect.fromLTWH(120, 118, 120, 120),
+      image: logo,
+      fit: BoxFit.cover,
+    );
+    canvas.restore();
+
+    final brand = textPainter(
+      'InThePark',
+      fontSize: 34,
+      fontWeight: FontWeight.w900,
+      color: const Color(0xFF567D46),
+      maxLines: 1,
+    );
+    brand.paint(canvas, const Offset(264, 124));
+
+    final subtitle = textPainter(
+      'Dog walks worth sharing',
+      fontSize: 22,
+      fontWeight: FontWeight.w700,
+      color: const Color(0xFF6A7A6B),
+      maxLines: 1,
+    );
+    subtitle.paint(canvas, const Offset(264, 168));
+
+    final headline = textPainter(
+      'We just finished a great walk',
+      fontSize: 58,
+      fontWeight: FontWeight.w900,
+      textAlign: TextAlign.center,
+      maxLines: 2,
+    );
+    headline.paint(canvas, Offset((width - headline.width) / 2, 292));
+
+    final subhead = textPainter(
+      'Track dog walks, discover parks, and meet local dog owners.',
+      fontSize: 28,
+      fontWeight: FontWeight.w700,
+      color: const Color(0xFF506252),
+      textAlign: TextAlign.center,
+      maxLines: 2,
+    );
+    subhead.paint(canvas, Offset((width - subhead.width) / 2, 432));
+
+    final streakBox = RRect.fromRectAndRadius(
+      const Rect.fromLTWH(120, 544, 840, 206),
+      const Radius.circular(34),
+    );
+    canvas.drawRRect(streakBox, Paint()..color = const Color(0xFF567D46));
+
+    final streakLabel = textPainter(
+      'CURRENT STREAK',
+      fontSize: 24,
+      fontWeight: FontWeight.w800,
+      color: const Color(0xFFDDEAD6),
+      textAlign: TextAlign.center,
+      maxLines: 1,
+    );
+    streakLabel.paint(canvas, Offset((width - streakLabel.width) / 2, 580));
+
+    final streakValue = textPainter(
+      '${streakCurrent ?? 1}',
+      fontSize: 98,
+      fontWeight: FontWeight.w900,
+      color: Colors.white,
+      textAlign: TextAlign.center,
+      maxLines: 1,
+    );
+    streakValue.paint(canvas, Offset((width - streakValue.width) / 2, 618));
+
+    final streakDays = textPainter(
+      'day${(streakCurrent ?? 1) == 1 ? '' : 's'} in a row',
+      fontSize: 28,
+      fontWeight: FontWeight.w800,
+      color: const Color(0xFFEAF4E5),
+      textAlign: TextAlign.center,
+      maxLines: 1,
+    );
+    streakDays.paint(canvas, Offset((width - streakDays.width) / 2, 700));
+
+    final todayLabel = textPainter(
+      'TODAY',
+      fontSize: 24,
+      fontWeight: FontWeight.w900,
+      color: const Color(0xFF567D46),
+      maxLines: 1,
+    );
+    todayLabel.paint(canvas, const Offset(120, 798));
+
+    final todayStats = textPainter(
+      '${_formatDurationLabel(elapsed)}  •  ${NumberFormat.decimalPattern().format(steps)} steps  •  $km km',
+      fontSize: 28,
+      fontWeight: FontWeight.w800,
+      color: const Color(0xFF243E27),
+      maxLines: 2,
+    );
+    todayStats.paint(canvas, const Offset(120, 836));
+
+    final monthlyPill = RRect.fromRectAndRadius(
+      const Rect.fromLTWH(120, 924, 228, 46),
+      const Radius.circular(999),
+    );
+    canvas.drawRRect(monthlyPill, Paint()..color = const Color(0xFFEAF4E5));
+
+    final monthlyLabel = textPainter(
+      'MONTHLY TOTALS',
+      fontSize: 20,
+      fontWeight: FontWeight.w900,
+      color: const Color(0xFF567D46),
+      maxLines: 1,
+    );
+    monthlyLabel.paint(canvas, const Offset(144, 936));
+
+    final monthlyStats = textPainter(
+      '${_formatDurationLabel(monthStats.totalElapsed)}  •  ${NumberFormat.decimalPattern().format(monthStats.totalSteps)} steps  •  $monthKm km',
+      fontSize: 28,
+      fontWeight: FontWeight.w800,
+      color: const Color(0xFF243E27),
+      maxLines: 2,
+    );
+    monthlyStats.paint(canvas, const Offset(120, 992));
+
+    final walkCount = textPainter(
+      '${monthStats.walksCount} walk${monthStats.walksCount == 1 ? '' : 's'} this month',
+      fontSize: 24,
+      fontWeight: FontWeight.w700,
+      color: const Color(0xFF6A7A6B),
+      maxLines: 1,
+    );
+    walkCount.paint(canvas, const Offset(120, 1070));
+
+    final footer = textPainter(
+      'Download InThePark to track walks, find dog parks, and see who is nearby.',
+      fontSize: 26,
+      fontWeight: FontWeight.w800,
+      color: const Color(0xFF18311A),
+      textAlign: TextAlign.center,
+      maxLines: 2,
+    );
+    footer.paint(canvas, Offset((width - footer.width) / 2, 1138));
+
+    final image = await recorder.endRecording().toImage(width, height);
+    final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+    final bytes = byteData!.buffer.asUint8List();
+    final dir = await getTemporaryDirectory();
+    final file = File(
+      '${dir.path}/inthepark_walk_share_${DateTime.now().millisecondsSinceEpoch}.png',
+    );
+    await file.writeAsBytes(bytes, flush: true);
+    return file;
+  }
+
   Future<void> _shareWalkSummary({
     required int steps,
     required double meters,
     required Duration elapsed,
     int? streakCurrent,
+    required _MonthWalkStats monthStats,
   }) async {
-    final km = (meters / 1000).toStringAsFixed(meters >= 100 ? 1 : 2);
-    final lines = <String>[
-      'My dog and I just finished a walk on InThePark.',
-      'Walk time: ${_formatDurationLabel(elapsed)}',
-      'Steps: $steps',
-      'Distance: $km km',
-      if (streakCurrent != null)
-        'Streak: $streakCurrent day${streakCurrent == 1 ? '' : 's'}',
-    ];
-    await SharePlus.instance.share(
-      ShareParams(text: lines.join('\n')),
-    );
+    const androidUrl =
+        'https://play.google.com/store/apps/details?id=ca.inthepark&pcampaignid=web_share';
+    const iosUrl = 'https://apps.apple.com/ca/app/in-the-park/id6752841263';
+    final shareText = [
+      'We just finished a walk on InThePark.',
+      'Track dog walks, discover parks, and meet local dog owners.',
+      'iPhone: $iosUrl',
+      'Android: $androidUrl',
+    ].join('\n');
+
+    final shareOrigin = _shareOrigin();
+
+    try {
+      final imageFile = await _generateWalkShareCardPng(
+        steps: steps,
+        meters: meters,
+        elapsed: elapsed,
+        streakCurrent: streakCurrent,
+        monthStats: monthStats,
+      );
+
+      await SharePlus.instance.share(
+        ShareParams(
+          files: [
+            XFile(
+              imageFile.path,
+              mimeType: 'image/png',
+              name: 'inthepark_walk_share.png',
+            ),
+          ],
+          text: shareText,
+          subject: 'InThePark Walk',
+          sharePositionOrigin: shareOrigin,
+        ),
+      );
+    } catch (e) {
+      debugPrint('Share image failed, falling back to text share: $e');
+      await SharePlus.instance.share(
+        ShareParams(
+          text: shareText,
+          subject: 'InThePark Walk',
+          sharePositionOrigin: shareOrigin,
+        ),
+      );
+    }
   }
 
   Future<_MonthWalkStats> _loadCurrentMonthWalkStats({
@@ -1219,10 +1503,9 @@ class _MapTabState extends State<MapTab>
           markerId: MarkerId('shared_caution_${caution.id}'),
           position: caution.position,
           icon: _cautionIcon ?? BitmapDescriptor.defaultMarker,
-          infoWindow: const InfoWindow(
-            title: 'Shared Caution',
-            snippet: 'Tap for details',
-          ),
+          consumeTapEvents: true,
+          zIndex: 3,
+          infoWindow: InfoWindow.noText,
           onTap: () => _openSharedCautionSheet(caution.id),
         );
       }
@@ -1507,7 +1790,11 @@ class _MapTabState extends State<MapTab>
         position: here,
         draggable: true,
         icon: iconBitmap,
+        consumeTapEvents: sharedCautionId != null,
         infoWindow: InfoWindow(title: title, snippet: noteMsg),
+        onTap: sharedCautionId == null
+            ? null
+            : () => _openSharedCautionSheet(sharedCautionId!),
         onDragEnd: (pos) => _updateNotePosition(id, pos),
       );
 
@@ -1565,6 +1852,7 @@ class _MapTabState extends State<MapTab>
       draggable: true,
       icon: iconBitmap,
       infoWindow: InfoWindow(title: title, snippet: noteMsg),
+      consumeTapEvents: false,
       onDragEnd: (pos) => _updateNotePosition(id, pos),
     );
 
@@ -2753,8 +3041,12 @@ class _MapTabState extends State<MapTab>
       if (knownUser != null) {
         _finalPosition = knownUser;
         _currentMapCenter = knownUser;
-        // ignore: discarded_futures
-        _moveCameraTo(knownUser, zoom: 17);
+        await _moveCameraTo(knownUser, zoom: 17);
+        if (mounted) {
+          setState(() => _isCentering = false);
+        }
+        unawaited(_refreshCenteredUserLocation());
+        return;
       }
 
       final hasPermission = await _ensureLocationPermission();
@@ -2773,7 +3065,7 @@ class _MapTabState extends State<MapTab>
       final user = await _getFreshUserLatLng(
         freshTimeout: const Duration(seconds: 3),
         minAccuracyMeters: 150,
-      );
+      ).timeout(const Duration(seconds: 5), onTimeout: () => null);
 
       if (user == null) {
         if (!mounted) return;
@@ -2803,6 +3095,32 @@ class _MapTabState extends State<MapTab>
     } finally {
       if (mounted) setState(() => _isCentering = false);
     }
+  }
+
+  Future<void> _refreshCenteredUserLocation() async {
+    try {
+      final hasPermission = await _ensureLocationPermission();
+      if (!hasPermission) return;
+
+      final user = await _getFreshUserLatLng(
+        freshTimeout: const Duration(seconds: 3),
+        minAccuracyMeters: 150,
+      ).timeout(const Duration(seconds: 5), onTimeout: () => null);
+
+      if (user == null || !mounted) return;
+
+      _finalPosition = user;
+      _currentMapCenter = user;
+      await _locationService.saveUserLocation(user.latitude, user.longitude);
+      await _moveCameraTo(user, zoom: 17);
+
+      if (_metersBetween(_currentMapCenter, user) > 20) {
+        _currentMapCenter = user;
+        await _moveCameraTo(user, zoom: 17, instant: true);
+      }
+
+      unawaited(_loadNearbyParks(user));
+    } catch (_) {}
   }
 
   Future<LatLng?> _getFreshUserLatLng({
@@ -2883,6 +3201,7 @@ class _MapTabState extends State<MapTab>
       Icons.warning_amber_rounded,
       fg: Colors.black87,
       bg: Colors.amber.shade600,
+      size: 86,
     );
   }
 
@@ -3812,6 +4131,7 @@ class _MapTabState extends State<MapTab>
                               meters: meters,
                               elapsed: elapsed,
                               streakCurrent: streakCurrent,
+                              monthStats: monthStats,
                             ),
                             icon: const Icon(Icons.ios_share),
                             label: const Text('Share this win'),

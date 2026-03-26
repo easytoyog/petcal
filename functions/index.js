@@ -1,4 +1,5 @@
 /* eslint-disable */
+require("firebase-functions/logger/compat");
 
 // -------- Imports --------
 const admin = require("firebase-admin");
@@ -327,70 +328,87 @@ exports.notifyFriendCheckIn = onDocumentCreated(
   }
 );
 
-exports.autoCheckoutInactiveUsers = onSchedule({ schedule: "every 10 minutes" }, async () => {
-  const now = new Date();
-  const THREE_HOURS = 3 * 60 * 60 * 1000;
-  const threeHoursAgo = new Date(now.getTime() - THREE_HOURS);
-  const twelveHoursAhead = new Date(now.getTime() + 12 * 60 * 60 * 1000);
+exports.autoCheckoutInactiveUsers = onSchedule(
+  { schedule: "every 10 minutes" },
+  async () => {
+    const now = new Date();
+    const THREE_HOURS_MS = 3 * 60 * 60 * 1000;
+    const twelveHoursAhead = new Date(now.getTime() + 12 * 60 * 60 * 1000);
 
-  const uniq = new Map();
+    try {
+      console.log("autoCheckout start at " + now.toISOString());
 
-  const expiredSnap = await db.collectionGroup("active_users")
-    .where("expiresAt", "<=", now)
-    .get();
-  expiredSnap.docs.forEach((d) => uniq.set(d.ref.path, d));
+      // Avoid query/select entirely; just list park document refs.
+      const parkRefs = await db.collection("parks").listDocuments();
+      console.log("parks count=" + parkRefs.length);
 
-  const futureSnap = await db.collectionGroup("active_users")
-    .where("checkedInAt", ">", twelveHoursAhead)
-    .get();
-  futureSnap.docs.forEach((d) => uniq.set(d.ref.path, d));
+      if (!parkRefs.length) {
+        console.log("autoCheckout: no parks found");
+        return null;
+      }
 
-  // Backstop for older docs that predate expiresAt stamping.
-  const staleCheckedInSnap = await db.collectionGroup("active_users")
-    .where("checkedInAt", "<", threeHoursAgo)
-    .get();
-  staleCheckedInSnap.docs.forEach((d) => uniq.set(d.ref.path, d));
+      const toDelete = [];
 
-  const staleLegacyCheckInSnap = await db.collectionGroup("active_users")
-    .where("checkInAt", "<", threeHoursAgo)
-    .get();
-  staleLegacyCheckInSnap.docs.forEach((d) => uniq.set(d.ref.path, d));
+      for (const parkRef of parkRefs) {
+        const activeUsersSnap = await parkRef.collection("active_users").get();
 
-  const legacyCreatedSnap = await db.collectionGroup("active_users")
-    .where("createdAt", "<", threeHoursAgo)
-    .get();
-  legacyCreatedSnap.docs.forEach((d) => uniq.set(d.ref.path, d));
+        if (activeUsersSnap.empty) continue;
 
-  if (!uniq.size) return null;
+        for (const userDoc of activeUsersSnap.docs) {
+          const data = userDoc.data() || {};
 
-  const toDelete = [];
-  for (const snap of uniq.values()) {
-    const x = snap.data() || {};
-    const checkInTs = x.checkedInAt || x.checkInAt || x.createdAt;
-    const checkInDate =
-      checkInTs && typeof checkInTs.toDate === "function" ? checkInTs.toDate() : null;
-    const expiresAt =
-      x.expiresAt && typeof x.expiresAt.toDate === "function" ? x.expiresAt.toDate() : null;
+          const checkInTs = data.checkedInAt || data.checkInAt || data.createdAt;
+          const checkInDate =
+            checkInTs && typeof checkInTs.toDate === "function"
+              ? checkInTs.toDate()
+              : null;
 
-    const isExpired = expiresAt ? expiresAt <= now : (checkInDate ? checkInDate < threeHoursAgo : true);
-    const isFutureSkew = checkInDate ? checkInDate > twelveHoursAhead : false;
+          // No usable timestamp: treat as stale
+          if (!checkInDate) {
+            console.log("deleting no-timestamp doc=" + userDoc.ref.path);
+            toDelete.push(userDoc.ref);
+            continue;
+          }
 
-    if (isExpired || isFutureSkew) {
-      toDelete.push(snap.ref);
+          const ageMs = now.getTime() - checkInDate.getTime();
+          const isOlderThanThreeHours = ageMs >= THREE_HOURS_MS;
+          const isFutureSkew = checkInDate > twelveHoursAhead;
+
+          if (isOlderThanThreeHours || isFutureSkew) {
+            console.log(
+              "deleting stale doc=" +
+                userDoc.ref.path +
+                " checkInAt=" +
+                checkInDate.toISOString() +
+                " ageMs=" +
+                ageMs
+            );
+            toDelete.push(userDoc.ref);
+          }
+        }
+      }
+
+      if (!toDelete.length) {
+        console.log("autoCheckout: nothing to delete");
+        return null;
+      }
+
+      const writer = db.bulkWriter();
+      toDelete.forEach((ref) => writer.delete(ref));
+      await writer.close();
+
+      console.log("autoCheckout deleted count=" + toDelete.length);
+      return null;
+    } catch (e) {
+      console.error("autoCheckout fatal");
+      console.error("message=" + String(e && e.message));
+      console.error("code=" + String(e && e.code));
+      console.error("details=" + String(e && e.details));
+      console.error("stack=" + String(e && e.stack));
+      throw e;
     }
   }
-
-  if (!toDelete.length) return null;
-
-  // Bulk delete → will trigger onDocumentDeleted to decrement counts + close visit
-  const writer = db.bulkWriter();
-  toDelete.forEach(r => writer.delete(r));
-  await writer.close();
-
-  console.log(`[autoCheckout] Deleted ${toDelete.length} stale active_users.`);
-  return null;
-});
-
+);
 
 
 // =========================
