@@ -184,43 +184,50 @@ class WalkManager extends ChangeNotifier {
     // Invalidate any in-flight persist calls from the active walk.
     _persistGeneration++;
 
+    final ended = DateTime.now();
+    _endedAt = ended;
+    final started = _startedAt ?? ended;
+    _elapsed = ended.difference(started);
+
+    if (_steps == 0) {
+      _steps = (_meters / 0.78).round();
+    }
+
+    _active = false;
+    notifyListeners();
+
+    final locSub = _locSub;
+    _locSub = null;
+    final stepSub = _stepSub;
+    _stepSub = null;
+
+    _uiTicker?.cancel();
+    _uiTicker = null;
+
+    _autoStopTimer?.cancel();
+    _autoStopTimer = null;
+
+    _persistTimer?.cancel();
+    _persistTimer = null;
+
     try {
-      try {
-        await _locSub?.cancel();
-      } catch (_) {}
-      _locSub = null;
-
-      try {
-        await _stepSub?.cancel();
-      } catch (_) {}
-      _stepSub = null;
-
-      _uiTicker?.cancel();
-      _uiTicker = null;
-
-      _autoStopTimer?.cancel();
-      _autoStopTimer = null;
-
-      _persistTimer?.cancel();
-      _persistTimer = null;
-
-      try {
-        await _disableNavMode();
-      } catch (_) {}
-
-      final ended = DateTime.now();
-      _endedAt = ended;
-      final started = _startedAt ?? ended;
-      _elapsed = ended.difference(started);
-
-      if (_steps == 0) {
-        _steps = (_meters / 0.78).round();
-      }
-
-      _active = false;
-      notifyListeners();
-
       await _clearPersisted();
+
+      try {
+        await (locSub?.cancel() ?? Future<void>.value()).timeout(
+          const Duration(milliseconds: 800),
+        );
+      } catch (_) {}
+
+      try {
+        await (stepSub?.cancel() ?? Future<void>.value()).timeout(
+          const Duration(milliseconds: 800),
+        );
+      } catch (_) {}
+
+      try {
+        await _disableNavMode().timeout(const Duration(milliseconds: 800));
+      } catch (_) {}
     } finally {
       _stopping = false;
     }

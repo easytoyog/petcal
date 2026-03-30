@@ -263,6 +263,51 @@ class _GroupsTabState extends State<GroupsTab>
     );
   }
 
+  Future<void> _submitGroupSearch() async {
+    _groupSearchDebounce?.cancel();
+    FocusScope.of(context).unfocus();
+
+    final trimmed = _groupSearchController.text.trim();
+    if (trimmed.isEmpty) {
+      if (!mounted) return;
+      setState(() {
+        _groupSearchQuery = '';
+        _searchedGroups = [];
+        _isSearchingGroups = false;
+      });
+      return;
+    }
+
+    setState(() => _groupSearchQuery = trimmed);
+    await _searchGroupsByName(trimmed);
+  }
+
+  String _normalizeGroupSearchText(String value) {
+    return value.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]+'), ' ').trim();
+  }
+
+  bool _groupNameMatchesQuery(String groupName, String rawQuery) {
+    final normalizedName = _normalizeGroupSearchText(groupName);
+    final normalizedCompact = normalizedName.replaceAll(' ', '');
+    final normalizedQuery = _normalizeGroupSearchText(rawQuery);
+    final queryCompact = normalizedQuery.replaceAll(' ', '');
+
+    if (normalizedQuery.isEmpty) return true;
+    if (normalizedName.contains(normalizedQuery)) return true;
+    if (queryCompact.isNotEmpty && normalizedCompact.contains(queryCompact)) {
+      return true;
+    }
+
+    final queryParts =
+        normalizedQuery.split(' ').where((part) => part.isNotEmpty);
+    for (final part in queryParts) {
+      if (!normalizedName.contains(part) && !normalizedCompact.contains(part)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   Future<void> _searchGroupsByName(String rawQuery) async {
     final query = rawQuery.trim().toLowerCase();
     if (query.isEmpty) return;
@@ -273,7 +318,7 @@ class _GroupsTabState extends State<GroupsTab>
 
     try {
       final myMatches = _myGroups
-          .where((group) => group.name.toLowerCase().contains(query))
+          .where((group) => _groupNameMatchesQuery(group.name, query))
           .toList();
       final existingIds = myMatches.map((group) => group.id).toSet();
 
@@ -282,7 +327,7 @@ class _GroupsTabState extends State<GroupsTab>
       final publicMatches = _publicGroups
           .where(
             (group) =>
-                group.name.toLowerCase().contains(query) &&
+                _groupNameMatchesQuery(group.name, query) &&
                 !existingIds.contains(group.id),
           )
           .toList();
@@ -1091,6 +1136,44 @@ class _GroupsTabState extends State<GroupsTab>
     }
   }
 
+  Group _groupWithJoinedCurrentUser(Group group) {
+    final uid = _currentUserId;
+    if (uid == null || group.members.contains(uid)) return group;
+
+    return Group(
+      id: group.id,
+      name: group.name,
+      description: group.description,
+      createdBy: group.createdBy,
+      admins: List<String>.from(group.admins),
+      members: [...group.members, uid],
+      frequentPlace: group.frequentPlace,
+      frequentPlaceName: group.frequentPlaceName,
+      frequentTime: group.frequentTime,
+      isPublic: group.isPublic,
+      createdAt: group.createdAt,
+      updatedAt: DateTime.now(),
+      latitude: group.latitude,
+      longitude: group.longitude,
+      lastMessage: group.lastMessage,
+      lastMessageAt: group.lastMessageAt,
+      lastMessageSenderId: group.lastMessageSenderId,
+    );
+  }
+
+  void _markGroupJoinedLocally(Group group) {
+    final joinedGroup = _groupWithJoinedCurrentUser(group);
+
+    Group updateIfMatch(Group item) => item.id == group.id ? joinedGroup : item;
+
+    _myGroups = _myGroups.any((item) => item.id == group.id)
+        ? _myGroups.map(updateIfMatch).toList()
+        : [joinedGroup, ..._myGroups];
+    _publicGroups = _publicGroups.map(updateIfMatch).toList();
+    _localPublicGroups = _localPublicGroups.map(updateIfMatch).toList();
+    _searchedGroups = _searchedGroups.map(updateIfMatch).toList();
+  }
+
   Future<void> _joinGroup(Group group) async {
     if (_currentUserId == null) return;
 
@@ -1100,15 +1183,19 @@ class _GroupsTabState extends State<GroupsTab>
         'updatedAt': Timestamp.now(),
       });
 
+      if (mounted) {
+        setState(() => _markGroupJoinedLocally(group));
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Joined group!')),
+        );
+      }
+
       await _fetchMyGroups();
       await _ensurePublicGroupsLoaded(forceRefresh: true);
       await _fetchLocalPublicGroups(showSnackOnNoLocation: false);
 
       if (mounted) {
         setState(() {});
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Joined group!')),
-        );
       }
     } catch (e) {
       debugPrint('Error joining group: $e');
@@ -1255,48 +1342,75 @@ class _GroupsTabState extends State<GroupsTab>
   bool _groupMatchesSearch(Group group) {
     final query = _groupSearchQuery.trim().toLowerCase();
     if (query.isEmpty) return true;
-    return group.name.toLowerCase().contains(query);
+    return _groupNameMatchesQuery(group.name, query);
   }
 
   Widget _buildGroupSearchBar() {
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 14, 16, 8),
-      child: TextField(
-        controller: _groupSearchController,
-        onChanged: _onGroupSearchChanged,
-        onTapOutside: (_) => FocusScope.of(context).unfocus(),
-        decoration: InputDecoration(
-          hintText: 'Search groups by name',
-          prefixIcon: const Icon(Icons.search),
-          suffixIcon: _groupSearchQuery.trim().isEmpty
-              ? null
-              : IconButton(
-                  tooltip: 'Clear search',
-                  icon: const Icon(Icons.close),
-                  onPressed: () {
-                    _groupSearchController.clear();
-                    setState(() {
-                      _groupSearchQuery = '';
-                      _searchedGroups = [];
-                      _isSearchingGroups = false;
-                    });
-                  },
+      child: Row(
+        children: [
+          Expanded(
+            child: TextField(
+              controller: _groupSearchController,
+              onChanged: _onGroupSearchChanged,
+              onSubmitted: (_) => _submitGroupSearch(),
+              textInputAction: TextInputAction.search,
+              onTapOutside: (_) => FocusScope.of(context).unfocus(),
+              decoration: InputDecoration(
+                hintText: 'Search all public groups by name',
+                prefixIcon: const Icon(Icons.search),
+                suffixIcon: _groupSearchQuery.trim().isEmpty
+                    ? null
+                    : IconButton(
+                        tooltip: 'Clear search',
+                        icon: const Icon(Icons.close),
+                        onPressed: () {
+                          _groupSearchController.clear();
+                          setState(() {
+                            _groupSearchQuery = '';
+                            _searchedGroups = [];
+                            _isSearchingGroups = false;
+                          });
+                        },
+                      ),
+                filled: true,
+                fillColor: Colors.white,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(14),
+                  borderSide: BorderSide.none,
                 ),
-          filled: true,
-          fillColor: Colors.white,
-          border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(14),
-            borderSide: BorderSide.none,
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(14),
+                  borderSide: const BorderSide(color: Color(0xFFDCE7D6)),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(14),
+                  borderSide: const BorderSide(color: Color(0xFF567D46)),
+                ),
+              ),
+            ),
           ),
-          enabledBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(14),
-            borderSide: const BorderSide(color: Color(0xFFDCE7D6)),
+          const SizedBox(width: 10),
+          SizedBox(
+            height: 52,
+            child: ElevatedButton.icon(
+              onPressed: _submitGroupSearch,
+              icon: const Icon(Icons.search),
+              label: const Text('Search'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: const Color(0xFF567D46),
+                foregroundColor: Colors.white,
+                elevation: 0,
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                ),
+              ),
+            ),
           ),
-          focusedBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(14),
-            borderSide: const BorderSide(color: Color(0xFF567D46)),
-          ),
-        ),
+        ],
       ),
     );
   }
@@ -1366,7 +1480,7 @@ class _GroupsTabState extends State<GroupsTab>
       body: SafeArea(
         child: Column(
           children: [
-            _buildGroupSearchBar(),
+            if (!_showingLocalGroups) _buildGroupSearchBar(),
             Expanded(
               child: _groupSearchQuery.trim().isNotEmpty
                   ? _buildSearchResultsList()
@@ -1744,8 +1858,8 @@ class _GroupsTabState extends State<GroupsTab>
             ),
             const SizedBox(height: 16),
 
-            // Not a member yet, browsing local groups
-            if (!isMember && !isMyGroup)
+            // Public groups can be joined by anyone who is not already a member.
+            if (group.isPublic && !isMember)
               SizedBox(
                 width: double.infinity,
                 child: ElevatedButton(
@@ -1929,6 +2043,28 @@ class GroupDetailsPage extends StatefulWidget {
 class _GroupDetailsPageState extends State<GroupDetailsPage> {
   final FirebaseFirestore _fs = FirebaseFirestore.instance;
   LatLng? _userLocation;
+
+  Future<void> _joinGroup(Group group) async {
+    try {
+      await _fs.collection('groups').doc(group.id).update({
+        'members': FieldValue.arrayUnion([widget.currentUserId]),
+        'updatedAt': Timestamp.now(),
+      });
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Joined group!')),
+        );
+      }
+    } catch (e) {
+      debugPrint('Error joining group from details: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error joining group: $e')),
+        );
+      }
+    }
+  }
 
   Future<void> _fetchUserLocation() async {
     try {
@@ -2969,6 +3105,7 @@ class _GroupDetailsPageState extends State<GroupDetailsPage> {
           final group = Group.fromFirestore(snapshot.data!);
           final isCreator = group.createdBy == widget.currentUserId;
           final isAdmin = group.admins.contains(widget.currentUserId);
+          final isMember = group.members.contains(widget.currentUserId);
 
           return FutureBuilder<List<Map<String, dynamic>>>(
             future: _loadGroupMemberProfiles(group.members),
@@ -3018,6 +3155,26 @@ class _GroupDetailsPageState extends State<GroupDetailsPage> {
                         fontSize: 14,
                         color: Colors.grey[700],
                         height: 1.45,
+                      ),
+                    ),
+                  ],
+                  if (group.isPublic && !isMember) ...[
+                    const SizedBox(height: 20),
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton.icon(
+                        onPressed: () => _joinGroup(group),
+                        icon: const Icon(Icons.group_add),
+                        label: const Text('Join Group'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF567D46),
+                          foregroundColor: Colors.white,
+                          elevation: 0,
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                        ),
                       ),
                     ),
                   ],

@@ -40,11 +40,9 @@ class _FilterOption {
 
 class _CautionComposerResult {
   final String message;
-  final bool shareOnMap;
 
   const _CautionComposerResult({
     required this.message,
-    required this.shareOnMap,
   });
 }
 
@@ -129,6 +127,7 @@ class MapTab extends StatefulWidget {
 class _MapTabState extends State<MapTab>
     with AutomaticKeepAliveClientMixin<MapTab>, WidgetsBindingObserver {
   static const LatLng _fallbackMapCenter = LatLng(43.7615, -79.4111);
+  static const String _kActiveWalkDocIdKey = 'active_walk_doc_id';
 
   // --- Map Controller + Completer (for reliable camera ops) ---
   GoogleMapController? _mapController;
@@ -149,7 +148,6 @@ class _MapTabState extends State<MapTab>
   bool _resumeRefreshing = false;
   LatLng? _finalPosition;
   LatLng _currentMapCenter = _fallbackMapCenter;
-  bool _isMapReady = false;
 
   // ---- Smooth polyline state (avoid rebuilding whole route each frame) ----
   final List<LatLng> _drawnRoute = [];
@@ -1254,9 +1252,13 @@ class _MapTabState extends State<MapTab>
       var totalSteps = 0;
       var totalMeters = 0.0;
       var totalElapsedSec = 0;
+      var completedWalksCount = 0;
 
       for (final doc in snap.docs) {
         final data = doc.data();
+        final status = (data['status'] as String?)?.trim().toLowerCase();
+        if (status != null && status != 'completed') continue;
+        completedWalksCount += 1;
         totalSteps += (data['steps'] as num?)?.toInt() ?? 0;
         totalMeters += (data['distanceMeters'] as num?)?.toDouble() ?? 0.0;
 
@@ -1269,8 +1271,17 @@ class _MapTabState extends State<MapTab>
                 : 0);
       }
 
+      if (completedWalksCount == 0) {
+        return _MonthWalkStats(
+          walksCount: 1,
+          totalSteps: fallbackSteps,
+          totalMeters: fallbackMeters,
+          totalElapsed: fallbackElapsed,
+        );
+      }
+
       return _MonthWalkStats(
-        walksCount: snap.docs.length,
+        walksCount: completedWalksCount,
         totalSteps: totalSteps,
         totalMeters: totalMeters,
         totalElapsed: Duration(seconds: totalElapsedSec),
@@ -1296,6 +1307,7 @@ class _MapTabState extends State<MapTab>
   // in-memory notes to be saved at end
   final Map<String, Marker> _noteMarkers = {}; // keyed by noteId
   final Map<String, Map<String, String?>> _noteMeta = {}; // id -> {type,msg}
+  final Map<String, String> _noteWalkIdById = {};
   final Map<String, int> _noteIndexById = {}; // id -> index in _noteRecords
   final List<Map<String, dynamic>> _noteRecords = [];
   int _noteSeq = 0;
@@ -1309,6 +1321,8 @@ class _MapTabState extends State<MapTab>
   // When viewing a past walk
   Set<Polyline> _historicPolylines = {};
   final Map<String, Marker> _historicNoteMarkers = {};
+  final Map<String, Marker> _savedPrivateNoteMarkers = {};
+  final Map<String, Map<String, String?>> _savedPrivateNoteMeta = {};
 
   // track last explicit camera move to help refocus on appear
   DateTime _lastCameraMove = DateTime.fromMillisecondsSinceEpoch(0);
@@ -1320,7 +1334,7 @@ class _MapTabState extends State<MapTab>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _isSearching = true;
+    _isSearching = false;
     _locationService = LocationService(dotenv.env['GOOGLE_MAPS_API_KEY'] ?? '');
     _fetchFavorites();
 
@@ -1352,6 +1366,7 @@ class _MapTabState extends State<MapTab>
     _walk.addListener(_walkListener);
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       await _walk.restoreIfAny();
+      await _restoreActiveWalkDraftState();
       if (mounted) setState(() {});
     });
 
@@ -1401,57 +1416,57 @@ class _MapTabState extends State<MapTab>
       barrierDismissible: true,
       builder: (ctx) {
         final ctrl = TextEditingController();
-        bool shareOnMap = false;
-        return StatefulBuilder(
-          builder: (dialogContext, setDialogState) {
-            return AlertDialog(
-              title: const Text('Add Caution'),
-              content: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  TextField(
-                    controller: ctrl,
-                    autofocus: true,
-                    maxLines: 2,
-                    decoration: const InputDecoration(
-                      hintText: 'What should others watch out for?',
-                      border: OutlineInputBorder(),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  CheckboxListTile(
-                    value: shareOnMap,
-                    contentPadding: EdgeInsets.zero,
-                    controlAffinity: ListTileControlAffinity.leading,
-                    title: const Text('Post on shared map'),
-                    subtitle: const Text(
-                      'Other walkers can see it and mark whether it is still there.',
-                    ),
-                    onChanged: (value) {
-                      setDialogState(() => shareOnMap = value ?? false);
-                    },
-                  ),
-                ],
+        return AlertDialog(
+          title: const Text('Post Public Caution'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              TextField(
+                controller: ctrl,
+                autofocus: true,
+                maxLines: 2,
+                decoration: const InputDecoration(
+                  hintText: 'What should other walkers watch out for?',
+                  border: OutlineInputBorder(),
+                ),
               ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.of(ctx).pop(null),
-                  child: const Text('Cancel'),
+              const SizedBox(height: 12),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFF3F8EF),
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(color: const Color(0xFFD9E7D2)),
                 ),
-                ElevatedButton(
-                  onPressed: () {
-                    Navigator.of(ctx).pop(
-                      _CautionComposerResult(
-                        message: ctrl.text.trim(),
-                        shareOnMap: shareOnMap,
-                      ),
-                    );
-                  },
-                  child: const Text('Save'),
+                child: const Text(
+                  'This caution will be public. Nearby users will be able to see it, tap it, and mark whether it is still there.',
+                  style: TextStyle(
+                    fontSize: 14,
+                    height: 1.35,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
-              ],
-            );
-          },
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(null),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                Navigator.of(ctx).pop(
+                  _CautionComposerResult(
+                    message: ctrl.text.trim(),
+                  ),
+                );
+              },
+              child: const Text('Post Public Marker'),
+            ),
+          ],
         );
       },
     );
@@ -1467,8 +1482,8 @@ class _MapTabState extends State<MapTab>
 
   LatLng? _sharedCautionAnchor() {
     if (_walk.points.isNotEmpty) return _walk.points.last;
-    if (_finalPosition != null) return _finalPosition;
     if (_currentMapCenter != _fallbackMapCenter) return _currentMapCenter;
+    if (_finalPosition != null) return _finalPosition;
     return null;
   }
 
@@ -1542,6 +1557,446 @@ class _MapTabState extends State<MapTab>
       'updatedAt': FieldValue.serverTimestamp(),
     });
     return ref.id;
+  }
+
+  void _addLocalWalkNoteRecord({
+    required String id,
+    required String type,
+    required String message,
+    required LatLng position,
+    required Marker marker,
+    String? sharedCautionId,
+  }) {
+    setState(() {
+      _noteMeta[id] = {
+        'type': type,
+        'message': message,
+        if (sharedCautionId != null) 'sharedCautionId': sharedCautionId,
+      };
+      _noteMarkers[id] = marker;
+      _recomputeVisibleMarkers();
+    });
+
+    final recIndex = _noteRecords.length;
+    _noteIndexById[id] = recIndex;
+    _noteRecords.add({
+      'id': id,
+      'type': type,
+      'message': message,
+      'lat': position.latitude,
+      'lng': position.longitude,
+      'persisted': false,
+      if (sharedCautionId != null) 'sharedCautionId': sharedCautionId,
+    });
+  }
+
+  Future<DocumentReference<Map<String, dynamic>>?>
+      _ensureActiveWalkRef() async {
+    final currentUid = FirebaseAuth.instance.currentUser?.uid;
+    if (currentUid == null) return null;
+
+    final walksCol = FirebaseFirestore.instance
+        .collection('owners')
+        .doc(currentUid)
+        .collection('walks');
+
+    if (_currentWalkId != null) {
+      await _saveActiveWalkDocId(_currentWalkId);
+      return walksCol.doc(_currentWalkId);
+    }
+
+    final walkRef = walksCol.doc();
+    _currentWalkId = walkRef.id;
+    await _saveActiveWalkDocId(_currentWalkId);
+    await walkRef.set({
+      'status': 'active',
+      'startedAt': _walk.startedAt != null
+          ? Timestamp.fromDate(_walk.startedAt!)
+          : FieldValue.serverTimestamp(),
+      'createdAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+    return walkRef;
+  }
+
+  Future<void> _persistWalkNoteRecord(Map<String, dynamic> rec) async {
+    final walkRef = await _ensureActiveWalkRef();
+    if (walkRef == null) return;
+
+    final noteRef = walkRef.collection('notes').doc(rec['id'] as String);
+    final alreadyPersisted = rec['persisted'] == true;
+    await noteRef.set(
+      {
+        'type': rec['type'],
+        'message': rec['message'],
+        'position': GeoPoint(rec['lat'] as double, rec['lng'] as double),
+        if (rec['sharedCautionId'] != null)
+          'sharedCautionId': rec['sharedCautionId'],
+        if (!alreadyPersisted) 'createdAt': FieldValue.serverTimestamp(),
+        'updatedAt': FieldValue.serverTimestamp(),
+      },
+      SetOptions(merge: true),
+    );
+    rec['persisted'] = true;
+    _noteWalkIdById[rec['id'] as String] = walkRef.id;
+  }
+
+  Future<void> _saveActiveWalkDocId(String? walkId) async {
+    final prefs = await SharedPreferences.getInstance();
+    if (walkId == null || walkId.isEmpty) {
+      await prefs.remove(_kActiveWalkDocIdKey);
+      return;
+    }
+    await prefs.setString(_kActiveWalkDocIdKey, walkId);
+  }
+
+  int _nextNoteSeqFromId(String noteId) {
+    if (!noteId.startsWith('note_')) return 0;
+    return int.tryParse(noteId.substring(5)) ?? 0;
+  }
+
+  String _savedPrivateMarkerKey({
+    required String walkId,
+    required String noteId,
+  }) =>
+      'private_${walkId}_$noteId';
+
+  void _rebuildNoteIndexes() {
+    _noteIndexById.clear();
+    for (var i = 0; i < _noteRecords.length; i++) {
+      final id = _noteRecords[i]['id'] as String?;
+      if (id != null && id.isNotEmpty) {
+        _noteIndexById[id] = i;
+      }
+    }
+  }
+
+  Future<void> _removePrivateNote({
+    String? walkId,
+    String? noteId,
+    String? markerId,
+    bool fromSavedMarkers = false,
+  }) async {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid != null && walkId != null && noteId != null) {
+      await FirebaseFirestore.instance
+          .collection('owners')
+          .doc(uid)
+          .collection('walks')
+          .doc(walkId)
+          .collection('notes')
+          .doc(noteId)
+          .delete();
+    }
+
+    if (!mounted) return;
+    setState(() {
+      if (fromSavedMarkers) {
+        final key = markerId ??
+            ((walkId != null && noteId != null)
+                ? _savedPrivateMarkerKey(walkId: walkId, noteId: noteId)
+                : '');
+        _savedPrivateNoteMarkers.remove(key);
+        _savedPrivateNoteMeta.remove(key);
+      } else {
+        final key = markerId ?? noteId;
+        if (key == null || key.isEmpty) return;
+        _noteMarkers.remove(key);
+        _noteMeta.remove(key);
+        _noteWalkIdById.remove(key);
+        _noteRecords.removeWhere((rec) => rec['id'] == key);
+        _rebuildNoteIndexes();
+      }
+      _recomputeVisibleMarkers();
+    });
+  }
+
+  Future<void> _loadSavedPrivateCautions() async {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) return;
+
+    try {
+      await _ensureNoteIcons();
+      final walksSnap = await FirebaseFirestore.instance
+          .collection('owners')
+          .doc(uid)
+          .collection('walks')
+          .where('status', isEqualTo: 'completed')
+          .get();
+
+      final nextMarkers = <String, Marker>{};
+      final nextMeta = <String, Map<String, String?>>{};
+
+      for (final walkDoc in walksSnap.docs) {
+        final notesSnap = await walkDoc.reference.collection('notes').get();
+        for (final noteDoc in notesSnap.docs) {
+          final data = noteDoc.data();
+          final type = ((data['type'] ?? '') as String).trim();
+          final sharedCautionId = (data['sharedCautionId'] as String?)?.trim();
+          if (type != 'caution' ||
+              (sharedCautionId != null && sharedCautionId.isNotEmpty)) {
+            continue;
+          }
+
+          final position = data['position'];
+          if (position is! GeoPoint) continue;
+
+          final message = ((data['message'] ?? '') as String).trim();
+          final markerKey = _savedPrivateMarkerKey(
+            walkId: walkDoc.id,
+            noteId: noteDoc.id,
+          );
+          final latLng = LatLng(position.latitude, position.longitude);
+
+          nextMeta[markerKey] = {
+            'title': 'Caution',
+            'message': message,
+            'walkId': walkDoc.id,
+            'noteId': noteDoc.id,
+          };
+          nextMarkers[markerKey] = Marker(
+            markerId: MarkerId(markerKey),
+            position: latLng,
+            icon: _cautionIcon!,
+            infoWindow: InfoWindow(
+              title: 'Caution',
+              snippet: message.isEmpty ? null : message,
+            ),
+            onTap: () => _openLocalNoteSheet(
+              title: 'Caution',
+              message: message,
+              markerId: markerKey,
+              walkId: walkDoc.id,
+              noteId: noteDoc.id,
+              fromSavedMarkers: true,
+            ),
+          );
+        }
+      }
+
+      if (!mounted) return;
+      setState(() {
+        _savedPrivateNoteMarkers
+          ..clear()
+          ..addAll(nextMarkers);
+        _savedPrivateNoteMeta
+          ..clear()
+          ..addAll(nextMeta);
+        _recomputeVisibleMarkers();
+      });
+    } catch (e) {
+      debugPrint('Error loading saved private cautions: $e');
+    }
+  }
+
+  void _promoteCurrentPrivateCautionsToSavedMarkers() {
+    for (final entry in _noteMeta.entries) {
+      final noteId = entry.key;
+      final meta = entry.value;
+      final type = (meta['type'] ?? '').trim();
+      final sharedCautionId = (meta['sharedCautionId'] ?? '').trim();
+      if (type != 'caution' || sharedCautionId.isNotEmpty) continue;
+
+      final walkId = _noteWalkIdById[noteId];
+      final marker = _noteMarkers[noteId];
+      if (walkId == null || marker == null) continue;
+
+      final message = (meta['message'] ?? '').trim();
+      final markerKey = _savedPrivateMarkerKey(walkId: walkId, noteId: noteId);
+
+      _savedPrivateNoteMeta[markerKey] = {
+        'title': 'Caution',
+        'message': message,
+        'walkId': walkId,
+        'noteId': noteId,
+      };
+      _savedPrivateNoteMarkers[markerKey] = Marker(
+        markerId: MarkerId(markerKey),
+        position: marker.position,
+        icon: _cautionIcon!,
+        infoWindow: InfoWindow(
+          title: 'Caution',
+          snippet: message.isEmpty ? null : message,
+        ),
+        onTap: () => _openLocalNoteSheet(
+          title: 'Caution',
+          message: message,
+          markerId: markerKey,
+          walkId: walkId,
+          noteId: noteId,
+          fromSavedMarkers: true,
+        ),
+      );
+    }
+    _recomputeVisibleMarkers();
+  }
+
+  Future<void> _restoreActiveWalkDraftState() async {
+    if (!_walk.isActive) {
+      _currentWalkId = null;
+      await _saveActiveWalkDocId(null);
+      return;
+    }
+
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) return;
+
+    final prefs = await SharedPreferences.getInstance();
+    final savedWalkId = prefs.getString(_kActiveWalkDocIdKey);
+    if (savedWalkId == null || savedWalkId.isEmpty) return;
+
+    final walkRef = FirebaseFirestore.instance
+        .collection('owners')
+        .doc(uid)
+        .collection('walks')
+        .doc(savedWalkId);
+
+    try {
+      final walkSnap = await walkRef.get();
+      if (!walkSnap.exists) {
+        _currentWalkId = null;
+        await _saveActiveWalkDocId(null);
+        return;
+      }
+
+      final walkData = walkSnap.data() ?? const <String, dynamic>{};
+      final status = (walkData['status'] as String?)?.trim().toLowerCase();
+      if (status != null && status != 'active') {
+        _currentWalkId = null;
+        await _saveActiveWalkDocId(null);
+        return;
+      }
+
+      await _ensureNoteIcons();
+      final notesSnap = await walkRef.collection('notes').get();
+
+      final nextNoteMeta = <String, Map<String, String?>>{};
+      final nextNoteMarkers = <String, Marker>{};
+      final nextNoteIndexById = <String, int>{};
+      final nextNoteRecords = <Map<String, dynamic>>[];
+      var nextSeq = _noteSeq;
+
+      for (final doc in notesSnap.docs) {
+        final data = doc.data();
+        final type = ((data['type'] ?? 'caution') as String).trim();
+        final message = ((data['message'] ?? '') as String).trim();
+        final sharedCautionId = (data['sharedCautionId'] as String?)?.trim();
+        final position = data['position'];
+        if (position is! GeoPoint) continue;
+
+        late final BitmapDescriptor iconBitmap;
+        late final String title;
+        switch (type) {
+          case 'pee':
+            iconBitmap = _peeIcon!;
+            title = 'Pee';
+          case 'poop':
+            iconBitmap = _poopIcon!;
+            title = 'Poop';
+          default:
+            iconBitmap = _cautionIcon!;
+            title = 'Caution';
+        }
+
+        final latLng = LatLng(position.latitude, position.longitude);
+        nextNoteMeta[doc.id] = {
+          'type': type,
+          'message': message,
+          if (sharedCautionId != null && sharedCautionId.isNotEmpty)
+            'sharedCautionId': sharedCautionId,
+        };
+        nextNoteMarkers[doc.id] = Marker(
+          markerId: MarkerId(doc.id),
+          position: latLng,
+          draggable: true,
+          icon: iconBitmap,
+          consumeTapEvents:
+              sharedCautionId != null && sharedCautionId.isNotEmpty,
+          infoWindow: InfoWindow(
+            title: title,
+            snippet: message.isEmpty ? null : message,
+          ),
+          onTap: sharedCautionId == null || sharedCautionId.isEmpty
+              ? () => _openLocalNoteSheet(
+                    title: title,
+                    message: message,
+                    markerId: doc.id,
+                    walkId: savedWalkId,
+                    noteId: doc.id,
+                  )
+              : () => _openSharedCautionSheet(sharedCautionId),
+          onDragEnd: (pos) {
+            unawaited(_updateNotePosition(doc.id, pos));
+          },
+        );
+        nextNoteIndexById[doc.id] = nextNoteRecords.length;
+        nextNoteRecords.add({
+          'id': doc.id,
+          'type': type,
+          'message': message,
+          'lat': latLng.latitude,
+          'lng': latLng.longitude,
+          'persisted': true,
+          if (sharedCautionId != null && sharedCautionId.isNotEmpty)
+            'sharedCautionId': sharedCautionId,
+        });
+        nextSeq = math.max(nextSeq, _nextNoteSeqFromId(doc.id) + 1);
+      }
+
+      if (!mounted) return;
+      setState(() {
+        _currentWalkId = savedWalkId;
+        _noteMeta
+          ..clear()
+          ..addAll(nextNoteMeta);
+        _noteWalkIdById
+          ..clear()
+          ..addEntries(
+            nextNoteRecords.map(
+              (rec) => MapEntry(rec['id'] as String, savedWalkId),
+            ),
+          );
+        _noteMarkers
+          ..clear()
+          ..addAll(nextNoteMarkers);
+        _noteIndexById
+          ..clear()
+          ..addAll(nextNoteIndexById);
+        _noteRecords
+          ..clear()
+          ..addAll(nextNoteRecords);
+        _noteSeq = nextSeq;
+        _recomputeVisibleMarkers();
+      });
+    } catch (e) {
+      debugPrint('Error restoring active walk draft: $e');
+    }
+  }
+
+  Future<void> _deleteActiveWalkDraft() async {
+    final currentUid = FirebaseAuth.instance.currentUser?.uid;
+    final walkId = _currentWalkId;
+    if (currentUid == null || walkId == null) return;
+
+    final walkRef = FirebaseFirestore.instance
+        .collection('owners')
+        .doc(currentUid)
+        .collection('walks')
+        .doc(walkId);
+
+    try {
+      final notesSnap = await walkRef.collection('notes').get();
+      final batch = FirebaseFirestore.instance.batch();
+      for (final doc in notesSnap.docs) {
+        batch.delete(doc.reference);
+      }
+      batch.delete(walkRef);
+      await batch.commit();
+    } catch (e) {
+      debugPrint('Error deleting active walk draft: $e');
+    } finally {
+      _currentWalkId = null;
+      await _saveActiveWalkDocId(null);
+    }
   }
 
   Future<void> _setSharedCautionVote(
@@ -1728,6 +2183,136 @@ class _MapTabState extends State<MapTab>
     );
   }
 
+  Future<void> _openLocalNoteSheet({
+    required String title,
+    required String message,
+    String? markerId,
+    String? walkId,
+    String? noteId,
+    bool fromSavedMarkers = false,
+    bool isPrivate = true,
+  }) async {
+    if (!mounted) return;
+
+    final trimmedMessage = message.trim();
+    final detailText =
+        trimmedMessage.isEmpty ? 'Saved to your walk history.' : trimmedMessage;
+    final canRemove = isPrivate;
+
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (sheetContext) {
+        return SafeArea(
+          child: Container(
+            margin: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+            padding: const EdgeInsets.fromLTRB(18, 14, 18, 18),
+            decoration: const BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Center(
+                  child: Container(
+                    width: 42,
+                    height: 5,
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFD8E3D1),
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Text(
+                  title,
+                  style: const TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                if (isPrivate)
+                  Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFF3F8EF),
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                    child: const Text(
+                      'Private to you',
+                      style: TextStyle(
+                        fontWeight: FontWeight.w700,
+                        color: Color(0xFF567D46),
+                      ),
+                    ),
+                  ),
+                const SizedBox(height: 12),
+                Text(
+                  detailText,
+                  style: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600,
+                    height: 1.35,
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    if (canRemove)
+                      TextButton.icon(
+                        onPressed: () async {
+                          Navigator.of(sheetContext).pop();
+                          try {
+                            await _removePrivateNote(
+                              walkId: walkId,
+                              noteId: noteId,
+                              markerId: markerId,
+                              fromSavedMarkers: fromSavedMarkers,
+                            );
+                            if (!mounted) return;
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text('Private marker removed.'),
+                              ),
+                            );
+                          } catch (e) {
+                            if (!mounted) return;
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text(
+                                  'Could not remove private marker: $e',
+                                ),
+                              ),
+                            );
+                          }
+                        },
+                        icon: const Icon(Icons.delete_outline),
+                        label: const Text('Remove marker'),
+                        style: TextButton.styleFrom(
+                          foregroundColor: Colors.red,
+                        ),
+                      )
+                    else
+                      const SizedBox.shrink(),
+                    TextButton(
+                      onPressed: () => Navigator.of(sheetContext).pop(),
+                      child: const Text('Close'),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   Future<void> _addWalkNote(String type) async {
     if (!_walk.isActive) {
       if (!mounted) return;
@@ -1756,18 +2341,25 @@ class _MapTabState extends State<MapTab>
         return;
       }
 
-      if (input.shareOnMap) {
-        try {
-          sharedCautionId = await _createSharedCaution(
-            message: noteMsg,
-            position: here,
-          );
-        } catch (e) {
-          if (!mounted) return;
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Could not share caution on map: $e')),
-          );
-        }
+      try {
+        sharedCautionId = await _createSharedCaution(
+          message: noteMsg,
+          position: here,
+        );
+      } catch (e) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not post public caution: $e')),
+        );
+        return;
+      }
+      if (sharedCautionId == null) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+              content: Text('Could not post public caution right now.')),
+        );
+        return;
       }
 
       late final BitmapDescriptor iconBitmap;
@@ -1793,32 +2385,37 @@ class _MapTabState extends State<MapTab>
         consumeTapEvents: sharedCautionId != null,
         infoWindow: InfoWindow(title: title, snippet: noteMsg),
         onTap: sharedCautionId == null
-            ? null
+            ? () => _openLocalNoteSheet(
+                  title: title,
+                  message: noteMsg ?? '',
+                  markerId: id,
+                  walkId: _noteWalkIdById[id] ?? _currentWalkId,
+                  noteId: id,
+                )
             : () => _openSharedCautionSheet(sharedCautionId!),
-        onDragEnd: (pos) => _updateNotePosition(id, pos),
+        onDragEnd: (pos) {
+          unawaited(_updateNotePosition(id, pos));
+        },
       );
 
-      setState(() {
-        _noteMeta[id] = {
-          'type': type,
-          'message': noteMsg,
-          'sharedCautionId': sharedCautionId,
-        };
-        _noteMarkers[id] = m;
-        _recomputeVisibleMarkers();
-      });
-
-      final recIndex = _noteRecords.length;
-      _noteIndexById[id] = recIndex;
-      _noteRecords.add({
-        'id': id,
-        'type': type,
-        'message': noteMsg,
-        'lat': here.latitude,
-        'lng': here.longitude,
-        'createdAt': FieldValue.serverTimestamp(),
-        if (sharedCautionId != null) 'sharedCautionId': sharedCautionId,
-      });
+      _addLocalWalkNoteRecord(
+        id: id,
+        type: type,
+        message: noteMsg,
+        position: here,
+        marker: m,
+        sharedCautionId: sharedCautionId,
+      );
+      try {
+        await _persistWalkNoteRecord(_noteRecords.last);
+      } catch (e) {
+        debugPrint('Error persisting walk note: $e');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Could not save caution note: $e')),
+          );
+        }
+      }
       return;
     }
 
@@ -1853,33 +2450,64 @@ class _MapTabState extends State<MapTab>
       icon: iconBitmap,
       infoWindow: InfoWindow(title: title, snippet: noteMsg),
       consumeTapEvents: false,
-      onDragEnd: (pos) => _updateNotePosition(id, pos),
+      onTap: () => _openLocalNoteSheet(
+        title: title,
+        message: noteMsg ?? '',
+        markerId: id,
+        walkId: _noteWalkIdById[id] ?? _currentWalkId,
+        noteId: id,
+      ),
+      onDragEnd: (pos) {
+        unawaited(_updateNotePosition(id, pos));
+      },
     );
 
-    setState(() {
-      _noteMeta[id] = {'type': type, 'message': noteMsg};
-      _noteMarkers[id] = m;
-      _recomputeVisibleMarkers();
-    });
-
-    final recIndex = _noteRecords.length;
-    _noteIndexById[id] = recIndex;
-    _noteRecords.add({
-      'id': id,
-      'type': type,
-      'message': noteMsg,
-      'lat': here.latitude,
-      'lng': here.longitude,
-      'createdAt': FieldValue.serverTimestamp(),
-    });
+    _addLocalWalkNoteRecord(
+      id: id,
+      type: type,
+      message: noteMsg ?? '',
+      position: here,
+      marker: m,
+    );
+    try {
+      await _persistWalkNoteRecord(_noteRecords.last);
+    } catch (e) {
+      debugPrint('Error persisting walk note: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Could not save walk note: $e')),
+        );
+      }
+    }
   }
 
-  void _updateNotePosition(String id, LatLng newPos) {
+  Future<void> _updateNotePosition(String id, LatLng newPos) async {
     final existing = _noteMarkers[id];
     if (existing == null) return;
     final updated = existing.copyWith(positionParam: newPos);
+    final sharedCautionId = _noteMeta[id]?['sharedCautionId'] as String?;
     setState(() {
       _noteMarkers[id] = updated;
+      if (sharedCautionId != null) {
+        final caution = _sharedCautionsById[sharedCautionId];
+        final sharedMarker = _sharedCautionMarkers[sharedCautionId];
+        if (caution != null) {
+          _sharedCautionsById[sharedCautionId] = _SharedMapCaution(
+            id: caution.id,
+            createdBy: caution.createdBy,
+            message: caution.message,
+            position: newPos,
+            createdAt: caution.createdAt,
+            lastStillThereAt: caution.lastStillThereAt,
+            stillThereBy: caution.stillThereBy,
+            noLongerThereBy: caution.noLongerThereBy,
+          );
+        }
+        if (sharedMarker != null) {
+          _sharedCautionMarkers[sharedCautionId] =
+              sharedMarker.copyWith(positionParam: newPos);
+        }
+      }
       _recomputeVisibleMarkers();
     });
 
@@ -1887,6 +2515,36 @@ class _MapTabState extends State<MapTab>
     if (i != null && i >= 0 && i < _noteRecords.length) {
       _noteRecords[i]['lat'] = newPos.latitude;
       _noteRecords[i]['lng'] = newPos.longitude;
+      try {
+        await _persistWalkNoteRecord(_noteRecords[i]);
+      } catch (e) {
+        debugPrint('Error saving moved walk note: $e');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Could not save moved note: $e')),
+          );
+        }
+      }
+    }
+
+    if (sharedCautionId != null) {
+      try {
+        await _firestore
+            .collection('map_cautions')
+            .doc(sharedCautionId)
+            .update({
+          'position': GeoPoint(newPos.latitude, newPos.longitude),
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+      } catch (e) {
+        debugPrint('Error updating shared caution position: $e');
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Could not save moved shared caution: $e'),
+          ),
+        );
+      }
     }
   }
 
@@ -1897,7 +2555,6 @@ class _MapTabState extends State<MapTab>
     setState(() {
       _finalPosition = savedLocation;
       _currentMapCenter = savedMapCenter ?? savedLocation ?? _fallbackMapCenter;
-      _isMapReady = true;
       _recomputeVisibleMarkers();
     });
   }
@@ -2030,7 +2687,11 @@ class _MapTabState extends State<MapTab>
   }
 
   Future<void> _loadNearbyParks(LatLng position) async {
-    setState(() => _isSearching = true);
+    setState(() {
+      _currentMapCenter = position;
+      _isSearching = true;
+      _recomputeVisibleMarkers();
+    });
     try {
       final nearbyParks = await _locationService.findNearbyParks(
         position.latitude,
@@ -2047,6 +2708,13 @@ class _MapTabState extends State<MapTab>
 
       _rebuildParksListeners();
       await _cacheParksAndServices(nearbyParks);
+
+      if (mounted) {
+        setState(() {
+          _currentMapCenter = position;
+          _recomputeVisibleMarkers();
+        });
+      }
     } finally {
       if (mounted) setState(() => _isSearching = false);
     }
@@ -2077,6 +2745,8 @@ class _MapTabState extends State<MapTab>
       final reason = _walk.tooShortReason; // capture before reset
       debugPrint('⚠️ Walk too short: $reason');
 
+      await _deleteActiveWalkDraft();
+
       await _walk.reset();
 
       _resetLiveRoute();
@@ -2087,6 +2757,7 @@ class _MapTabState extends State<MapTab>
 
       _noteMarkers.clear();
       _noteMeta.clear();
+      _noteWalkIdById.clear();
       _noteIndexById.clear();
       _noteRecords.clear();
       _noteSeq = 0;
@@ -2115,6 +2786,7 @@ class _MapTabState extends State<MapTab>
       if (!saved) {
         debugPrint('Walk session failed to persist');
 
+        await _deleteActiveWalkDraft();
         await _walk.reset();
         _resetLiveRoute();
         _wasActive = false;
@@ -2122,6 +2794,7 @@ class _MapTabState extends State<MapTab>
         _elapsedText.value = '00:00';
         _noteMarkers.clear();
         _noteMeta.clear();
+        _noteWalkIdById.clear();
         _noteIndexById.clear();
         _noteRecords.clear();
         _noteSeq = 0;
@@ -2151,11 +2824,14 @@ class _MapTabState extends State<MapTab>
       _wasActive = false;
       _manualFinishing = false;
       _elapsedText.value = '00:00';
+      _promoteCurrentPrivateCautionsToSavedMarkers();
       _noteMarkers.clear();
       _noteMeta.clear();
+      _noteWalkIdById.clear();
       _noteIndexById.clear();
       _noteRecords.clear();
       _noteSeq = 0;
+      _recomputeVisibleMarkers();
 
       if (mounted) {
         setState(() {});
@@ -2224,29 +2900,38 @@ class _MapTabState extends State<MapTab>
         final uid = FirebaseAuth.instance.currentUser?.uid;
         if (uid != null) {
           int xp = 0;
+          final isTinyWalk = steps_ < 50 &&
+              meters_ < 40 &&
+              elapsed_ < const Duration(minutes: 2);
 
-          // 1) Daily check-in bonus (if streak incremented today)
+          // 1) Daily streak/check-in bonus
           if (streak?.wasIncremented == true) {
-            xp += 20;
+            xp += isTinyWalk ? 2 : 10;
           }
 
-          // 2) Distance XP (1 xp per 100m)
-          xp += (meters_ / 100).floor();
+          // 2) Distance XP (1 xp per 250m)
+          xp += (meters_ / 250).floor();
 
-          // 3) Steps XP (1 xp per 500 steps)
-          xp += (steps_ / 500).floor();
+          // 3) Steps XP (1 xp per 1000 steps)
+          xp += (steps_ / 1000).floor();
 
-          // 4) Streak multiplier bonus
+          // 4) Small streak bonus, capped so tiny walks don't explode in XP
           if (streakCurrent_ != null) {
-            xp += streakCurrent_ * 5;
+            final streakBonus = math.min(8, (streakCurrent_ / 7).floor());
+            xp += isTinyWalk ? math.min(2, streakBonus) : streakBonus;
           }
+
+          // Keep walk XP within a sane range.
+          xp = math.min(xp, isTinyWalk ? 4 : 40);
 
           // Apply XP to Level System
-          await LevelSystem.addXp(uid, xp, reason: 'Walk completed');
-          debugPrint("Awarded $xp XP");
-          // Show XP fly-up animation
-          if (widget.onXpGained != null && xp > 0) {
-            widget.onXpGained!();
+          if (xp > 0) {
+            await LevelSystem.addXp(uid, xp, reason: 'Walk completed');
+            debugPrint("Awarded $xp XP");
+            // Show XP fly-up animation
+            if (widget.onXpGained != null) {
+              widget.onXpGained!();
+            }
           }
         }
         _showCelebrationDialog(
@@ -2264,6 +2949,7 @@ class _MapTabState extends State<MapTab>
   Future<void> _toggleWalk() async {
     if (_walk.isActive) {
       _manualFinishing = true;
+      if (mounted) setState(() {});
       try {
         debugPrint('🛑 Stopping walk...');
         await _walk.stop();
@@ -2536,9 +3222,10 @@ class _MapTabState extends State<MapTab>
           .doc(currentUid)
           .collection('walks');
 
-      // ★ Create new doc only now (no doc at start)
-      final walkRef = walksCol.doc();
-      _currentWalkId = walkRef.id;
+      final walkRef = _currentWalkId != null
+          ? walksCol.doc(_currentWalkId)
+          : walksCol.doc();
+      _currentWalkId ??= walkRef.id;
 
       final route = _walk.points
           .map((p) => GeoPoint(p.latitude, p.longitude))
@@ -2566,6 +3253,7 @@ class _MapTabState extends State<MapTab>
         final batch = FirebaseFirestore.instance.batch();
         for (final rec in _noteRecords) {
           final nref = walkRef.collection('notes').doc(rec['id'] as String);
+          final alreadyPersisted = rec['persisted'] == true;
           batch.set(
             nref,
             {
@@ -2574,7 +3262,8 @@ class _MapTabState extends State<MapTab>
               'position': GeoPoint(rec['lat'] as double, rec['lng'] as double),
               if (rec['sharedCautionId'] != null)
                 'sharedCautionId': rec['sharedCautionId'],
-              'createdAt': FieldValue.serverTimestamp(),
+              if (!alreadyPersisted) 'createdAt': FieldValue.serverTimestamp(),
+              'updatedAt': FieldValue.serverTimestamp(),
             },
             SetOptions(merge: true),
           );
@@ -2583,6 +3272,7 @@ class _MapTabState extends State<MapTab>
       }
 
       _currentWalkId = null;
+      await _saveActiveWalkDocId(null);
       return true;
     } catch (e) {
       if (mounted) {
@@ -2675,6 +3365,11 @@ class _MapTabState extends State<MapTab>
           position: LatLng(pos.latitude, pos.longitude),
           icon: icon,
           infoWindow: InfoWindow(title: title, snippet: msg),
+          onTap: () => _openLocalNoteSheet(
+            title: title,
+            message: msg ?? '',
+            isPrivate: false,
+          ),
         );
       }
       _recomputeVisibleMarkers();
@@ -2709,18 +3404,16 @@ class _MapTabState extends State<MapTab>
         setState(() {
           _finalPosition = userLocation;
           _currentMapCenter = userLocation;
-          _isMapReady = true;
         });
 
         if (_mapController != null) {
           _moveCameraTo(userLocation, zoom: 17);
         }
 
-        await _loadNearbyParks(userLocation);
+        unawaited(_loadNearbyParks(userLocation));
       } else {
         setState(() {
           _finalPosition = null;
-          _isMapReady = true;
           _isSearching = false;
         });
       }
@@ -3298,7 +3991,10 @@ class _MapTabState extends State<MapTab>
       await _cacheParksAndServices(nearbyParks);
 
       if (!mounted) return;
-      setState(() => _isSearching = false);
+      setState(() {
+        _recomputeVisibleMarkers();
+        _isSearching = false;
+      });
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text("Found ${nearbyParks.length} parks nearby")),
       );
@@ -3447,22 +4143,6 @@ class _MapTabState extends State<MapTab>
     debugPrint(
         '🔷 MapTab.build() - _walk.isActive=${_walk.isActive}, _finishingWalk=$_finishingWalk, _manualFinishing=$_manualFinishing');
 
-    if (!_isMapReady) {
-      return Container(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            colors: [Color(0xFF567D46), Color(0xFF365A38)],
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-          ),
-        ),
-        child: const Center(
-          child: CircularProgressIndicator(
-            valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
-          ),
-        ),
-      );
-    }
     final double noteButtonsTop = MediaQuery.of(context).padding.top +
         12 /*filter padding*/ +
         64 /*approx filter height*/ +
@@ -3494,9 +4174,51 @@ class _MapTabState extends State<MapTab>
                 _buildFilterBar(),
 
                 if (_isSearching)
-                  const IgnorePointer(
-                    ignoring: true,
-                    child: Center(child: CircularProgressIndicator()),
+                  Positioned(
+                    top: noteButtonsTop,
+                    left: 12,
+                    child: SafeArea(
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 10,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withOpacity(0.94),
+                          borderRadius: BorderRadius.circular(16),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withOpacity(0.12),
+                              blurRadius: 12,
+                              offset: const Offset(0, 6),
+                            ),
+                          ],
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: const [
+                            SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2.2,
+                                valueColor: AlwaysStoppedAnimation<Color>(
+                                  Color(0xFF567D46),
+                                ),
+                              ),
+                            ),
+                            SizedBox(width: 10),
+                            Text(
+                              'Refreshing nearby parks…',
+                              style: TextStyle(
+                                fontWeight: FontWeight.w700,
+                                color: Color(0xFF365A38),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
                   ),
 
                 // Top-right walk-note buttons (only when walking)
@@ -3592,9 +4314,10 @@ class _MapTabState extends State<MapTab>
                       elevation: 6,
                       padding: const EdgeInsets.symmetric(vertical: 14),
                     ),
-                    onPressed: (_finishingWalk || _startingWalk)
-                        ? null
-                        : _toggleWalk, // disable while starting/finishing
+                    onPressed:
+                        (_finishingWalk || _manualFinishing || _startingWalk)
+                            ? null
+                            : _toggleWalk, // disable while starting/finishing
                     child: _finishingWalk
                         ? const SizedBox(
                             height: 24,

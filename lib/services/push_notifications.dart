@@ -6,6 +6,8 @@ import 'package:flutter/material.dart';
 final FlutterLocalNotificationsPlugin _local =
     FlutterLocalNotificationsPlugin();
 
+Map<String, String>? _pendingNotificationTap;
+
 const AndroidNotificationChannel _dmChannel = AndroidNotificationChannel(
   'dm_messages',
   'Direct Messages',
@@ -143,6 +145,31 @@ Future<void> initPushNotifications({
   }
 }
 
+void flushPendingNotificationNavigation(GlobalKey<NavigatorState> navKey) {
+  final pending = _pendingNotificationTap;
+  if (pending == null) return;
+  _pendingNotificationTap = null;
+
+  if (pending['type'] == 'dm') {
+    _openDm(
+      navKey,
+      threadId: pending['threadId'] ?? '',
+      otherUserId: pending['senderId'] ?? '',
+      otherDisplayName: (pending['senderName'] ?? '').isNotEmpty
+          ? pending['senderName']!
+          : 'Message',
+    );
+  } else if (pending['type'] == 'group_chat') {
+    _openGroupChat(
+      navKey,
+      groupId: pending['groupId'] ?? '',
+      groupName: (pending['groupName'] ?? '').isNotEmpty
+          ? pending['groupName']!
+          : 'Group',
+    );
+  }
+}
+
 void _handleRemoteMessageTap(
   RemoteMessage message,
   GlobalKey<NavigatorState> navKey,
@@ -199,8 +226,16 @@ void _openDm(
   required String otherDisplayName,
 }) {
   final ctx = navKey.currentContext;
-  if (ctx == null) return;
   if (otherUserId.isEmpty) return;
+  if (ctx == null || navKey.currentState == null) {
+    _pendingNotificationTap = {
+      'type': 'dm',
+      'threadId': threadId,
+      'senderId': otherUserId,
+      'senderName': otherDisplayName,
+    };
+    return;
+  }
 
   navKey.currentState?.pushNamed(
     '/dm',
@@ -218,7 +253,15 @@ void _openGroupChat(
   required String groupName,
 }) {
   final ctx = navKey.currentContext;
-  if (ctx == null || groupId.isEmpty) return;
+  if (groupId.isEmpty) return;
+  if (ctx == null || navKey.currentState == null) {
+    _pendingNotificationTap = {
+      'type': 'group_chat',
+      'groupId': groupId,
+      'groupName': groupName,
+    };
+    return;
+  }
 
   navKey.currentState?.pushNamed(
     '/group-chat',

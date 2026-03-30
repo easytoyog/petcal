@@ -2824,7 +2824,12 @@ class WalksListScreen extends StatelessWidget {
                       ),
                     );
                   }
-                  final docs = snap.data?.docs ?? [];
+                  final docs = (snap.data?.docs ?? []).where((doc) {
+                    final data = doc.data() as Map<String, dynamic>? ?? {};
+                    final status =
+                        (data['status'] as String?)?.trim().toLowerCase();
+                    return status == null || status == 'completed';
+                  }).toList(growable: false);
 
                   // ---------- EMPTY STATE ----------
                   if (docs.isEmpty) {

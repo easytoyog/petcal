@@ -32,6 +32,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _groupSub;
   String? _resolvedSenderName;
   final Map<String, String> _senderNamesByUid = {};
+  final Map<String, String> _senderPetPhotoByUid = {};
   final Set<String> _resolvingSenderUids = <String>{};
 
   DocumentReference<Map<String, dynamic>> get _groupRef =>
@@ -86,7 +87,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     return 'Unknown User';
   }
 
-  Future<String> _resolveDisplayNameForUid(
+  Future<Map<String, String>> _resolveSenderMetaForUid(
     String uid, {
     bool preferOwnerDoc = false,
   }) async {
@@ -116,6 +117,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     }
 
     String petName = '';
+    String petPhotoUrl = '';
     try {
       final petsSnap = await _firestore
           .collection('pets')
@@ -130,7 +132,11 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
             break;
           }
         }
-        petName = (chosen.data()['name'] ?? '').toString().trim();
+        final chosenData = chosen.data();
+        petName = (chosenData['name'] ?? '').toString().trim();
+        petPhotoUrl = (chosenData['photoUrl'] ?? chosenData['photo'] ?? '')
+            .toString()
+            .trim();
       }
     } catch (_) {}
 
@@ -140,41 +146,48 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
           : 'Unknown User';
     }
 
-    if (petName.isEmpty) return ownerName;
-    return '$ownerName [$petName]';
+    final displayName = petName.isEmpty ? ownerName : '$ownerName ($petName)';
+
+    return {
+      'displayName': displayName,
+      'petPhotoUrl': petPhotoUrl,
+    };
   }
 
   Future<void> _primeSenderDisplayName() async {
     final uid = _auth.currentUser?.uid;
     if (uid == null) return;
 
-    final senderName = await _resolveDisplayNameForUid(
+    final senderMeta = await _resolveSenderMetaForUid(
       uid,
       preferOwnerDoc: true,
     );
     if (!mounted) return;
     setState(() {
-      _resolvedSenderName = senderName;
-      _senderNamesByUid[uid] = senderName;
+      _resolvedSenderName = senderMeta['displayName'] ?? 'Unknown User';
+      _senderNamesByUid[uid] = senderMeta['displayName'] ?? 'Unknown User';
+      _senderPetPhotoByUid[uid] = senderMeta['petPhotoUrl'] ?? '';
     });
   }
 
-  Future<void> _ensureSenderDisplayName(String uid) async {
+  Future<void> _ensureSenderMeta(String uid) async {
     if (uid.isEmpty ||
-        _senderNamesByUid.containsKey(uid) ||
+        (_senderNamesByUid.containsKey(uid) &&
+            _senderPetPhotoByUid.containsKey(uid)) ||
         _resolvingSenderUids.contains(uid)) {
       return;
     }
 
     _resolvingSenderUids.add(uid);
     try {
-      final resolved = await _resolveDisplayNameForUid(
+      final resolved = await _resolveSenderMetaForUid(
         uid,
         preferOwnerDoc: uid == _auth.currentUser?.uid,
       );
       if (!mounted) return;
       setState(() {
-        _senderNamesByUid[uid] = resolved;
+        _senderNamesByUid[uid] = resolved['displayName'] ?? 'Unknown User';
+        _senderPetPhotoByUid[uid] = resolved['petPhotoUrl'] ?? '';
       });
     } finally {
       _resolvingSenderUids.remove(uid);
@@ -197,12 +210,18 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
           .collection('messages')
           .doc();
 
-      final senderName = _resolvedSenderName ??
-          await _resolveDisplayNameForUid(user.uid, preferOwnerDoc: true);
+      final senderMeta = _resolvedSenderName == null
+          ? await _resolveSenderMetaForUid(user.uid, preferOwnerDoc: true)
+          : {
+              'displayName': _resolvedSenderName!,
+              'petPhotoUrl': _senderPetPhotoByUid[user.uid] ?? '',
+            };
+      final senderName = senderMeta['displayName'] ?? 'Unknown User';
       if (_resolvedSenderName != senderName && mounted) {
         setState(() {
           _resolvedSenderName = senderName;
           _senderNamesByUid[user.uid] = senderName;
+          _senderPetPhotoByUid[user.uid] = senderMeta['petPhotoUrl'] ?? '';
         });
       }
       final batch = _firestore.batch();
@@ -353,64 +372,98 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     required bool isMe,
     required String text,
     required String senderName,
+    required String senderPhotoUrl,
     required Timestamp? createdAt,
   }) {
-    return Align(
-      alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
-      child: Container(
-        constraints: const BoxConstraints(maxWidth: 290),
-        margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        decoration: BoxDecoration(
-          color: isMe ? const Color(0xFFDCF8C6) : Colors.white,
-          borderRadius: BorderRadius.only(
-            topLeft: const Radius.circular(14),
-            topRight: const Radius.circular(14),
-            bottomLeft: Radius.circular(isMe ? 14 : 4),
-            bottomRight: Radius.circular(isMe ? 4 : 14),
-          ),
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withOpacity(0.05),
-              blurRadius: 4,
-              offset: const Offset(0, 2),
-            ),
-          ],
+    final bubble = Container(
+      constraints: const BoxConstraints(maxWidth: 290),
+      margin: const EdgeInsets.symmetric(vertical: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: isMe ? const Color(0xFFDCF8C6) : Colors.white,
+        borderRadius: BorderRadius.only(
+          topLeft: const Radius.circular(14),
+          topRight: const Radius.circular(14),
+          bottomLeft: Radius.circular(isMe ? 14 : 4),
+          bottomRight: Radius.circular(isMe ? 4 : 14),
         ),
-        child: Column(
-          crossAxisAlignment:
-              isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
-          children: [
-            if (!isMe)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 4),
-                child: Text(
-                  senderName,
-                  style: const TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w700,
-                    color: Color(0xFF567D46),
-                  ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.05),
+            blurRadius: 4,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment:
+            isMe ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+        children: [
+          if (!isMe)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 4),
+              child: Text(
+                senderName,
+                style: const TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                  color: Color(0xFF567D46),
                 ),
               ),
-            Text(
-              text,
-              style: const TextStyle(
-                fontSize: 15,
-                color: Colors.black87,
-                height: 1.3,
-              ),
             ),
-            const SizedBox(height: 4),
-            Text(
-              _formatTime(createdAt),
-              style: TextStyle(
-                fontSize: 11,
-                color: Colors.black.withOpacity(0.5),
-              ),
+          Text(
+            text,
+            style: const TextStyle(
+              fontSize: 15,
+              color: Colors.black87,
+              height: 1.3,
             ),
-          ],
+          ),
+          const SizedBox(height: 4),
+          Text(
+            _formatTime(createdAt),
+            style: TextStyle(
+              fontSize: 11,
+              color: Colors.black.withOpacity(0.5),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    if (isMe) {
+      return Align(
+        alignment: Alignment.centerRight,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 10),
+          child: bubble,
         ),
+      );
+    }
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 10),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          CircleAvatar(
+            radius: 18,
+            backgroundColor: const Color(0xFFEAF4E5),
+            backgroundImage:
+                senderPhotoUrl.isNotEmpty ? NetworkImage(senderPhotoUrl) : null,
+            child: senderPhotoUrl.isEmpty
+                ? Text(
+                    senderName.isNotEmpty ? senderName[0].toUpperCase() : '?',
+                    style: const TextStyle(
+                      color: Color(0xFF567D46),
+                      fontWeight: FontWeight.w700,
+                    ),
+                  )
+                : null,
+          ),
+          const SizedBox(width: 8),
+          Flexible(child: bubble),
+        ],
       ),
     );
   }
@@ -487,11 +540,14 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                         (_isMissingSenderName(storedSenderName)
                             ? 'Unknown User'
                             : storedSenderName);
+                    final senderPhotoUrl = _senderPetPhotoByUid[senderId] ?? '';
                     final createdAt = data['createdAt'] as Timestamp?;
                     final isMe = senderId == currentUid;
 
-                    if (_isMissingSenderName(storedSenderName)) {
-                      unawaited(_ensureSenderDisplayName(senderId));
+                    if (senderId.isNotEmpty &&
+                        (_isMissingSenderName(storedSenderName) ||
+                            !_senderPetPhotoByUid.containsKey(senderId))) {
+                      unawaited(_ensureSenderMeta(senderId));
                     }
 
                     final children = <Widget>[];
@@ -507,6 +563,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                         isMe: isMe,
                         text: text,
                         senderName: senderName,
+                        senderPhotoUrl: senderPhotoUrl,
                         createdAt: createdAt,
                       ),
                     );

@@ -272,6 +272,9 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     AppBadgePlus.updateBadge(0);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      flushPendingNotificationNavigation(navKey);
+    });
   }
 
   @override
@@ -284,6 +287,9 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       AppBadgePlus.updateBadge(0);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        flushPendingNotificationNavigation(navKey);
+      });
     }
   }
 
