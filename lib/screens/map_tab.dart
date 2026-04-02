@@ -2552,11 +2552,21 @@ class _MapTabState extends State<MapTab>
   Future<void> _loadSavedLocationAndSetMap() async {
     final savedLocation = await _locationService.getSavedUserLocation();
     final savedMapCenter = await _locationService.getSavedMapCenter();
+    final preferredCenter =
+        savedLocation ?? savedMapCenter ?? _fallbackMapCenter;
     setState(() {
       _finalPosition = savedLocation;
-      _currentMapCenter = savedMapCenter ?? savedLocation ?? _fallbackMapCenter;
+      _currentMapCenter = preferredCenter;
       _recomputeVisibleMarkers();
     });
+
+    if (_mapController != null) {
+      await _moveCameraTo(
+        preferredCenter,
+        zoom: savedLocation != null ? 17 : 14,
+        instant: true,
+      );
+    }
   }
 
   Future<LatLng?> _bestKnownUserLocation() async {
@@ -3668,13 +3678,40 @@ class _MapTabState extends State<MapTab>
       _mapCtlCompleter.complete(controller);
     }
 
-    if (_currentMapCenter == _fallbackMapCenter && _finalPosition != null) {
-      _currentMapCenter = _finalPosition!;
+    LatLng target = _currentMapCenter;
+    double zoom = 14;
+
+    try {
+      final knownUser = await _bestKnownUserLocation();
+      final savedMapCenter = await _locationService.getSavedMapCenter();
+
+      if (knownUser != null) {
+        _finalPosition = knownUser;
+        target = knownUser;
+        zoom = 17;
+      } else if (savedMapCenter != null) {
+        target = savedMapCenter;
+        zoom = 14;
+      } else if (_currentMapCenter == _fallbackMapCenter) {
+        zoom = 12;
+      }
+
+      if (mounted) {
+        setState(() {
+          _currentMapCenter = target;
+        });
+      } else {
+        _currentMapCenter = target;
+      }
+    } catch (_) {
+      if (_currentMapCenter == _fallbackMapCenter) {
+        zoom = 12;
+      }
     }
 
     await _moveCameraTo(
-      _currentMapCenter,
-      zoom: _finalPosition != null ? 17 : 12,
+      target,
+      zoom: zoom,
       instant: true,
     );
   }
