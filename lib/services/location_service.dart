@@ -417,15 +417,20 @@ class LocationService {
   // ---------- Public API ----------
   /// Find nearby parks around (userLat,userLng).
   /// Uses Places (New) Nearby with basic fields only, then filters locally.
-  Future<List<Park>> findNearbyParks(double userLat, double userLng) async {
+  Future<List<Park>> findNearbyParks(
+    double userLat,
+    double userLng, {
+    double radiusKm = 0.65,
+    int maxResults = 16,
+  }) async {
     final parks = <Park>[];
 
     try {
       final raw = await _placesSearchNearby(
         lat: userLat,
         lng: userLng,
-        radiusMeters: 650, // ~0.65 km; adjust to taste/zoom
-        maxResultCount: 16,
+        radiusMeters: min(radiusKm * 1000, 50000), // cap at 50 km
+        maxResultCount: min(maxResults, 20),
         includedTypes: const ['park'],
       );
 

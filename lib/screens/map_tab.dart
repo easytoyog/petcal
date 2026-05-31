@@ -112,6 +112,601 @@ class _MonthWalkStats {
   });
 }
 
+class _ExploreParkListPage extends StatefulWidget {
+  final List<Park> initialParks;
+  final Set<String> initialFilters;
+  final List<_FilterOption> filterOptions;
+  final Map<String, List<String>> parkServicesById;
+  final bool sortedByUserLocation;
+  final LatLng anchor;
+  final double initialRadiusKm;
+  final LocationService locationService;
+
+  const _ExploreParkListPage({
+    required this.initialParks,
+    required this.initialFilters,
+    required this.filterOptions,
+    required this.parkServicesById,
+    required this.sortedByUserLocation,
+    required this.anchor,
+    required this.initialRadiusKm,
+    required this.locationService,
+  });
+
+  @override
+  State<_ExploreParkListPage> createState() => _ExploreParkListPageState();
+}
+
+class _ExploreParkListPageState extends State<_ExploreParkListPage> {
+  static const List<double> _radiusStepsKm = [5, 15, 30, 50];
+
+  late final Set<String> _selectedFilters;
+  late final Map<String, List<String>> _parkServicesById;
+  late List<Park> _allParks;
+  late double _radiusKm;
+
+  bool _isLoadingMore = false;
+  String? _loadError;
+
+  @override
+  void initState() {
+    super.initState();
+    _selectedFilters = Set<String>.from(widget.initialFilters);
+    _parkServicesById = {
+      for (final entry in widget.parkServicesById.entries)
+        entry.key: List<String>.from(entry.value),
+    };
+    _allParks = widget.initialParks.map(_normalizePark).toList(growable: true);
+    _radiusKm = widget.initialRadiusKm;
+  }
+
+  Park _normalizePark(Park park) {
+    return Park(
+      id: park.id,
+      name: park.name,
+      latitude: park.latitude,
+      longitude: park.longitude,
+      userCount: park.userCount,
+      distance: park.calculateDistance(
+        widget.anchor.latitude,
+        widget.anchor.longitude,
+      ),
+      services: _servicesForPark(park),
+      isDogPark: _isDogPark(park),
+    );
+  }
+
+  bool _isDogPark(Park park) {
+    final services = _parkServicesById[park.id] ?? park.services;
+    return park.isDogPark || services.contains('Off-leash Dog Park');
+  }
+
+  List<String> _servicesForPark(Park park) {
+    final existing = _parkServicesById[park.id];
+    if (existing != null) return existing;
+
+    final services = List<String>.from(park.services);
+    if (park.isDogPark && !services.contains('Off-leash Dog Park')) {
+      services.add('Off-leash Dog Park');
+    }
+    return services;
+  }
+
+  bool _matchesSelectedFilters(Park park) {
+    if (_selectedFilters.isEmpty) return true;
+    return _servicesForPark(park)
+        .any((service) => _selectedFilters.contains(service));
+  }
+
+  List<Park> get _visibleParks {
+    final next = _allParks
+        .where(_matchesSelectedFilters)
+        .map(_normalizePark)
+        .toList(growable: false);
+
+    next.sort((a, b) {
+      final distanceA = a.distance ?? double.infinity;
+      final distanceB = b.distance ?? double.infinity;
+      final byDistance = distanceA.compareTo(distanceB);
+      if (byDistance != 0) return byDistance;
+
+      final byDogPark = (_isDogPark(b) ? 1 : 0) - (_isDogPark(a) ? 1 : 0);
+      if (byDogPark != 0) return byDogPark;
+
+      return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+    });
+    return next;
+  }
+
+  double? get _nextRadiusKm {
+    for (final step in _radiusStepsKm) {
+      if (step > _radiusKm) return step;
+    }
+    return null;
+  }
+
+  String _formatDistance(double? km) {
+    if (km == null || !km.isFinite) return '';
+    if (km < 1) return '${(km * 1000).round()} m away';
+    final fractionDigits = km < 10 ? 1 : 0;
+    return '${km.toStringAsFixed(fractionDigits)} km away';
+  }
+
+  Future<void> _hydrateServicesForParks(List<Park> parks) async {
+    final ids = parks
+        .map((park) => park.id)
+        .where((id) => !_parkServicesById.containsKey(id))
+        .toList(growable: false);
+    if (ids.isEmpty) return;
+
+    for (var i = 0; i < ids.length; i += 10) {
+      final chunk = ids.sublist(i, math.min(i + 10, ids.length));
+      final snapshot = await FirebaseFirestore.instance
+          .collection('parks')
+          .where(FieldPath.documentId, whereIn: chunk)
+          .get();
+      for (final doc in snapshot.docs) {
+        final data = doc.data();
+        final services =
+            (data['services'] as List?)?.cast<String>() ?? const [];
+        final isDogPark = data['isDogPark'] == true;
+        final merged = List<String>.from(services);
+        if (isDogPark && !merged.contains('Off-leash Dog Park')) {
+          merged.add('Off-leash Dog Park');
+        }
+        _parkServicesById[doc.id] = merged;
+      }
+    }
+  }
+
+  Future<void> _searchFarther() async {
+    final nextRadiusKm = _nextRadiusKm;
+    if (nextRadiusKm == null || _isLoadingMore) return;
+
+    setState(() {
+      _isLoadingMore = true;
+      _loadError = null;
+    });
+
+    try {
+      final fetched = await widget.locationService.findNearbyParks(
+        widget.anchor.latitude,
+        widget.anchor.longitude,
+        radiusKm: nextRadiusKm,
+        maxResults: 20,
+      );
+      await _hydrateServicesForParks(fetched);
+
+      final byId = {
+        for (final park in _allParks) park.id: _normalizePark(park),
+      };
+      for (final park in fetched) {
+        byId[park.id] = _normalizePark(park);
+      }
+
+      if (!mounted) return;
+      setState(() {
+        _allParks = byId.values.toList(growable: true);
+        _radiusKm = nextRadiusKm;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loadError = 'Could not search farther right now.';
+      });
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isLoadingMore = false;
+        });
+      }
+    }
+  }
+
+  Widget _buildFilterChip(_FilterOption opt) {
+    final selected = _selectedFilters.contains(opt.value);
+    return FilterChip(
+      label: Text(opt.label),
+      avatar: Icon(
+        opt.icon,
+        size: 18,
+        color: selected ? Colors.white : const Color(0xFF567D46),
+      ),
+      selected: selected,
+      showCheckmark: false,
+      selectedColor: const Color(0xFF567D46),
+      backgroundColor: Colors.white,
+      side: BorderSide(
+        color: selected ? const Color(0xFF567D46) : const Color(0xFFD7E3D1),
+      ),
+      labelStyle: TextStyle(
+        color: selected ? Colors.white : const Color(0xFF365A38),
+        fontWeight: FontWeight.w700,
+      ),
+      onSelected: (value) {
+        setState(() {
+          if (value) {
+            _selectedFilters.add(opt.value);
+          } else {
+            _selectedFilters.remove(opt.value);
+          }
+        });
+      },
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final visibleParks = _visibleParks;
+    final activeLabels = widget.filterOptions
+        .where((opt) => _selectedFilters.contains(opt.value))
+        .map((opt) => opt.label)
+        .toList(growable: false);
+    final nextRadiusKm = _nextRadiusKm;
+
+    return Scaffold(
+      backgroundColor: const Color(0xFFF7F5F0),
+      appBar: AppBar(
+        backgroundColor: Colors.white,
+        foregroundColor: const Color(0xFF365A38),
+        elevation: 0,
+        titleSpacing: 16,
+        title: const Text(
+          'Nearby Parks',
+          style: TextStyle(fontWeight: FontWeight.w800),
+        ),
+      ),
+      body: Column(
+        children: [
+          Container(
+            width: double.infinity,
+            color: Colors.white,
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  widget.sortedByUserLocation
+                      ? 'Sorted by distance from your location'
+                      : 'Sorted by distance from the current map area',
+                  style: TextStyle(
+                    color: Colors.grey.shade700,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 7,
+                      ),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFE7F0E3),
+                        borderRadius: BorderRadius.circular(999),
+                      ),
+                      child: Text(
+                        '${visibleParks.length} park${visibleParks.length == 1 ? '' : 's'}',
+                        style: const TextStyle(
+                          color: Color(0xFF365A38),
+                          fontWeight: FontWeight.w800,
+                        ),
+                      ),
+                    ),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 7,
+                      ),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFF1F3F4),
+                        borderRadius: BorderRadius.circular(999),
+                      ),
+                      child: Text(
+                        'Within ${_radiusKm.toStringAsFixed(_radiusKm < 10 ? 1 : 0)} km',
+                        style: const TextStyle(
+                          color: Color(0xFF4F5B51),
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    ...activeLabels.map(
+                      (label) => Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 7,
+                        ),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF365A38),
+                          borderRadius: BorderRadius.circular(999),
+                        ),
+                        child: Text(
+                          label,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 14),
+                SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: Row(
+                    children: [
+                      ...widget.filterOptions.map(
+                        (opt) => Padding(
+                          padding: const EdgeInsets.only(right: 8),
+                          child: _buildFilterChip(opt),
+                        ),
+                      ),
+                      if (_selectedFilters.isNotEmpty)
+                        TextButton(
+                          onPressed: () {
+                            setState(() {
+                              _selectedFilters.clear();
+                            });
+                          },
+                          child: const Text('Clear'),
+                        ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Container(
+                  width: double.infinity,
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFF5F0E8),
+                    borderRadius: BorderRadius.circular(18),
+                  ),
+                  padding: const EdgeInsets.all(14),
+                  child: Row(
+                    children: [
+                      const Icon(
+                        Icons.travel_explore_rounded,
+                        color: Color(0xFF8B5E3C),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          nextRadiusKm == null
+                              ? 'You’ve searched as far as 50 km from here.'
+                              : 'Need more options? Search farther out to ${nextRadiusKm.toStringAsFixed(nextRadiusKm < 10 ? 1 : 0)} km.',
+                          style: const TextStyle(
+                            color: Color(0xFF5E4633),
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      ElevatedButton(
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF8B5E3C),
+                          foregroundColor: Colors.white,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                        ),
+                        onPressed: nextRadiusKm == null || _isLoadingMore
+                            ? null
+                            : _searchFarther,
+                        child: _isLoadingMore
+                            ? const SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  valueColor: AlwaysStoppedAnimation<Color>(
+                                    Colors.white,
+                                  ),
+                                ),
+                              )
+                            : const Text(
+                                'Search farther',
+                                style: TextStyle(fontWeight: FontWeight.w800),
+                              ),
+                      ),
+                    ],
+                  ),
+                ),
+                if (_loadError != null) ...[
+                  const SizedBox(height: 8),
+                  Text(
+                    _loadError!,
+                    style: TextStyle(
+                      color: Colors.red.shade700,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          Expanded(
+            child: visibleParks.isEmpty
+                ? Center(
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 28),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            Icons.map_outlined,
+                            size: 54,
+                            color: Colors.grey.shade400,
+                          ),
+                          const SizedBox(height: 14),
+                          const Text(
+                            'No parks match the current filters.',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.w800,
+                              color: Color(0xFF365A38),
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            'Try clearing filters or searching farther from your area.',
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              color: Colors.grey.shade700,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  )
+                : ListView.separated(
+                    padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
+                    itemCount: visibleParks.length,
+                    separatorBuilder: (_, __) => const SizedBox(height: 12),
+                    itemBuilder: (context, index) {
+                      final park = visibleParks[index];
+                      final services = _servicesForPark(park);
+                      final distanceLabel = _formatDistance(park.distance);
+
+                      return Material(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(20),
+                        child: InkWell(
+                          borderRadius: BorderRadius.circular(20),
+                          onTap: () => Navigator.of(context).pop(park),
+                          child: Padding(
+                            padding: const EdgeInsets.all(16),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Row(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Container(
+                                      width: 48,
+                                      height: 48,
+                                      decoration: BoxDecoration(
+                                        color: const Color(0xFFE7F0E3),
+                                        borderRadius: BorderRadius.circular(15),
+                                      ),
+                                      child: Icon(
+                                        services.contains('Off-leash Dog Park')
+                                            ? Icons.pets_rounded
+                                            : Icons.park_rounded,
+                                        color: const Color(0xFF365A38),
+                                      ),
+                                    ),
+                                    const SizedBox(width: 12),
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Text(
+                                            park.name,
+                                            style: const TextStyle(
+                                              fontSize: 17,
+                                              fontWeight: FontWeight.w800,
+                                              color: Color(0xFF2F3E2E),
+                                            ),
+                                          ),
+                                          const SizedBox(height: 4),
+                                          Row(
+                                            children: [
+                                              if (distanceLabel.isNotEmpty) ...[
+                                                Icon(
+                                                  Icons.near_me_rounded,
+                                                  size: 15,
+                                                  color: Colors.grey.shade700,
+                                                ),
+                                                const SizedBox(width: 4),
+                                                Text(
+                                                  distanceLabel,
+                                                  style: TextStyle(
+                                                    color: Colors.grey.shade700,
+                                                    fontWeight: FontWeight.w700,
+                                                  ),
+                                                ),
+                                              ],
+                                              if (park.userCount > 0) ...[
+                                                const SizedBox(width: 10),
+                                                Icon(
+                                                  Icons.people_alt_rounded,
+                                                  size: 15,
+                                                  color: Colors.grey.shade700,
+                                                ),
+                                                const SizedBox(width: 4),
+                                                Text(
+                                                  '${park.userCount} here now',
+                                                  style: TextStyle(
+                                                    color: Colors.grey.shade700,
+                                                    fontWeight: FontWeight.w700,
+                                                  ),
+                                                ),
+                                              ],
+                                            ],
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                    const SizedBox(width: 8),
+                                    const Icon(
+                                      Icons.chevron_right_rounded,
+                                      color: Color(0xFF365A38),
+                                    ),
+                                  ],
+                                ),
+                                if (services.isNotEmpty) ...[
+                                  const SizedBox(height: 14),
+                                  Wrap(
+                                    spacing: 8,
+                                    runSpacing: 8,
+                                    children: services.take(3).map((service) {
+                                      final isDogPark =
+                                          service == 'Off-leash Dog Park';
+                                      return Container(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 10,
+                                          vertical: 7,
+                                        ),
+                                        decoration: BoxDecoration(
+                                          color: isDogPark
+                                              ? const Color(0xFFF3E8DB)
+                                              : const Color(0xFFF1F3F4),
+                                          borderRadius:
+                                              BorderRadius.circular(999),
+                                        ),
+                                        child: Text(
+                                          service,
+                                          style: TextStyle(
+                                            color: isDogPark
+                                                ? const Color(0xFF8B5E3C)
+                                                : const Color(0xFF4F5B51),
+                                            fontWeight: FontWeight.w700,
+                                          ),
+                                        ),
+                                      );
+                                    }).toList(growable: false),
+                                  ),
+                                ],
+                              ],
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class MapTab extends StatefulWidget {
   final VoidCallback? onXpGained;
 
@@ -850,6 +1445,88 @@ class _MapTabState extends State<MapTab>
   bool _isDogParkFor(Park park) {
     final services = _parkServicesById[park.id] ?? park.services;
     return park.isDogPark || services.contains(_dogParkFilterValue);
+  }
+
+  List<String> _servicesForPark(Park park) {
+    return _parkServicesById[park.id] ??
+        _mergeDogParkServiceFlag(
+          park.services,
+          isDogPark: park.isDogPark,
+        );
+  }
+
+  bool _parkMatchesSelectedFilters(Park park) {
+    if (_selectedFilters.isEmpty) return true;
+    final services = _servicesForPark(park);
+    return services.any((service) => _selectedFilters.contains(service));
+  }
+
+  List<Park> _buildSortedParkList(LatLng anchor) {
+    final filtered = _allParks.where(_parkMatchesSelectedFilters).map((park) {
+      final copy = Park(
+        id: park.id,
+        name: park.name,
+        latitude: park.latitude,
+        longitude: park.longitude,
+        userCount: park.userCount,
+        distance: park.calculateDistance(anchor.latitude, anchor.longitude),
+        services: _servicesForPark(park),
+        isDogPark: _isDogParkFor(park),
+      );
+      return copy;
+    }).toList();
+
+    filtered.sort((a, b) {
+      final distanceA = a.distance ?? double.infinity;
+      final distanceB = b.distance ?? double.infinity;
+      final byDistance = distanceA.compareTo(distanceB);
+      if (byDistance != 0) return byDistance;
+
+      final byDogPark = (_isDogParkFor(b) ? 1 : 0) - (_isDogParkFor(a) ? 1 : 0);
+      if (byDogPark != 0) return byDogPark;
+
+      return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+    });
+
+    return filtered;
+  }
+
+  Future<void> _openParkListPage() async {
+    final userAnchor = await _bestKnownUserLocation();
+    final anchor = userAnchor ?? _currentMapCenter;
+    final parks = _buildSortedParkList(anchor);
+
+    if (!mounted) return;
+
+    final selectedPark = await Navigator.of(context).push<Park>(
+      MaterialPageRoute(
+        builder: (_) => _ExploreParkListPage(
+          initialParks: parks,
+          initialFilters: Set<String>.from(_selectedFilters),
+          filterOptions: _filterOptions,
+          parkServicesById: {
+            for (final park in parks) park.id: _servicesForPark(park),
+          },
+          sortedByUserLocation: userAnchor != null,
+          anchor: anchor,
+          initialRadiusKm: 0.65,
+          locationService: _locationService,
+        ),
+      ),
+    );
+
+    if (!mounted || selectedPark == null) return;
+
+    final position = LatLng(selectedPark.latitude, selectedPark.longitude);
+    await _moveCameraTo(position, zoom: 16);
+    if (!mounted) return;
+
+    await _showUsersInPark(
+      selectedPark.id,
+      selectedPark.name,
+      selectedPark.latitude,
+      selectedPark.longitude,
+    );
   }
 
   String? _parkSnippetFor(Park park) {
@@ -4335,6 +5012,22 @@ class _MapTabState extends State<MapTab>
                   ),
                 ),
 
+                Positioned(
+                  bottom: 80,
+                  left: 16,
+                  child: FloatingActionButton.extended(
+                    heroTag: 'parks_list',
+                    backgroundColor: Colors.white,
+                    foregroundColor: const Color(0xFF365A38),
+                    onPressed: _openParkListPage,
+                    icon: const Icon(Icons.format_list_bulleted_rounded),
+                    label: const Text(
+                      'Parks',
+                      style: TextStyle(fontWeight: FontWeight.w800),
+                    ),
+                  ),
+                ),
+
                 // Walk button
                 Positioned(
                   left: 16,
@@ -4584,14 +5277,7 @@ class _MapTabState extends State<MapTab>
   Future<void> _performFilterApplication() async {
     final filtered = _selectedFilters.isEmpty
         ? _allParks
-        : _allParks.where((p) {
-            final svcs = _parkServicesById[p.id] ??
-                _mergeDogParkServiceFlag(
-                  p.services,
-                  isDogPark: p.isDogPark,
-                );
-            return svcs.any((s) => _selectedFilters.contains(s));
-          }).toList();
+        : _allParks.where(_parkMatchesSelectedFilters).toList();
 
     await _applyMarkerDiff(filtered);
     _rebuildParksListeners();

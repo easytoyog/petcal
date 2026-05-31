@@ -613,7 +613,7 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
   }) {
     return InputDecoration(
       filled: true,
-      fillColor: Colors.white.withOpacity(fillOpacity),
+      fillColor: Colors.white.withValues(alpha: fillOpacity),
       hintText: hint,
       hintStyle: const TextStyle(color: Colors.white70),
       prefixIcon: Icon(icon, color: Colors.white),
@@ -636,6 +636,145 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
       await _loginUsingEmailPassword(
         email: emailController.text.trim(),
         password: passwordController.text,
+      );
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  ({String firstName, String lastName, String displayName}) _splitGoogleName(
+    String? rawName,
+  ) {
+    final displayName = (rawName ?? '').trim();
+    if (displayName.isEmpty) {
+      return (
+        firstName: 'Dog',
+        lastName: 'Parent',
+        displayName: 'Dog Parent',
+      );
+    }
+
+    final parts = displayName
+        .split(RegExp(r'\s+'))
+        .where((part) => part.trim().isNotEmpty)
+        .toList(growable: false);
+    if (parts.isEmpty) {
+      return (
+        firstName: 'Dog',
+        lastName: 'Parent',
+        displayName: 'Dog Parent',
+      );
+    }
+    if (parts.length == 1) {
+      return (
+        firstName: parts.first,
+        lastName: 'Pet Parent',
+        displayName: displayName,
+      );
+    }
+
+    return (
+      firstName: parts.first,
+      lastName: parts.sublist(1).join(' '),
+      displayName: displayName,
+    );
+  }
+
+  Future<bool> _ensureGoogleOwnerProfile(User user) async {
+    final ownerRef =
+        FirebaseFirestore.instance.collection('owners').doc(user.uid);
+    final snap = await ownerRef.get();
+
+    final data = snap.data() ?? const <String, dynamic>{};
+    if (data['active'] == false) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              "Your account has been deactivated. Please contact support.",
+            ),
+          ),
+        );
+      }
+      await FirebaseAuth.instance.signOut();
+      return false;
+    }
+
+    final name = _splitGoogleName(user.displayName);
+    final payload = <String, dynamic>{
+      'email': user.email ?? '',
+      'firstName': (data['firstName'] ?? '').toString().trim().isNotEmpty
+          ? data['firstName']
+          : name.firstName,
+      'lastName': (data['lastName'] ?? '').toString().trim().isNotEmpty
+          ? data['lastName']
+          : name.lastName,
+      'displayName': name.displayName,
+      'phone': data['phone'] ?? '',
+      'address': data['address'] ??
+          {
+            'line1': '',
+            'city': '',
+            'state': '',
+            'postalCode': '',
+            'country': '',
+          },
+      'active': data['active'] ?? true,
+      'updatedAt': FieldValue.serverTimestamp(),
+    };
+
+    if (!snap.exists) {
+      payload.addAll({
+        'level': 1,
+        'xp': 0,
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+    }
+
+    await ownerRef.set(payload, SetOptions(merge: true));
+    return !snap.exists;
+  }
+
+  Future<void> _attemptGoogleLogin() async {
+    if (_isLoading) return;
+    setState(() => _isLoading = true);
+
+    try {
+      final provider = GoogleAuthProvider()..addScope('email');
+      final userCredential =
+          await FirebaseAuth.instance.signInWithProvider(provider);
+      final user = userCredential.user;
+      if (user == null) return;
+
+      await user.reload();
+      final refreshedUser = FirebaseAuth.instance.currentUser ?? user;
+      final createdOwner = await _ensureGoogleOwnerProfile(refreshedUser);
+      if (!createdOwner && !mounted) return;
+
+      await _saveUserFcmToken(refreshedUser);
+      await upsertNotificationPrefs();
+
+      if (!mounted) return;
+      Navigator.of(context).pushNamedAndRemoveUntil(
+        createdOwner ? '/petDetails' : '/profile',
+        (route) => false,
+      );
+    } on FirebaseAuthException catch (e) {
+      if (!mounted) return;
+      String message = e.message ?? 'Google sign-in failed.';
+      if (e.code == 'account-exists-with-different-credential') {
+        message =
+            'That email already uses a different sign-in method. Try your password login first.';
+      } else if (e.code == 'invalid-credential') {
+        message = 'Google sign-in could not be completed. Please try again.';
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(message)),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Google sign-in failed: $e')),
       );
     } finally {
       if (mounted) setState(() => _isLoading = false);
@@ -820,6 +959,46 @@ class _ModernLoginScreenState extends State<ModernLoginScreen> {
                               )
                             : const Text("Log in",
                                 style: TextStyle(fontSize: 18)),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    SizedBox(
+                      width: MediaQuery.of(context).size.width / 1.3,
+                      child: OutlinedButton.icon(
+                        style: OutlinedButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(vertical: 14.0),
+                          side: const BorderSide(color: Colors.white70),
+                          foregroundColor: Colors.white,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          backgroundColor: Colors.white.withValues(alpha: 0.08),
+                        ),
+                        onPressed: _isLoading ? null : _attemptGoogleLogin,
+                        icon: Container(
+                          width: 26,
+                          height: 26,
+                          decoration: const BoxDecoration(
+                            color: Colors.white,
+                            shape: BoxShape.circle,
+                          ),
+                          alignment: Alignment.center,
+                          child: const Text(
+                            'G',
+                            style: TextStyle(
+                              color: Color(0xFF4285F4),
+                              fontWeight: FontWeight.w900,
+                              fontSize: 16,
+                            ),
+                          ),
+                        ),
+                        label: const Text(
+                          'Continue with Google',
+                          style: TextStyle(
+                            fontSize: 17,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
                       ),
                     ),
                     const SizedBox(height: 20),

@@ -361,7 +361,7 @@ class _UsersInParkScaffoldState extends State<_UsersInParkScaffold> {
                     tooltip: _isLiked ? 'Unlike' : 'Like Park',
                     onPressed: _toggleLike,
                     icon: Icon(
-                      _isLiked ? Icons.thumb_up : Icons.thumb_up_outlined,
+                      _isLiked ? Icons.favorite : Icons.favorite_border,
                     ),
                   ),
                 ],
